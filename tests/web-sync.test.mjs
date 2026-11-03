@@ -15,10 +15,12 @@ function client(initial = {}) {
       value: '', textContent: '', innerHTML: '', hidden: false, listeners: {},
       classList: { toggle(name, value) { this[name] = value; }, add() {}, remove() {} },
       addEventListener(name, callback) { this.listeners[name] = callback; },
+      setAttribute(name, value) { this[name] = value; }, removeAttribute(name) { delete this[name]; },
       querySelector(selector) { return element(id === 'join-identity' && selector === 'select'
         ? 'join-select' : id + ':' + selector); },
       querySelectorAll() { return []; },
-      closest() { return element('join-dialog'); }, reset() {}, showModal() {}, close() {}
+      closest() { return element('join-dialog'); }, reset() {},
+      showModal() { this.open = true; }, close() { this.open = false; }
     });
     return elements.get(id);
   }
@@ -149,6 +151,30 @@ test('invite defaults to the other person and allows my second device', () => {
   const form = browser.element('join-form');
   form.listeners.submit({ preventDefault() {}, currentTarget: form });
   assert.equal(browser.api.getState().trips[0].localPerson, 'a');
+});
+
+test('trip delete buttons appear only after entering delete mode and require confirmation', () => {
+  const a = trip(), b = trip();
+  const browser = client(state([a, b], [expense(a.id), expense(b.id)]));
+  browser.run("currentView = 'trips'; render()");
+  const main = browser.element('main');
+  assert.doesNotMatch(main.innerHTML, /data-action="delete-trip"/);
+  const toggle = { dataset: { action: 'toggle-trip-delete' },
+    closest(selector) { return selector === '[data-action]' ? this : null; } };
+  main.listeners.click({ target: toggle });
+  assert.match(main.innerHTML, /data-action="delete-trip"/);
+  assert.match(main.innerHTML, /删除旅行[^>]*>×/);
+  const remove = { dataset: { action: 'delete-trip', tripId: a.id },
+    matches(selector) { return selector === '[data-action="delete-trip"]'; },
+    closest(selector) { return ['[data-trip-id]', '[data-action]'].includes(selector) ? this : null; } };
+  main.listeners.click({ target: remove });
+  assert.equal(browser.element('delete-trip-dialog').open, true);
+  assert.equal(browser.stored().trips.length, 2);
+  browser.element('confirm-delete-trip').listeners.click();
+  assert.equal(browser.stored().trips.length, 1);
+  assert.equal(browser.stored().events.length, 1);
+  assert.equal(browser.api.getState().activeTripId, b.id);
+  assert.doesNotMatch(main.innerHTML, /data-action="delete-trip"/);
 });
 
 test('imported currency text is escaped in settlement HTML', () => {

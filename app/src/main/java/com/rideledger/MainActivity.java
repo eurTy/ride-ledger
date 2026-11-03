@@ -52,6 +52,7 @@ public final class MainActivity extends Activity {
     private SharedPreferences uiPrefs;
     private String currentTripId;
     private String recordFilter = "all";
+    private boolean deletingTrips;
     private int screen = TRIPS;
     private TextView syncView;
 
@@ -74,7 +75,11 @@ public final class MainActivity extends Activity {
 
     @Override public void onStart() {
         super.onStart();
-        if (currentTripId != null && screen != QUICK) { screen = QUICK; render(); }
+        if (currentTripId != null && screen != QUICK) {
+            deletingTrips = false;
+            screen = QUICK;
+            render();
+        }
         lan.start();
         cloud.start();
         updateSync();
@@ -82,7 +87,11 @@ public final class MainActivity extends Activity {
     @Override public void onStop() { cloud.stop(); lan.stop(); super.onStop(); }
     @Override public void onDestroy() { cloud.close(); super.onDestroy(); }
     @Override public void onBackPressed() {
-        if (currentTripId != null && screen != QUICK) { screen = QUICK; render(); }
+        if (currentTripId != null && screen != QUICK) {
+            deletingTrips = false;
+            screen = QUICK;
+            render();
+        }
         else super.onBackPressed();
     }
 
@@ -141,7 +150,11 @@ public final class MainActivity extends Activity {
         background.setColor(screen == target ? Color.rgb(231, 245, 235) : Color.WHITE);
         background.setCornerRadius(dp(11));
         item.setBackground(background);
-        item.setOnClickListener(v -> { screen = target; render(); });
+        item.setOnClickListener(v -> {
+            if (target != TRIPS) deletingTrips = false;
+            screen = target;
+            render();
+        });
         item.setFocusable(true);
         bar.addView(item, new LinearLayout.LayoutParams(0, dp(52), 1));
     }
@@ -149,6 +162,7 @@ public final class MainActivity extends Activity {
     private void selectTrip(LedgerStore.Trip trip) {
         currentTripId = trip.id;
         recordFilter = "all";
+        deletingTrips = false;
         uiPrefs.edit().putString("last_trip", trip.id).apply();
         screen = QUICK;
         render();
@@ -158,9 +172,19 @@ public final class MainActivity extends Activity {
         LinearLayout body = page();
         heading(body, "我的旅行");
         text(body, "选择旅行后，之后每次打开都会直接进入快速记账。", 14, Color.GRAY);
-        row(body, button("新建旅行", this::newTrip), button("加入旅行", this::joinTrip));
-        section(body, "旅行列表");
         List<LedgerStore.Trip> trips = store.trips();
+        if (trips.isEmpty()) row(body, button("新建旅行", this::newTrip), button("加入旅行", this::joinTrip));
+        else {
+            row(body, button("新建旅行", this::newTrip),
+                    button(deletingTrips ? "完成" : "删除旅行", () -> {
+                        deletingTrips = !deletingTrips;
+                        renderTrips();
+                    }));
+            buttonInto(body, "凭邀请码加入", this::joinTrip);
+            if (deletingTrips) text(body, "点右侧 × 选择旅行，随后确认删除。", 13,
+                    Color.rgb(183, 98, 81));
+        }
+        section(body, "旅行列表");
         if (trips.isEmpty()) text(body, "还没有旅行。先新建一个旅行，再给同伴分享邀请码。", 15, Color.GRAY);
         for (LedgerStore.Trip trip : trips) {
             LinearLayout tripRow = new LinearLayout(this);
@@ -170,23 +194,25 @@ public final class MainActivity extends Activity {
                     "\n我：" + trip.nameOf(trip.localPerson) + " · 同伴：" +
                     trip.nameOf("a".equals(trip.localPerson) ? "b" : "a"), () -> selectTrip(trip));
             tripRow.addView(item, new LinearLayout.LayoutParams(0, -2, 1));
-            TextView remove = new TextView(this);
-            remove.setText("删除");
-            remove.setTextSize(14);
-            remove.setGravity(Gravity.CENTER);
-            remove.setPadding(dp(14), dp(12), dp(14), dp(12));
-            remove.setMinHeight(dp(48));
-            remove.setTextColor(Color.rgb(186, 87, 69));
-            remove.setContentDescription("删除旅行 " + trip.name);
-            GradientDrawable removeBackground = new GradientDrawable();
-            removeBackground.setColor(Color.rgb(255, 246, 242));
-            removeBackground.setStroke(dp(1), Color.rgb(240, 197, 187));
-            removeBackground.setCornerRadius(dp(13));
-            remove.setBackground(removeBackground);
-            remove.setOnClickListener(v -> confirmDeleteTrip(trip));
-            LinearLayout.LayoutParams removeParams = new LinearLayout.LayoutParams(-2, -2);
-            removeParams.leftMargin = dp(8);
-            tripRow.addView(remove, removeParams);
+            if (deletingTrips) {
+                TextView remove = new TextView(this);
+                remove.setText("×");
+                remove.setTextSize(24);
+                remove.setGravity(Gravity.CENTER);
+                remove.setMinWidth(dp(44));
+                remove.setMinHeight(dp(44));
+                remove.setTextColor(Color.rgb(186, 87, 69));
+                remove.setContentDescription("删除旅行 " + trip.name);
+                GradientDrawable removeBackground = new GradientDrawable();
+                removeBackground.setColor(Color.rgb(255, 246, 242));
+                removeBackground.setStroke(dp(1), Color.rgb(240, 197, 187));
+                removeBackground.setCornerRadius(dp(13));
+                remove.setBackground(removeBackground);
+                remove.setOnClickListener(v -> confirmDeleteTrip(trip));
+                LinearLayout.LayoutParams removeParams = new LinearLayout.LayoutParams(dp(44), dp(44));
+                removeParams.leftMargin = dp(8);
+                tripRow.addView(remove, removeParams);
+            }
             body.addView(tripRow, fullMargin());
         }
         if (currentTripId != null) {
@@ -214,9 +240,10 @@ public final class MainActivity extends Activity {
                         currentTripId = remaining.isEmpty() ? null : remaining.get(0).id;
                         if (currentTripId == null) prefs.remove("last_trip");
                         else prefs.putString("last_trip", currentTripId);
-                        screen = currentTripId == null ? TRIPS : QUICK;
+                        screen = TRIPS;
                     }
                     prefs.apply();
+                    deletingTrips = false;
                     recordFilter = "all";
                     render();
                     toast("旅行及本机记录已删除");

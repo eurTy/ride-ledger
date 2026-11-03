@@ -13,6 +13,7 @@ if (!state.trips.some(trip => trip.id === state.activeTripId))
   state.activeTripId = state.trips[0]?.id || null;
 let currentView = 'quick';
 let recordFilter = 'all';
+let deletingTrips = false;
 let pendingDeleteTripId = null;
 const RECORD_FILTERS = [
   { key: 'all', label: '全部' },
@@ -318,13 +319,18 @@ function renderTrips(trip) {
     '</strong><small>我：' + escapeHtml(personName(item, item.localPerson)) + ' · 同伴：' +
     escapeHtml(personName(item, item.localPerson === 'a' ? 'b' : 'a')) +
     '</small></span><em>' + (item.id === trip.id ? '当前旅行' : '切换') + '</em></button>' +
-    '<button type="button" class="trip-delete" data-action="delete-trip" data-trip-id="' +
-    escapeHtml(item.id) + '" aria-label="删除旅行 ' + escapeHtml(item.name) + '">删除</button></div>').join('');
+    (deletingTrips ? '<button type="button" class="trip-delete" data-action="delete-trip" data-trip-id="' +
+      escapeHtml(item.id) + '" aria-label="删除旅行 ' + escapeHtml(item.name) + '">×</button>' : '') +
+    '</div>').join('');
   document.getElementById('main').innerHTML =
     '<div class="page-heading"><span class="eyebrow">YOUR TRIPS</span><h1>我的旅行</h1>' +
     '<p>选择一段旅行后，记账页会一直打开它。</p></div>' +
     '<div class="action-row trip-actions"><button class="button primary" data-action="new">新建旅行</button>' +
+    '<button class="button' + (deletingTrips ? ' delete-mode-active' : '') +
+    '" data-action="toggle-trip-delete" aria-pressed="' + deletingTrips + '">' +
+    (deletingTrips ? '完成' : '删除旅行') + '</button>' +
     '<button class="button" data-action="join">凭邀请码加入</button></div>' +
+    (deletingTrips ? '<p class="trip-delete-hint">点右侧 × 选择旅行，随后确认删除。</p>' : '') +
     '<div class="trip-list">' + cards + '</div>' +
     '<div class="section-title"><h2>同行与同步</h2></div>' +
     '<div class="action-row"><button class="button" data-action="invite">分享当前旅行邀请码</button></div>' +
@@ -493,6 +499,7 @@ document.getElementById('main').addEventListener('click', event => {
   if (tripButton && !tripButton.matches('[data-action="delete-trip"]')) {
     state.activeTripId = tripButton.dataset.tripId;
     currentView = 'quick';
+    deletingTrips = false;
     recordFilter = 'all';
     save();
     render();
@@ -504,6 +511,11 @@ document.getElementById('main').addEventListener('click', event => {
   const action = button.dataset.action;
   if (action === 'new') return openDialog('trip');
   if (action === 'join') return openDialog('join');
+  if (action === 'toggle-trip-delete') {
+    deletingTrips = !deletingTrips;
+    renderTrips(activeTrip());
+    return;
+  }
   if (action === 'delete-trip') {
     const trip = state.trips.find(item => item.id === button.dataset.tripId);
     if (!trip) return;
@@ -536,6 +548,7 @@ document.getElementById('bottom-nav').addEventListener('click', event => {
   const button = event.target.closest('[data-view]');
   if (!button) return;
   currentView = button.dataset.view;
+  if (currentView !== 'trips') deletingTrips = false;
   render();
   window.scrollTo(0, 0);
 });
@@ -588,17 +601,23 @@ document.getElementById('confirm-delete-trip').addEventListener('click', () => {
   const id = pendingDeleteTripId;
   if (!id || !state.trips.some(trip => trip.id === id)) return;
   const wasActive = state.activeTripId === id;
-  state.trips = state.trips.filter(trip => trip.id !== id);
-  state.events = state.events.filter(event => event.tripId !== id);
-  delete state.quickPrefs[id];
+  const trips = state.trips.filter(trip => trip.id !== id);
+  const quickPrefs = { ...state.quickPrefs };
+  delete quickPrefs[id];
+  const nextState = { ...state, trips, quickPrefs,
+    events: state.events.filter(event => event.tripId !== id),
+    activeTripId: wasActive ? trips[0]?.id || null : state.activeTripId };
+  try { save(nextState); }
+  catch { toast('删除失败，请检查浏览器存储空间'); return; }
+  state = nextState;
   if (wasActive) {
-    state.activeTripId = state.trips[0]?.id || null;
-    currentView = state.activeTripId ? 'quick' : 'trips';
+    currentView = 'trips';
   }
+  deletingTrips = false;
   recordFilter = 'all';
   pendingDeleteTripId = null;
   document.getElementById('delete-trip-dialog').close();
-  save(); render();
+  render();
   toast('旅行及本机记录已删除');
 });
 document.getElementById('copy-invite').addEventListener('click', async () => {
@@ -647,6 +666,7 @@ document.getElementById('trip-form').addEventListener('submit', event => {
   state.trips.unshift(trip);
   state.activeTripId = trip.id;
   currentView = 'quick';
+  deletingTrips = false;
   recordFilter = 'all';
   save(); closeDialog(form); render(); window.scrollTo(0, 0); syncNow();
 });
@@ -664,6 +684,7 @@ document.getElementById('join-form').addEventListener('submit', event => {
       personB: invite.personB, secret: invite.secret, localPerson });
     state.activeTripId = invite.id;
     currentView = 'quick';
+    deletingTrips = false;
     recordFilter = 'all';
     save(); closeDialog(form); render(); window.scrollTo(0, 0); syncNow();
   } catch (error) { toast(error.message || '邀请码无效'); }
