@@ -30,7 +30,9 @@ android {
 
     buildTypes {
         getByName("debug") {
-            signingConfig = signingConfigs.getByName("testing")
+            if (rootProject.file("signing/debug.keystore").isFile) {
+                signingConfig = signingConfigs.getByName("testing")
+            }
         }
     }
 

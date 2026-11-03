@@ -86,6 +86,8 @@ final class LedgerStore extends SQLiteOpenHelper {
     }
 
     synchronized Trip createTrip(String name, String personA, String personB) {
+        if (personA.trim().equalsIgnoreCase(personB.trim()))
+            throw new IllegalArgumentException("两人的名字请不同，避免记账混淆");
         byte[] key = new byte[32];
         new SecureRandom().nextBytes(key);
         Trip trip = new Trip(UUID.randomUUID().toString(), name.trim(), personA.trim(), personB.trim(),
@@ -94,22 +96,39 @@ final class LedgerStore extends SQLiteOpenHelper {
         return trip;
     }
 
-    synchronized Trip joinTrip(String invite) throws JSONException {
+    synchronized Trip joinTrip(String invite, String localPerson) throws JSONException {
+        Trip candidate = previewInvite(invite);
+        if (!"a".equals(localPerson) && !"b".equals(localPerson))
+            throw new IllegalArgumentException("请选择这台设备的使用者");
+        Trip trip = new Trip(candidate.id, candidate.name, candidate.personA, candidate.personB,
+                candidate.secret, localPerson);
+        if (getTrip(trip.id) != null) throw new IllegalArgumentException("这个旅行已加入");
+        saveTrip(trip);
+        return trip;
+    }
+
+    synchronized Trip previewInvite(String invite) throws JSONException {
         String clean = invite.trim();
         byte[] bytes = Base64.decode(clean, Base64.URL_SAFE | Base64.NO_WRAP);
         JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+        String inviterRole = json.optString("inviterRole", "a");
+        if (!"a".equals(inviterRole) && !"b".equals(inviterRole))
+            throw new IllegalArgumentException("邀请码身份无效");
         Trip trip = new Trip(json.getString("id"), json.getString("name"), json.getString("personA"),
-                json.getString("personB"), json.getString("secret"), "b");
-        if (getTrip(trip.id) != null) throw new IllegalArgumentException("这个旅行已加入");
-        if (Base64.decode(trip.secret, Base64.URL_SAFE | Base64.NO_WRAP).length != 32)
+                json.getString("personB"), json.getString("secret"),
+                "a".equals(inviterRole) ? "b" : "a");
+        if (!trip.id.matches("[a-fA-F0-9-]{36}") || trip.name.trim().isEmpty() ||
+                trip.personA.trim().isEmpty() || trip.personB.trim().isEmpty() ||
+                trip.personA.trim().equalsIgnoreCase(trip.personB.trim()) ||
+                Base64.decode(trip.secret, Base64.URL_SAFE | Base64.NO_WRAP).length != 32)
             throw new IllegalArgumentException("邀请码无效");
-        saveTrip(trip);
         return trip;
     }
 
     synchronized String inviteCode(Trip trip) throws JSONException {
         JSONObject json = new JSONObject().put("id", trip.id).put("name", trip.name)
-                .put("personA", trip.personA).put("personB", trip.personB).put("secret", trip.secret);
+                .put("personA", trip.personA).put("personB", trip.personB)
+                .put("secret", trip.secret).put("inviterRole", trip.localPerson);
         return Base64.encodeToString(json.toString().getBytes(StandardCharsets.UTF_8),
                 Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
     }
@@ -140,6 +159,17 @@ final class LedgerStore extends SQLiteOpenHelper {
                 "SELECT id,name,person_a,person_b,secret,local_person FROM trips WHERE id=?", new String[]{id})) {
             return c.moveToFirst() ? readTrip(c) : null;
         }
+    }
+
+    synchronized boolean deleteTrip(String id) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            db.delete("events", "trip_id=?", new String[]{id});
+            int removed = db.delete("trips", "id=?", new String[]{id});
+            db.setTransactionSuccessful();
+            return removed > 0;
+        } finally { db.endTransaction(); }
     }
 
     private Trip readTrip(Cursor c) {

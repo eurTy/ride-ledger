@@ -12,6 +12,14 @@ state.deviceId ||= crypto.randomUUID();
 if (!state.trips.some(trip => trip.id === state.activeTripId))
   state.activeTripId = state.trips[0]?.id || null;
 let currentView = 'quick';
+let recordFilter = 'all';
+let pendingDeleteTripId = null;
+const RECORD_FILTERS = [
+  { key: 'all', label: '全部' },
+  { key: 'shared', label: '共同支出' },
+  { key: 'opening', label: '原始资金' },
+  { key: 'exchange', label: '换汇记录' }
+];
 function normalizeEventCurrency(event) {
   if (!event?.data) return false;
   let changed = false;
@@ -29,15 +37,22 @@ if (migratedCurrency) localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 let syncing = false;
 let toastTimer;
 
-function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+function save(nextState = state) { localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState)); }
 function activeTrip() { return state.trips.find(trip => trip.id === state.activeTripId); }
+function personName(trip, person) { return person === 'a' ? trip.personA : trip.personB; }
+function personChoiceLabel(trip, person) {
+  return personName(trip, person) + (trip.localPerson === person ? '（我）' : '');
+}
 function eventsFor(id) { return state.events.filter(event => event.tripId === id); }
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, character =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 }
 function base64url(bytes) {
-  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000)
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 function fromBase64url(value) {
   const clean = value.replace(/-/g, '+').replace(/_/g, '/');
@@ -120,8 +135,10 @@ function formatAmount(minor, code) {
 function addEvent(kind, data) {
   const trip = activeTrip();
   if (!trip) throw new Error('请先选择旅行');
-  state.events.push({ id: crypto.randomUUID(), tripId: trip.id, kind, at: Date.now(), data });
-  save();
+  const entry = { id: crypto.randomUUID(), tripId: trip.id, kind, at: Date.now(), data };
+  const nextState = { ...state, events: state.events.concat(entry) };
+  save(nextState);
+  state = nextState;
   render();
   syncNow();
 }
@@ -166,14 +183,14 @@ function debtText(trip, map) {
   const items = [...map].sort(([a], [b]) => a.localeCompare(b))
     .filter(([, amount]) => amount !== 0n).map(([code, amount]) =>
       amount > 0n
-        ? escapeHtml(trip.personB) + ' 应还 ' + escapeHtml(trip.personA) + ' ' + formatAmount(amount, code)
-        : escapeHtml(trip.personA) + ' 应还 ' + escapeHtml(trip.personB) + ' ' + formatAmount(-amount, code));
+        ? escapeHtml(trip.personB) + ' 应还 ' + escapeHtml(trip.personA) + ' ' + escapeHtml(formatAmount(amount, code))
+        : escapeHtml(trip.personA) + ' 应还 ' + escapeHtml(trip.personB) + ' ' + escapeHtml(formatAmount(-amount, code)));
   return items.length ? items.join('<br>') : '目前已结清';
 }
 function eventLabel(trip, event) {
   const d = event.data;
   const name = person => person === 'a' ? trip.personA : trip.personB;
-  if (event.kind === 'opening') return name(d.person) + ' · 期初现金';
+  if (event.kind === 'opening') return name(d.person) + ' · 原始资金';
   if (event.kind === 'topup') return name(d.person) + ' · 补充现金';
   if (event.kind === 'expense') return name(d.payer) + ' · ' + (d.mode === 'personal' ? '个人支出' : '共同支出');
   if (event.kind === 'transfer') return name(d.from) + ' · 还款';
@@ -185,6 +202,44 @@ function eventAmount(event) {
   if (event.kind === 'exchange') return formatAmount(BigInt(d.fromAmount), d.fromCurrency) +
     ' → ' + formatAmount(BigInt(d.toAmount), d.toCurrency);
   return formatAmount(BigInt(d.amount), d.currency);
+}
+function matchesRecordFilter(event) {
+  if (recordFilter === 'all') return true;
+  if (recordFilter === 'shared')
+    return event.kind === 'expense' && event.data.mode !== 'personal';
+  return event.kind === recordFilter;
+}
+function recordTime(timestamp) {
+  const date = new Date(timestamp);
+  const two = value => String(value).padStart(2, '0');
+  return date.getFullYear() + '-' + two(date.getMonth() + 1) + '-' + two(date.getDate()) +
+    ' ' + two(date.getHours()) + ':' + two(date.getMinutes());
+}
+function recordEntries(trip, visible) {
+  const records = visible.filter(matchesRecordFilter);
+  const entries = records.map(event =>
+    '<div class="entry"><div><div class="entry-name">' + escapeHtml(eventLabel(trip, event)) +
+    '</div><div class="entry-meta">' + escapeHtml(recordTime(event.at)) +
+    (event.data.note ? ' · ' + escapeHtml(event.data.note) : '') +
+    '</div></div><div class="entry-right"><span class="entry-amount">' +
+    escapeHtml(eventAmount(event)) + '</span><button class="delete" title="删除记录" data-action="delete" data-event-id="' +
+    escapeHtml(event.id) + '">×</button></div></div>').join('');
+  const empty = recordFilter === 'all'
+    ? '还没有记录。旅途中记下支出，之后在这里复盘。'
+    : '暂无' + RECORD_FILTERS.find(filter => filter.key === recordFilter).label + '，可在“全部”查看其他流水。';
+  return { count: records.length, html: entries || '<div class="empty">' + empty + '</div>' };
+}
+function updateRecordFilter(trip) {
+  const visible = summary(trip).visible;
+  const records = recordEntries(trip, visible);
+  document.querySelector('.entries').innerHTML = records.html;
+  document.getElementById('record-count').textContent =
+    (recordFilter === 'all' ? records.count : records.count + ' / ' + visible.length) + ' 笔';
+  document.querySelectorAll('.record-filter').forEach(button => {
+    const selected = button.dataset.recordFilter === recordFilter;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  });
 }
 function renderQuick(trip) {
   const prefs = state.quickPrefs[trip.id] || {};
@@ -211,9 +266,9 @@ function renderQuick(trip) {
     '<span class="routing-label">谁付款</span>' +
     '<div class="payer-chips">' +
     '<label><input type="radio" name="payer" value="a" ' + (payer === 'a' ? 'checked' : '') +
-    '><span>' + escapeHtml(trip.personA) + '</span></label>' +
+    '><span>' + escapeHtml(personChoiceLabel(trip, 'a')) + '</span></label>' +
     '<label><input type="radio" name="payer" value="b" ' + (payer === 'b' ? 'checked' : '') +
-    '><span>' + escapeHtml(trip.personB) + '</span></label></div></div>' +
+    '><span>' + escapeHtml(personChoiceLabel(trip, 'b')) + '</span></label></div></div>' +
     '<div class="split-row"><label for="quick-mode" class="routing-label">怎么分摊</label>' +
     '<div class="split-select"><select id="quick-mode" name="mode" aria-label="怎么分摊">' +
     '<option value="shared" ' + (mode === 'shared' ? 'selected' : '') + '>两人平摊</option>' +
@@ -230,17 +285,7 @@ function renderQuick(trip) {
 }
 function renderReview(trip) {
   const sum = summary(trip);
-  const entries = sum.visible.length ? sum.visible.map(event => {
-    const date = new Date(event.at).toLocaleString('zh-CN', {
-      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
-    });
-    return '<div class="entry"><div><div class="entry-name">' + escapeHtml(eventLabel(trip, event)) +
-      '</div><div class="entry-meta">' + escapeHtml(date) +
-      (event.data.note ? ' · ' + escapeHtml(event.data.note) : '') +
-      '</div></div><div class="entry-right"><span class="entry-amount">' +
-      escapeHtml(eventAmount(event)) + '</span><button class="delete" title="删除记录" data-action="delete" data-event-id="' +
-      escapeHtml(event.id) + '">×</button></div></div>';
-  }).join('') : '<div class="empty">还没有记录。旅途中记下支出，之后在这里复盘。</div>';
+  const records = recordEntries(trip, sum.visible);
   document.getElementById('main').innerHTML =
     '<div class="page-heading"><span class="eyebrow">TRIP REVIEW</span><h1>旅行复盘</h1><p>' +
     escapeHtml(trip.name) + '</p></div>' +
@@ -251,22 +296,30 @@ function renderReview(trip) {
     escapeHtml(balanceText(sum.cashA)) + '</strong></div><div class="balance-row"><span>' +
     escapeHtml(trip.personB) + '</span><strong>' + escapeHtml(balanceText(sum.cashB)) +
     '</strong></div></div><div class="card"><h3>两人结算</h3><div class="settlement">' +
-    debtText(trip, sum.debt) + '</div><p class="muted">不同货币分别结算，期初现金不产生欠款。</p></div></div>' +
+    debtText(trip, sum.debt) + '</div><p class="muted">不同货币分别结算，原始资金不产生欠款。</p></div></div>' +
     '<div class="section-title"><h2>现金与结算</h2></div><div class="action-row">' +
-    '<button class="button" data-action="opening">填写期初现金</button>' +
+    '<button class="button" data-action="opening">填写原始资金</button>' +
     '<button class="button" data-action="topup">补充现金</button>' +
     '<button class="button" data-action="transfer">两人还款</button>' +
     '<button class="button" data-action="exchange">记录换汇</button></div>' +
-    '<div class="section-title"><h2>旅行记录</h2><span class="muted">' + sum.visible.length +
-    ' 笔</span></div><div class="entries">' + entries + '</div>' +
+    '<div class="section-title"><h2>旅行记录</h2><span class="muted" id="record-count">' +
+    (recordFilter === 'all' ? records.count : records.count + ' / ' + sum.visible.length) +
+    ' 笔</span></div><div class="record-filters" role="group" aria-label="筛选旅行记录">' +
+    RECORD_FILTERS.map(filter => '<button type="button" class="record-filter' +
+      (filter.key === recordFilter ? ' active' : '') + '" data-action="record-filter" data-record-filter="' +
+      filter.key + '" aria-pressed="' + (filter.key === recordFilter) + '">' + filter.label + '</button>').join('') +
+    '</div><div class="entries">' + records.html + '</div>' +
     '<p class="sync-note">网页记录保存在当前浏览器。服务可用时会自动同步；安卓应用可在无互联网热点下直连同步。</p>';
 }
 function renderTrips(trip) {
   const cards = state.trips.map(item =>
-    '<button class="trip-item ' + (item.id === trip.id ? 'active' : '') +
+    '<div class="trip-item-row"><button class="trip-item ' + (item.id === trip.id ? 'active' : '') +
     '" data-trip-id="' + escapeHtml(item.id) + '"><span><strong>' + escapeHtml(item.name) +
-    '</strong><small>' + escapeHtml(item.personA) + ' · ' + escapeHtml(item.personB) +
-    '</small></span><em>' + (item.id === trip.id ? '当前旅行' : '切换') + '</em></button>').join('');
+    '</strong><small>我：' + escapeHtml(personName(item, item.localPerson)) + ' · 同伴：' +
+    escapeHtml(personName(item, item.localPerson === 'a' ? 'b' : 'a')) +
+    '</small></span><em>' + (item.id === trip.id ? '当前旅行' : '切换') + '</em></button>' +
+    '<button type="button" class="trip-delete" data-action="delete-trip" data-trip-id="' +
+    escapeHtml(item.id) + '" aria-label="删除旅行 ' + escapeHtml(item.name) + '">删除</button></div>').join('');
   document.getElementById('main').innerHTML =
     '<div class="page-heading"><span class="eyebrow">YOUR TRIPS</span><h1>我的旅行</h1>' +
     '<p>选择一段旅行后，记账页会一直打开它。</p></div>' +
@@ -308,18 +361,34 @@ function openDialog(name) {
   const trip = activeTrip();
   if (trip) {
     document.querySelectorAll('.person-select').forEach(select => {
-      select.innerHTML = '<option value="a">' + escapeHtml(trip.personA) +
-        '</option><option value="b">' + escapeHtml(trip.personB) + '</option>';
+      select.innerHTML = '<option value="a">' + escapeHtml(personChoiceLabel(trip, 'a')) +
+        '</option><option value="b">' + escapeHtml(personChoiceLabel(trip, 'b')) + '</option>';
       select.value = trip.localPerson;
     });
+  }
+  if (name === 'join') {
+    document.getElementById('join-form').reset();
+    document.getElementById('join-identity').hidden = true;
+    document.getElementById('join-preview').textContent = '';
   }
   document.getElementById(name + '-dialog').showModal();
 }
 function closeDialog(form) { form.closest('dialog').close(); form.reset(); }
 function inviteCode(trip) {
   return base64url(encoder.encode(JSON.stringify({
-    id: trip.id, name: trip.name, personA: trip.personA, personB: trip.personB, secret: trip.secret
+    id: trip.id, name: trip.name, personA: trip.personA, personB: trip.personB,
+    secret: trip.secret, inviterRole: trip.localPerson
   })));
+}
+function parseInviteCode(raw) {
+  const invite = JSON.parse(decoder.decode(fromBase64url(String(raw).trim())));
+  if (!/^[a-f0-9-]{36}$/i.test(invite.id) || typeof invite.secret !== 'string' ||
+      fromBase64url(invite.secret).length !== 32 ||
+      ![invite.name, invite.personA, invite.personB].every(value =>
+        typeof value === 'string' && value.trim()) ||
+      invite.personA.trim().toLocaleLowerCase() === invite.personB.trim().toLocaleLowerCase() ||
+      !['a', 'b'].includes(invite.inviterRole || 'a')) throw new Error('邀请码无效');
+  return invite;
 }
 function setBadge(text, waiting = false) {
   const badge = document.getElementById('sync-badge');
@@ -359,33 +428,43 @@ async function syncNow() {
   syncing = true;
   setBadge('正在同步');
   let added = 0;
+  let failed = false;
   try {
-    for (const trip of state.trips) {
-      const response = await fetch('/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Trip-Token': await tripToken(trip) },
-        body: JSON.stringify({
-          tripId: trip.id, deviceId: state.deviceId, bundle: await encryptedBundle(trip)
-        })
-      });
-      if (!response.ok) throw new Error('服务返回 ' + response.status);
-      const { snapshots } = await response.json();
-      const known = new Set(state.events.map(event => event.id));
-      for (const bundle of snapshots) {
-        for (const event of await decryptBundle(trip, bundle)) {
-          if (event.tripId !== trip.id || !event.id || known.has(event.id)) continue;
-          normalizeEventCurrency(event);
-          state.events.push(event);
-          known.add(event.id);
-          added++;
+    for (const trip of [...state.trips]) {
+      if (!state.trips.some(current => current.id === trip.id)) continue;
+      try {
+        const response = await fetch('/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Trip-Token': await tripToken(trip) },
+          body: JSON.stringify({
+            tripId: trip.id, deviceId: state.deviceId, bundle: await encryptedBundle(trip)
+          })
+        });
+        if (!response.ok) throw new Error('服务返回 ' + response.status);
+        const { snapshots } = await response.json();
+        if (!state.trips.some(current => current.id === trip.id)) continue;
+        for (const bundle of snapshots) {
+          const incoming = await decryptBundle(trip, bundle);
+          if (!state.trips.some(current => current.id === trip.id)) break;
+          const known = new Set(state.events.map(event => event.id));
+          const fresh = [];
+          for (const event of incoming) {
+            if (event.tripId !== trip.id || !event.id || known.has(event.id)) continue;
+            normalizeEventCurrency(event);
+            fresh.push(event);
+            known.add(event.id);
+          }
+          if (!fresh.length) continue;
+          const nextState = { ...state, events: state.events.concat(fresh) };
+          save(nextState);
+          state = nextState;
+          added += fresh.length;
+          if (currentView !== 'quick') render();
         }
-      }
+      } catch { failed = true; }
     }
-    if (added) {
-      save();
-      if (currentView !== 'quick') render();
-    }
-    setBadge(added ? '已同步 · 新增 ' + added + ' 笔' : '已同步');
+    setBadge(failed ? '同步未完成 · 待重试' :
+      added ? '已同步 · 新增 ' + added + ' 笔' : '已同步', failed);
   } catch (error) { setBadge('离线保存 · 待同步', true); }
   finally { syncing = false; }
 }
@@ -411,9 +490,10 @@ document.getElementById('main').addEventListener('click', event => {
     document.querySelector('.currency-history-toggle').setAttribute('aria-expanded', 'false');
   }
   const tripButton = event.target.closest('[data-trip-id]');
-  if (tripButton) {
+  if (tripButton && !tripButton.matches('[data-action="delete-trip"]')) {
     state.activeTripId = tripButton.dataset.tripId;
     currentView = 'quick';
+    recordFilter = 'all';
     save();
     render();
     window.scrollTo(0, 0);
@@ -424,12 +504,30 @@ document.getElementById('main').addEventListener('click', event => {
   const action = button.dataset.action;
   if (action === 'new') return openDialog('trip');
   if (action === 'join') return openDialog('join');
+  if (action === 'delete-trip') {
+    const trip = state.trips.find(item => item.id === button.dataset.tripId);
+    if (!trip) return;
+    pendingDeleteTripId = trip.id;
+    document.getElementById('delete-trip-name').textContent = trip.name;
+    document.getElementById('delete-trip-dialog').showModal();
+    return;
+  }
+  if (action === 'record-filter') {
+    recordFilter = button.dataset.recordFilter;
+    updateRecordFilter(activeTrip());
+    return;
+  }
   if (action === 'delete') {
     if (confirm('删除这笔记录？')) addEvent('delete', { target: button.dataset.eventId });
     return;
   }
   if (action === 'invite') {
-    document.getElementById('invite-code').value = inviteCode(activeTrip());
+    const trip = activeTrip();
+    document.getElementById('invite-code').value = inviteCode(trip);
+    document.getElementById('invite-role-note').textContent =
+      '本机是“' + personName(trip, trip.localPerson) + '”；对方默认以“' +
+      personName(trip, trip.localPerson === 'a' ? 'b' : 'a') +
+      '”加入。自己的另一台设备可在加入时选自己的名字。';
     return openDialog('invite');
   }
   openDialog(action);
@@ -486,34 +584,87 @@ document.getElementById('main').addEventListener('change', event => {
 });
 document.querySelectorAll('dialog .cancel').forEach(button =>
   button.addEventListener('click', () => button.closest('dialog').close()));
+document.getElementById('confirm-delete-trip').addEventListener('click', () => {
+  const id = pendingDeleteTripId;
+  if (!id || !state.trips.some(trip => trip.id === id)) return;
+  const wasActive = state.activeTripId === id;
+  state.trips = state.trips.filter(trip => trip.id !== id);
+  state.events = state.events.filter(event => event.tripId !== id);
+  delete state.quickPrefs[id];
+  if (wasActive) {
+    state.activeTripId = state.trips[0]?.id || null;
+    currentView = state.activeTripId ? 'quick' : 'trips';
+  }
+  recordFilter = 'all';
+  pendingDeleteTripId = null;
+  document.getElementById('delete-trip-dialog').close();
+  save(); render();
+  toast('旅行及本机记录已删除');
+});
 document.getElementById('copy-invite').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText(document.getElementById('invite-code').value); toast('邀请码已复制'); }
   catch { document.getElementById('invite-code').select(); toast('已选中邀请码，请手动复制'); }
 });
+function updateJoinPreview(invite, ownRole) {
+  document.getElementById('join-preview').textContent = '你将以“' + personName(invite, ownRole) +
+    '”加入；另一位是“' + personName(invite, ownRole === 'a' ? 'b' : 'a') + '”。';
+}
+document.querySelector('#join-form textarea[name="code"]').addEventListener('input', event => {
+  const identity = document.getElementById('join-identity');
+  const preview = document.getElementById('join-preview');
+  try {
+    const invite = parseInviteCode(event.target.value);
+    const selected = invite.inviterRole === 'b' ? 'a' : 'b';
+    const select = identity.querySelector('select');
+    for (const role of ['a', 'b']) {
+      select.querySelector('[value="' + role + '"]').textContent =
+        personName(invite, role) + (role === selected ? ' · 同伴（默认）' : ' · 分享者的另一台设备');
+    }
+    select.value = selected;
+    identity.hidden = false;
+    updateJoinPreview(invite, selected);
+  } catch { identity.hidden = true; preview.textContent = ''; }
+});
+document.querySelector('#join-form select[name="localPerson"]').addEventListener('change', event => {
+  try {
+    const invite = parseInviteCode(document.querySelector('#join-form textarea[name="code"]').value);
+    updateJoinPreview(invite, event.target.value);
+  } catch { document.getElementById('join-preview').textContent = ''; }
+});
 document.getElementById('trip-form').addEventListener('submit', event => {
   event.preventDefault();
   const form = event.currentTarget, data = new FormData(form);
+  const name = String(data.get('name')).trim();
+  const personA = String(data.get('personA')).trim();
+  const personB = String(data.get('personB')).trim();
+  if (!name || !personA || !personB) return toast('请填写完整信息');
+  if (personA.toLocaleLowerCase() === personB.toLocaleLowerCase())
+    return toast('两人的名字请不同，避免记账混淆');
   const secret = base64url(crypto.getRandomValues(new Uint8Array(32)));
-  const trip = { id: crypto.randomUUID(), name: data.get('name').trim(),
-    personA: data.get('personA').trim(), personB: data.get('personB').trim(),
+  const trip = { id: crypto.randomUUID(), name,
+    personA, personB,
     secret, localPerson: 'a' };
-  if (!trip.name || !trip.personA || !trip.personB) return toast('请填写完整信息');
   state.trips.unshift(trip);
   state.activeTripId = trip.id;
   currentView = 'quick';
+  recordFilter = 'all';
   save(); closeDialog(form); render(); window.scrollTo(0, 0); syncNow();
 });
 document.getElementById('join-form').addEventListener('submit', event => {
   event.preventDefault();
   const form = event.currentTarget;
   try {
-    const invite = JSON.parse(decoder.decode(fromBase64url(new FormData(form).get('code').trim())));
-    if (!/^[a-f0-9-]{36}$/i.test(invite.id) || fromBase64url(invite.secret).length !== 32 ||
-        !invite.name || !invite.personA || !invite.personB) throw new Error('邀请码无效');
+    const data = new FormData(form);
+    const invite = parseInviteCode(data.get('code'));
+    const localPerson = data.get('localPerson');
+    if (document.getElementById('join-identity').hidden || !['a', 'b'].includes(localPerson))
+      throw new Error('请选择这台设备的使用者');
     if (state.trips.some(trip => trip.id === invite.id)) throw new Error('这个旅行已加入');
-    state.trips.unshift({ ...invite, localPerson: 'b' });
+    state.trips.unshift({ id: invite.id, name: invite.name, personA: invite.personA,
+      personB: invite.personB, secret: invite.secret, localPerson });
     state.activeTripId = invite.id;
     currentView = 'quick';
+    recordFilter = 'all';
     save(); closeDialog(form); render(); window.scrollTo(0, 0); syncNow();
   } catch (error) { toast(error.message || '邀请码无效'); }
 });

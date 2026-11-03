@@ -1,19 +1,37 @@
 param(
     [switch]$SkipSigning,
+    [string]$BuildDir = 'build',
     [string]$Sdk = 'E:\Android_Sdk',
     [string]$JavaHome = 'E:\Android\jbr'
 )
 
 $ErrorActionPreference = 'Stop'
 $project = (Resolve-Path -LiteralPath $PSScriptRoot).Path
-$build = Join-Path $project 'build'
+$build = Join-Path $project $BuildDir
 $buildFull = [System.IO.Path]::GetFullPath($build)
-if (-not $buildFull.StartsWith($project + [System.IO.Path]::DirectorySeparatorChar,
+$buildRoot = [System.IO.Path]::GetFullPath((Join-Path $project 'build'))
+if ($buildFull -ne $buildRoot -and -not $buildFull.StartsWith(
+        $buildRoot + [System.IO.Path]::DirectorySeparatorChar,
         [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Build directory must be inside this project.'
+    throw 'Build directory must be inside this project build folder.'
 }
-if (Test-Path -LiteralPath $build) { Remove-Item -LiteralPath $build -Recurse -Force }
+foreach ($name in @('classes', 'dex', 'dist')) {
+    $target = [System.IO.Path]::GetFullPath((Join-Path $build $name))
+    if (-not $target.StartsWith($buildFull + [System.IO.Path]::DirectorySeparatorChar,
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Build output path is outside the selected build directory.'
+    }
+    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+}
+foreach ($name in @('classes.jar', 'unsigned.apk', 'aligned.apk')) {
+    $target = Join-Path $build $name
+    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force }
+}
 New-Item -ItemType Directory -Path (Join-Path $build 'classes'),(Join-Path $build 'dex'),(Join-Path $build 'dist') | Out-Null
+$toolTemp = Join-Path $build 'tmp'
+New-Item -ItemType Directory -Path $toolTemp -Force | Out-Null
+$env:TEMP = $toolTemp
+$env:TMP = $toolTemp
 
 $tools = Join-Path $Sdk 'build-tools\36.1.0'
 $androidJar = Join-Path $Sdk 'platforms\android-36.1\android.jar'
