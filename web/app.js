@@ -96,17 +96,34 @@ function rememberQuickCurrency(tripId, raw) {
   }
   return currency;
 }
-function refreshQuickCurrencyHistory() {
+function removeQuickCurrencyHistory(tripId, raw) {
+  const code = currencyCode(raw);
+  const prefs = state.quickPrefs[tripId] || {};
+  const history = quickCurrencyHistory(prefs);
+  if (!history.includes(code)) return;
+  const nextPrefs = { ...prefs, currencyHistory: history.filter(item => item !== code) };
+  delete nextPrefs.currencies;
+  const nextState = { ...state, quickPrefs: { ...state.quickPrefs, [tripId]: nextPrefs } };
+  save(nextState);
+  state = nextState;
+}
+function currencyHistoryItems(history) {
+  return history.map(code => '<div class="currency-history-item">' +
+    '<button type="button" data-currency-history="' + code + '">' + code + '</button>' +
+    '<button type="button" class="currency-history-remove" data-currency-history-remove="' + code +
+    '" aria-label="移除曾用货币 ' + code + '">×</button></div>').join('');
+}
+function refreshQuickCurrencyHistory(keepOpen = false) {
   const form = document.getElementById('quick-expense-form');
   if (!form) return;
   const history = quickCurrencyHistory(state.quickPrefs[activeTrip().id] || {});
   const toggle = form.querySelector('.currency-history-toggle');
   const menu = form.querySelector('.currency-history-menu');
+  const open = keepOpen && !menu.hidden && history.length > 0;
   toggle.hidden = history.length === 0;
-  toggle.setAttribute('aria-expanded', 'false');
-  menu.hidden = true;
-  menu.innerHTML = history.map(code =>
-    '<button type="button" data-currency-history="' + code + '">' + code + '</button>').join('');
+  toggle.setAttribute('aria-expanded', String(open));
+  menu.hidden = !open;
+  menu.innerHTML = currencyHistoryItems(history);
 }
 function scale(code) {
   try {
@@ -261,7 +278,7 @@ function renderQuick(trip) {
     '<button type="button" class="currency-history-toggle" aria-label="选择曾用货币" aria-expanded="false"' +
     (history.length ? '' : ' hidden') + '>⌄</button>' +
     '<div class="currency-history-menu" role="group" aria-label="曾用货币" hidden>' +
-    history.map(code => '<button type="button" data-currency-history="' + code + '">' + code + '</button>').join('') +
+    currencyHistoryItems(history) +
     '</div></div></div></div>' +
     '<div class="routing-card"><div class="payer-row" role="group" aria-label="谁付款">' +
     '<span class="routing-label">谁付款</span>' +
@@ -476,6 +493,14 @@ async function syncNow() {
 }
 
 document.getElementById('main').addEventListener('click', event => {
+  const historyRemove = event.target.closest('[data-currency-history-remove]');
+  if (historyRemove) {
+    try {
+      removeQuickCurrencyHistory(activeTrip().id, historyRemove.dataset.currencyHistoryRemove);
+      refreshQuickCurrencyHistory(true);
+    } catch { toast('移除失败，请检查浏览器存储空间'); }
+    return;
+  }
   const historyOption = event.target.closest('[data-currency-history]');
   if (historyOption) {
     const input = document.getElementById('quick-currency');

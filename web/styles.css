@@ -71,7 +71,14 @@ button { cursor: pointer; }
   padding: 10px 9px; border: 0; border-radius: 7px; background: transparent;
   color: #194e37; font-size: 15px; font-weight: 700; text-align: left;
 }
+.currency-history-item { display: grid; grid-template-columns: minmax(0, 1fr) 34px; align-items: center; }
+.currency-history-menu .currency-history-remove {
+  width: 34px; height: 34px; padding: 0; color: #b76251;
+  font-size: 19px; font-weight: 500; text-align: center;
+}
 .currency-history-menu button:hover, .currency-history-menu button:focus-visible { background: #e9f4eb; }
+.currency-history-menu .currency-history-remove:hover,
+.currency-history-menu .currency-history-remove:focus-visible { background: #fff0eb; }
 .note-field input { padding: 15px 14px; font-size: 15px; font-weight: 400; }
 .amount-field input:focus, .note-field input:focus,
 .split-details input:focus, .dialog-form input:focus, .dialog-form select:focus,

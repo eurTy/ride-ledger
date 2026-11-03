@@ -24,6 +24,7 @@ import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.PopupMenu;
+import android.widget.PopupWindow;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
@@ -306,18 +307,7 @@ public final class MainActivity extends Activity {
                 } catch (IllegalArgumentException ignored) { /* Wait for three letters. */ }
             }
         });
-        historyButton.setOnClickListener(v -> {
-            PopupMenu menu = new PopupMenu(this, historyButton);
-            for (String code : quickCurrencyHistory(trip.id, quickCurrency(trip.id)))
-                menu.getMenu().add(code);
-            menu.setOnMenuItemClickListener(item -> {
-                String code = item.getTitle().toString();
-                currency.setText(code);
-                currency.setSelection(code.length());
-                return true;
-            });
-            menu.show();
-        });
+        historyButton.setOnClickListener(v -> showCurrencyHistory(trip.id, currency, historyButton));
         amountRow.addView(amountBox, new LinearLayout.LayoutParams(0, -2, 2));
         LinearLayout.LayoutParams currencyParams = new LinearLayout.LayoutParams(0, -2, 1);
         currencyParams.leftMargin = dp(10);
@@ -867,6 +857,57 @@ public final class MainActivity extends Activity {
         uiPrefs.edit().putString("currency:" + tripId, currency)
                 .putString("currency_history:" + tripId, saved)
                 .remove("currencies:" + tripId).apply();
+    }
+
+    private void removeQuickCurrencyHistory(String tripId, String raw) {
+        String code = Money.code(raw);
+        List<String> history = new ArrayList<>(quickCurrencyHistory(tripId, quickCurrency(tripId)));
+        if (!history.remove(code)) return;
+        uiPrefs.edit().putString("currency_history:" + tripId, String.join(",", history))
+                .remove("currencies:" + tripId).apply();
+    }
+
+    private void showCurrencyHistory(String tripId, EditText currency, TextView anchor) {
+        List<String> history = quickCurrencyHistory(tripId, quickCurrency(tripId));
+        if (history.isEmpty()) return;
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(4), dp(4), dp(4), dp(4));
+        PopupWindow popup = new PopupWindow(list, dp(150), -2, true);
+        popup.setBackgroundDrawable(chip(Color.WHITE, Color.rgb(218, 232, 222), false));
+        popup.setElevation(dp(10));
+        popup.setOutsideTouchable(true);
+        for (String code : history) {
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            TextView choose = new TextView(this);
+            choose.setText(code);
+            choose.setTextSize(16);
+            choose.setTextColor(Color.rgb(25, 78, 55));
+            choose.setGravity(Gravity.CENTER_VERTICAL);
+            choose.setPadding(dp(10), 0, 0, 0);
+            choose.setOnClickListener(v -> {
+                currency.setText(code);
+                currency.setSelection(code.length());
+                popup.dismiss();
+            });
+            row.addView(choose, new LinearLayout.LayoutParams(0, dp(44), 1));
+            TextView remove = new TextView(this);
+            remove.setText("×");
+            remove.setTextSize(20);
+            remove.setTextColor(Color.rgb(183, 98, 81));
+            remove.setGravity(Gravity.CENTER);
+            remove.setContentDescription("移除曾用货币 " + code);
+            remove.setOnClickListener(v -> {
+                removeQuickCurrencyHistory(tripId, code);
+                list.removeView(row);
+                refreshCurrencyHistoryButton(tripId, anchor);
+                if (list.getChildCount() == 0) popup.dismiss();
+            });
+            row.addView(remove, new LinearLayout.LayoutParams(dp(40), dp(44)));
+            list.addView(row, new LinearLayout.LayoutParams(-1, dp(44)));
+        }
+        popup.showAsDropDown(anchor, anchor.getWidth() - dp(150), dp(6));
     }
 
     private void refreshCurrencyHistoryButton(String tripId, TextView button) {
