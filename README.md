@@ -28,17 +28,19 @@
 - 可配置一个云同步服务地址。两人使用不同网络时，经服务中转已加密的旅行记录。云端服务代码在 `sync-server/`。
 - 每笔记录有唯一 ID；重复同步不会重复入账。金额按货币最小单位保存，不用浮点数计算。
 
-## 在本机生成测试 APK
+## 下载与构建 APK
 
-当前电脑已有 Android Studio `E:\Android` 和 Android SDK `E:\Android_Sdk`。在项目目录运行：
+最新的 [v0.1.1-unsigned Release](https://github.com/eurTy/ride-ledger/releases/tag/v0.1.1-unsigned) 提供完全未签名的 `ride-ledger-unsigned.apk`，仅供下载和检查，**不能直接安装到安卓手机**。仓库的 `downloads/` 也放有同一文件，SHA-256 校验值见 `downloads/SHA256SUMS.txt`。
+
+当前电脑已有 Android Studio `E:\Android` 和 Android SDK `E:\Android_Sdk`。在项目目录生成同样的未签名包：
 
 ```powershell
-./build-debug.ps1
+./build-debug.ps1 -SkipSigning
 ```
 
-APK 在 `build/dist/ride-ledger-debug.apk`，仓库中另放了一份可直接下载的 `downloads/ride-ledger-debug.apk`，校验值见 `downloads/SHA256SUMS.txt`。脚本只调用现有 Java 和 Android SDK 工具，不会安装 Flutter。第一次构建会在项目的 `signing/` 下生成调试密钥；请备份它，后续升级安装必须使用相同密钥。这个密钥不用于商店发布，也不会上传到仓库。
+输出为 `build/dist/ride-ledger-unsigned.apk`，这条构建路径不执行签名，也不会创建签名密钥。脚本只调用现有 Java 和 Android SDK 工具，不会安装 Flutter。
 
-安卓 8.0 及以上手机可以直接安装这个测试 APK。把文件下载到手机后打开，按系统提示允许当前文件管理器或浏览器安装应用即可。网页、离线记账和同一热点同步功能均可试用；热点自动发现仍需两部真实手机实测。
+要在安卓 8.0 及以上手机上测试，须运行 `./build-debug.ps1` 生成本机的 `build/dist/ride-ledger-debug.apk`。此时脚本会在 `signing/` 下生成调试密钥并签名；请备份密钥，后续升级安装必须使用相同密钥。密钥不用于商店发布，也不会上传到仓库。热点自动发现仍需两部真实手机实测。
 
 也可以在 Android Studio 中打开项目根目录。Gradle 工程文件已提供；Android Studio 首次同步工程时可能需要下载 Gradle 和 Android Gradle Plugin 项目依赖。
 
@@ -56,7 +58,7 @@ node .\sync-server\server.mjs
 
 ## 试用流程
 
-1. 两部安卓手机都安装同一个 APK。
+1. 先在本机运行 `./build-debug.ps1`，把生成的调试签名 APK 安装到两部安卓手机；未签名 Release 包无法安装。
 2. 手机 A 新建旅行，填写两人名字，分享邀请码给手机 B。
 3. 手机 B 粘贴邀请码加入旅行。两人各自填写本人的期初现金。
 4. 关闭移动数据，在两部手机分别记几笔支出。

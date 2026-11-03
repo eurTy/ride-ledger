@@ -1,1 +1,1 @@
-9e3c2ac85dad832a71647d28754804f5a6dba55f676cceb5e20115934efdbf0a  ride-ledger-debug.apk
+a519f935fcb5a5cb3d30ddf92b3fd45cc0ec48812f0131c1783796683e59cd23  ride-ledger-unsigned.apk

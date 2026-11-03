@@ -1,4 +1,5 @@
 param(
+    [switch]$SkipSigning,
     [string]$Sdk = 'E:\Android_Sdk',
     [string]$JavaHome = 'E:\Android\jbr'
 )
@@ -19,9 +20,14 @@ $androidJar = Join-Path $Sdk 'platforms\android-36.1\android.jar'
 $javac = Join-Path $JavaHome 'bin\javac.exe'
 $jar = Join-Path $JavaHome 'bin\jar.exe'
 $keytool = Join-Path $JavaHome 'bin\keytool.exe'
-foreach ($required in @($javac, $jar, $keytool, $androidJar,
-        (Join-Path $tools 'aapt2.exe'), (Join-Path $tools 'd8.bat'),
-        (Join-Path $tools 'zipalign.exe'), (Join-Path $tools 'apksigner.bat'))) {
+$requiredTools = @($javac, $jar, $androidJar,
+    (Join-Path $tools 'aapt2.exe'), (Join-Path $tools 'd8.bat'),
+    (Join-Path $tools 'zipalign.exe'))
+if (-not $SkipSigning) {
+    $requiredTools += $keytool
+    $requiredTools += (Join-Path $tools 'apksigner.bat')
+}
+foreach ($required in $requiredTools) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Missing required existing tool: $required" }
 }
 
@@ -47,6 +53,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Adding DEX to APK failed.' }
 $aligned = Join-Path $build 'aligned.apk'
 & (Join-Path $tools 'zipalign.exe') -f -p 4 $unsigned $aligned
 if ($LASTEXITCODE -ne 0) { throw 'APK alignment failed.' }
+
+if ($SkipSigning) {
+    $apk = Join-Path $build 'dist\ride-ledger-unsigned.apk'
+    Copy-Item -LiteralPath $aligned -Destination $apk
+    Write-Output "Unsigned APK (inspection only; cannot be installed): $apk"
+    return
+}
 
 $signing = Join-Path $project 'signing'
 $key = Join-Path $signing 'debug.keystore'
