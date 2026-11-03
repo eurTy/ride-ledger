@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#144937">
+  <title>双人旅行账本 · 网页试用</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">↗</span><div><strong>双人旅行账本</strong><small>网页试用版</small></div></div>
+    <span id="sync-badge" class="badge">本机记录</span>
+  </header>
+  <main id="main" class="main"></main>
+  <nav id="bottom-nav" class="bottom-nav" aria-label="主要页面" hidden>
+    <button type="button" data-view="quick">记账</button>
+    <button type="button" data-view="review">复盘</button>
+    <button type="button" data-view="trips">旅行</button>
+  </nav>
+  <dialog id="trip-dialog"><form id="trip-form" class="dialog-form"><div class="dialog-title"><span class="eyebrow">NEW TRIP</span><h2>新建旅行</h2></div><label>旅行名称<input name="name" required placeholder="例如：东南亚骑行"></label><div class="two"><label>你的名字<input name="personA" required value="我"></label><label>同伴名字<input name="personB" required value="同伴"></label></div><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">创建旅行</button></div></form></dialog>
+
+  <dialog id="join-dialog"><form id="join-form" class="dialog-form"><div class="dialog-title"><span class="eyebrow">JOIN TRIP</span><h2>加入旅行</h2></div><p class="muted">粘贴同伴分享的完整邀请码。邀请码含旅行密钥，请仅在同行者之间分享。</p><label>旅行邀请码<textarea name="code" rows="5" required placeholder="在这里粘贴邀请码"></textarea></label><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">加入旅行</button></div></form></dialog>
+
+  <dialog id="opening-dialog"><form id="opening-form" class="dialog-form"><div class="dialog-title"><span class="eyebrow">CASH ON HAND</span><h2>期初现金</h2></div><label>持有人<select name="person" class="person-select"></select></label><div class="two"><label>金额<input name="amount" required inputmode="decimal" placeholder="1000"></label><label>货币代码<input name="currency" required maxlength="3" value="CNY" placeholder="CNY"></label></div><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">保存</button></div></form></dialog>
+
+  <dialog id="topup-dialog"><form id="topup-form" class="dialog-form"><div class="dialog-title"><span class="eyebrow">ADD CASH</span><h2>补充现金</h2></div><label>持有人<select name="person" class="person-select"></select></label><div class="two"><label>金额<input name="amount" required inputmode="decimal" placeholder="500"></label><label>货币代码<input name="currency" required maxlength="3" value="CNY" placeholder="CNY"></label></div><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">保存</button></div></form></dialog>
+
+  <dialog id="transfer-dialog"><form id="transfer-form" class="dialog-form"><div class="dialog-title"><span class="eyebrow">SETTLE UP</span><h2>两人还款</h2></div><label>付款人<select name="from" class="person-select"></select></label><div class="two"><label>还款金额<input name="amount" required inputmode="decimal" placeholder="50"></label><label>货币代码<input name="currency" required maxlength="3" value="CNY" placeholder="CNY"></label></div><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">保存</button></div></form></dialog>
+
+  <dialog id="exchange-dialog"><form id="exchange-form" class="dialog-form"><div class="dialog-title"><span class="eyebrow">CURRENCY EXCHANGE</span><h2>记录换汇</h2></div><label>换汇人<select name="person" class="person-select"></select></label><div class="two"><label>付出金额<input name="fromAmount" required inputmode="decimal" placeholder="100"></label><label>付出货币<input name="fromCurrency" required maxlength="3" value="CNY"></label></div><div class="two"><label>得到金额<input name="toAmount" required inputmode="decimal" placeholder="13"></label><label>得到货币<input name="toCurrency" required maxlength="3" value="EUR"></label></div><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">保存</button></div></form></dialog>
+
+  <dialog id="invite-dialog"><div class="dialog-form"><div class="dialog-title"><span class="eyebrow">INVITE</span><h2>邀请同伴加入</h2></div><p class="muted">邀请码包含旅行密钥。对方可在安卓应用或网页试用版中加入同一旅行。</p><textarea id="invite-code" rows="5" readonly></textarea><div class="dialog-actions"><button type="button" class="button ghost cancel">关闭</button><button type="button" class="button primary" id="copy-invite">复制邀请码</button></div></div></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
