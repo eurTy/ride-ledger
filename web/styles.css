@@ -61,6 +61,7 @@ button { cursor: pointer; }
   flex: none; width: 29px; height: 34px; margin-right: 7px; padding: 0;
   border: 0; border-radius: 8px; background: #e9f4eb; color: #2d7950; font-size: 22px;
 }
+.currency-history-toggle[hidden], .currency-history-menu[hidden] { display: none; }
 .currency-history-menu {
   position: absolute; top: calc(100% + 6px); right: 0; z-index: 4;
   width: 100%; min-width: 110px; padding: 4px; display: grid; gap: 2px;
@@ -121,10 +122,10 @@ button { cursor: pointer; }
   border-radius: 11px; background: #fff; color: #1a5940; font-size: 13px; font-weight: 750;
 }
 .button:hover, .trip-item:hover { border-color: #80b995; }
-.button.primary { border-color: #ec6b53; background: #ec6b53; color: #fff; }
-.button.primary:hover { background: #d95a43; }
+.button.primary { border-color: #21845b; background: #21845b; color: #fff; }
+.button.primary:hover { background: #176d49; }
 .button.ghost { background: transparent; }
-.save-expense { width: 100%; min-height: 58px; font-size: 17px; box-shadow: 0 8px 18px rgba(236,107,83,.18); }
+.save-expense { width: 100%; min-height: 58px; font-size: 17px; box-shadow: 0 8px 18px rgba(33,132,91,.18); }
 .bottom-nav {
   position: fixed; z-index: 4; bottom: 18px; left: 50%; transform: translateX(-50%);
   width: min(560px, calc(100% - 28px)); display: grid; grid-template-columns: repeat(3, 1fr);
@@ -160,9 +161,9 @@ button { cursor: pointer; }
   flex: 0 0 auto; padding: 9px 14px; border: 1px solid #dce8df; border-radius: 999px;
   background: #fff; color: #607969; font-size: 13px; font-weight: 750; cursor: pointer;
 }
-.record-filter:hover { border-color: #e9ad9e; color: #b8503e; }
-.record-filter.active { border-color: #efb7a8; background: #fff0eb; color: #ae4939; }
-.record-filter:focus-visible { outline: 3px solid #f3b8a9; outline-offset: 2px; }
+.record-filter:hover { border-color: #95c6a5; color: #207950; }
+.record-filter.active { border-color: #a8d1b2; background: #e8f5eb; color: #176344; }
+.record-filter:focus-visible { outline: 3px solid #b9ddc4; outline-offset: 2px; }
 .entries { display: grid; gap: 9px; }
 .entry {
   display: flex; justify-content: space-between; align-items: center; gap: 15px;
@@ -191,7 +192,9 @@ button { cursor: pointer; }
   border: 1px solid #f0c5bb; border-radius: 13px;
   background: #fff6f2; color: #ba5745; font-size: 24px; line-height: 1; cursor: pointer;
 }
-.button.delete-mode-active { border-color: #f0c5bb; background: #fff6f2; color: #ba5745; }
+.button.trip-delete-toggle { border-color: #efb7a8; color: #ae4939; }
+.button.trip-delete-toggle:hover { border-color: #d48271; background: #fff6f2; }
+.button.delete-mode-active { border-color: #d6e6d9; background: #fff; color: #1a5940; }
 .trip-delete:hover { background: #ffebe5; }
 .trip-delete:focus-visible { outline: 3px solid #f3b8a9; outline-offset: 2px; }
 .button.danger { border-color: #ce5c48; background: #ce5c48; color: #fff; }
@@ -206,6 +209,8 @@ button { cursor: pointer; }
 .welcome h1 { margin: 10px 0; font-size: clamp(26px, 4vw, 34px); }
 .welcome p { max-width: 440px; color: #82968b; line-height: 1.7; }
 .welcome .action-row { justify-content: center; margin-top: 14px; }
+.welcome-sync { margin-top: 34px; display: grid; justify-items: center; gap: 10px; }
+.welcome-sync h2 { margin: 0; color: #527361; font-size: 14px; }
 dialog { width: min(480px, calc(100% - 28px)); border: 0; border-radius: 18px; padding: 0; box-shadow: 0 24px 80px rgba(16,44,26,.2); }
 dialog::backdrop { background: rgba(15,40,27,.44); }
 .dialog-form { max-height: 85vh; overflow: auto; display: grid; gap: 18px; padding: 30px; }
@@ -219,7 +224,21 @@ dialog::backdrop { background: rgba(15,40,27,.44); }
   width: 100%; padding: 11px 12px; border: 1px solid #dce6de; border-radius: 9px;
   background: #fbfdfa; color: #204c34; outline: 0;
 }
+.dialog-currency-field { display: grid; gap: 8px; }
+.dialog-currency-field > label { color: #527361; font-size: 12px; font-weight: 700; }
+.dialog-currency-field .currency-control { height: 44px; border-radius: 9px; background: #fbfdfa; }
+.dialog-form .dialog-currency-field .currency-control input {
+  flex: 1; width: 0; min-width: 0; height: 100%; padding: 0 10px;
+  border: 0; border-radius: 9px; background: transparent; box-shadow: none;
+  color: #204c34; font-size: 15px; font-weight: 700;
+}
+.dialog-currency-field .currency-history-toggle { width: 27px; height: 28px; margin-right: 5px; font-size: 19px; }
+#exchange-form .currency-history-menu {
+  position: static; width: 100%; min-width: 0; max-height: 184px; overflow-y: auto;
+  box-shadow: 0 6px 16px rgba(24, 66, 40, .09);
+}
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+#exchange-form .two { align-items: start; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 5px; }
 #invite-code { font-size: 11px; word-break: break-all; }
 #toast {

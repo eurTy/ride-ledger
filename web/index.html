@@ -32,7 +32,21 @@
 
   <dialog id="transfer-dialog"><form id="transfer-form" class="dialog-form"><div class="dialog-title"><span class="eyebrow">SETTLE UP</span><h2>两人还款</h2></div><label>付款人<select name="from" class="person-select"></select></label><div class="two"><label>还款金额<input name="amount" required inputmode="decimal" placeholder="50"></label><label>货币代码<input name="currency" required maxlength="3" value="CNY" placeholder="CNY"></label></div><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">保存</button></div></form></dialog>
 
-  <dialog id="exchange-dialog"><form id="exchange-form" class="dialog-form"><div class="dialog-title"><span class="eyebrow">CURRENCY EXCHANGE</span><h2>记录换汇</h2></div><label>换汇人<select name="person" class="person-select"></select></label><div class="two"><label>付出金额<input name="fromAmount" required inputmode="decimal" placeholder="100"></label><label>付出货币<input name="fromCurrency" required maxlength="3" value="CNY"></label></div><div class="two"><label>得到金额<input name="toAmount" required inputmode="decimal" placeholder="13"></label><label>得到货币<input name="toCurrency" required maxlength="3" value="EUR"></label></div><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">保存</button></div></form></dialog>
+  <dialog id="exchange-dialog"><form id="exchange-form" class="dialog-form">
+    <div class="dialog-title"><span class="eyebrow">CURRENCY EXCHANGE</span><h2>记录换汇</h2></div>
+    <label>换汇人<select name="person" class="person-select"></select></label>
+    <div class="two"><label>付出金额<input name="fromAmount" required inputmode="decimal" placeholder="100"></label>
+      <div class="dialog-currency-field"><label for="exchange-from-currency">付出货币</label><div class="currency-control" data-exchange-field="from">
+        <input id="exchange-from-currency" name="fromCurrency" required maxlength="3" autocomplete="off" spellcheck="false" value="CNY">
+        <button type="button" class="currency-history-toggle" aria-label="选择曾用付出货币" aria-expanded="false" hidden>⌄</button>
+      </div><div class="currency-history-menu" role="group" aria-label="曾用付出货币" hidden></div></div></div>
+    <div class="two"><label>得到金额<input name="toAmount" required inputmode="decimal" placeholder="13"></label>
+      <div class="dialog-currency-field"><label for="exchange-to-currency">得到货币</label><div class="currency-control" data-exchange-field="to">
+        <input id="exchange-to-currency" name="toCurrency" required maxlength="3" autocomplete="off" spellcheck="false" value="USD">
+        <button type="button" class="currency-history-toggle" aria-label="选择曾用得到货币" aria-expanded="false" hidden>⌄</button>
+      </div><div class="currency-history-menu" role="group" aria-label="曾用得到货币" hidden></div></div></div>
+    <div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">保存</button></div>
+  </form></dialog>
 
   <dialog id="invite-dialog"><div class="dialog-form"><div class="dialog-title"><span class="eyebrow">INVITE</span><h2>邀请同伴加入</h2></div><p class="muted">邀请码包含旅行密钥。对方可在安卓应用或网页试用版中加入同一旅行。</p><p id="invite-role-note" class="muted"></p><textarea id="invite-code" rows="5" readonly></textarea><div class="dialog-actions"><button type="button" class="button ghost cancel">关闭</button><button type="button" class="button primary" id="copy-invite">复制邀请码</button></div></div></dialog>
   <div id="toast" role="status" aria-live="polite"></div>

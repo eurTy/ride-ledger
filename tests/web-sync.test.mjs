@@ -59,6 +59,57 @@ function state(trips, events = []) {
   return { trips, events, quickPrefs: {}, activeTripId: trips[0]?.id || null, deviceId: randomUUID() };
 }
 
+test('exchange currencies follow the latest visible record and keep removable local history', () => {
+  const browser = client();
+  const t = trip();
+  browser.api.setState(state([t]));
+  assert.deepEqual(JSON.parse(JSON.stringify(browser.run('exchangeDefaults(activeTrip())'))),
+    { fromCurrency: 'CNY', toCurrency: 'USD' });
+
+  const first = { id: randomUUID(), tripId: t.id, kind: 'exchange', at: 100,
+    data: { person: 'a', fromCurrency: 'CNY', fromAmount: 1000,
+      toCurrency: 'USD', toAmount: 140 } };
+  const second = { id: randomUUID(), tripId: t.id, kind: 'exchange', at: 200,
+    data: { person: 'a', fromCurrency: 'USD', fromAmount: 140,
+      toCurrency: 'EUR', toAmount: 130 } };
+  browser.api.setState(state([t], [first]));
+  const nextPrefs = browser.run(`nextExchangePrefs(activeTrip(), ${JSON.stringify(second.data)})`);
+  assert.deepEqual(JSON.parse(JSON.stringify(nextPrefs[t.id])),
+    { exchangeFromHistory: ['CNY'], exchangeToHistory: ['USD'] });
+  const next = state([t], [first, second]);
+  next.quickPrefs = JSON.parse(JSON.stringify(nextPrefs));
+  browser.api.setState(next);
+  assert.deepEqual(JSON.parse(JSON.stringify(browser.run('exchangeDefaults(activeTrip())'))),
+    { fromCurrency: 'USD', toCurrency: 'EUR' });
+  browser.run(`removeExchangeCurrencyHistory(${JSON.stringify(t.id)}, 'to', 'USD', 'EUR')`);
+  assert.equal(browser.run(`exchangeCurrencyHistory(${JSON.stringify(t.id)}, 'to', 'EUR').length`), 0);
+  assert.equal(browser.api.getState().events.length, 2);
+
+  const deleted = { id: randomUUID(), tripId: t.id, kind: 'delete', at: 300,
+    data: { target: second.id } };
+  browser.api.setState({ ...browser.api.getState(), events: [first, second, deleted] });
+  assert.deepEqual(JSON.parse(JSON.stringify(browser.run('exchangeDefaults(activeTrip())'))),
+    { fromCurrency: 'CNY', toCurrency: 'USD' });
+});
+
+test('editing exchange currency immediately remembers the previous code without changing defaults', () => {
+  const browser = client();
+  const t = trip();
+  browser.api.setState(state([t]));
+  browser.run("exchangeDraftCurrency = { from: 'CNY', to: 'USD' }");
+  browser.run(`rememberExchangeDraftCurrency(${JSON.stringify(t.id)}, 'to', 'EUR')`);
+  assert.equal(browser.run(`exchangeCurrencyHistory(${JSON.stringify(t.id)}, 'to', 'EUR').join(',')`),
+    'USD');
+  browser.run(`rememberExchangeDraftCurrency(${JSON.stringify(t.id)}, 'to', 'JPY')`);
+  assert.equal(browser.run(`exchangeCurrencyHistory(${JSON.stringify(t.id)}, 'to', 'JPY').join(',')`),
+    'EUR,USD');
+  browser.run(`removeExchangeCurrencyHistory(${JSON.stringify(t.id)}, 'to', 'EUR', 'JPY')`);
+  assert.equal(browser.run(`exchangeCurrencyHistory(${JSON.stringify(t.id)}, 'to', 'JPY').join(',')`),
+    'USD');
+  assert.deepEqual(JSON.parse(JSON.stringify(browser.run('exchangeDefaults(activeTrip())'))),
+    { fromCurrency: 'CNY', toCurrency: 'USD' });
+});
+
 test('a large encrypted ledger can be encoded and decoded', async () => {
   const browser = client();
   const t = trip();

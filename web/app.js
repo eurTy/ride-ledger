@@ -15,6 +15,7 @@ let currentView = 'quick';
 let recordFilter = 'all';
 let deletingTrips = false;
 let pendingDeleteTripId = null;
+let exchangeDraftCurrency = null;
 const RECORD_FILTERS = [
   { key: 'all', label: '全部' },
   { key: 'shared', label: '共同支出' },
@@ -113,6 +114,91 @@ function currencyHistoryItems(history) {
     '<button type="button" class="currency-history-remove" data-currency-history-remove="' + code +
     '" aria-label="移除曾用货币 ' + code + '">×</button></div>').join('');
 }
+function exchangeDefaults(trip) {
+  for (const event of summary(trip).visible) {
+    if (event.kind !== 'exchange') continue;
+    try {
+      const fromCurrency = currencyCode(event.data.fromCurrency);
+      const toCurrency = currencyCode(event.data.toCurrency);
+      if (fromCurrency !== toCurrency) return { fromCurrency, toCurrency };
+    } catch { /* Skip a malformed imported record. */ }
+  }
+  return { fromCurrency: 'CNY', toCurrency: 'USD' };
+}
+function exchangeHistoryKey(field) {
+  return field === 'from' ? 'exchangeFromHistory' : 'exchangeToHistory';
+}
+function exchangeCurrencyHistory(tripId, field, current) {
+  const prefs = state.quickPrefs[tripId] || {};
+  const stored = prefs[exchangeHistoryKey(field)];
+  const history = [];
+  let selected = '';
+  try { selected = currencyCode(current); } catch { /* Allow a partial input. */ }
+  for (const raw of Array.isArray(stored) ? stored : []) {
+    try {
+      const code = currencyCode(raw);
+      if (code !== selected && !history.includes(code)) history.push(code);
+    } catch { /* Skip an invalid saved code. */ }
+  }
+  return history.slice(0, 5);
+}
+function rememberExchangeDraftCurrency(tripId, field, raw) {
+  const selected = currencyCode(raw);
+  const previous = exchangeDraftCurrency?.[field];
+  if (!previous || selected === previous) return selected;
+  const key = exchangeHistoryKey(field);
+  const prefs = { ...(state.quickPrefs[tripId] || {}) };
+  prefs[key] = [previous, ...exchangeCurrencyHistory(tripId, field, previous)]
+    .filter((code, index, codes) => code !== selected && codes.indexOf(code) === index).slice(0, 5);
+  const nextState = { ...state, quickPrefs: { ...state.quickPrefs, [tripId]: prefs } };
+  save(nextState);
+  state = nextState;
+  exchangeDraftCurrency[field] = selected;
+  return selected;
+}
+function nextExchangePrefs(trip, data) {
+  const previous = exchangeDefaults(trip);
+  const prefs = { ...(state.quickPrefs[trip.id] || {}) };
+  for (const field of ['from', 'to']) {
+    const key = exchangeHistoryKey(field);
+    const before = exchangeDraftCurrency?.[field] || previous[field + 'Currency'];
+    const selected = data[field + 'Currency'];
+    const candidates = before === selected ? exchangeCurrencyHistory(trip.id, field, before) :
+      [before, ...exchangeCurrencyHistory(trip.id, field, before)];
+    prefs[key] = candidates.filter((code, index, codes) =>
+      code !== selected && codes.indexOf(code) === index).slice(0, 5);
+  }
+  return { ...state.quickPrefs, [trip.id]: prefs };
+}
+function removeExchangeCurrencyHistory(tripId, field, raw, current) {
+  const code = currencyCode(raw);
+  const history = exchangeCurrencyHistory(tripId, field, current);
+  if (!history.includes(code)) return;
+  const prefs = { ...(state.quickPrefs[tripId] || {}),
+    [exchangeHistoryKey(field)]: history.filter(item => item !== code) };
+  const nextState = { ...state, quickPrefs: { ...state.quickPrefs, [tripId]: prefs } };
+  save(nextState);
+  state = nextState;
+}
+function exchangeHistoryItems(history, field) {
+  return history.map(code => '<div class="currency-history-item">' +
+    '<button type="button" data-exchange-history-pick="' + field + '" data-currency-code="' +
+    code + '">' + code + '</button>' +
+    '<button type="button" class="currency-history-remove" data-exchange-history-remove="' + field +
+    '" data-currency-code="' + code + '" aria-label="移除曾用货币 ' + code + '">×</button></div>').join('');
+}
+function refreshExchangeHistory(field, keepOpen = false) {
+  const control = document.querySelector('#exchange-form [data-exchange-field="' + field + '"]');
+  const input = control.querySelector('input');
+  const menu = control.parentElement.querySelector('.currency-history-menu');
+  const toggle = control.querySelector('.currency-history-toggle');
+  const history = exchangeCurrencyHistory(activeTrip().id, field, input.value);
+  const open = keepOpen && !menu.hidden && history.length > 0;
+  toggle.hidden = history.length === 0;
+  toggle.setAttribute('aria-expanded', String(open));
+  menu.hidden = !open;
+  menu.innerHTML = exchangeHistoryItems(history, field);
+}
 function refreshQuickCurrencyHistory(keepOpen = false) {
   const form = document.getElementById('quick-expense-form');
   if (!form) return;
@@ -150,11 +236,11 @@ function formatAmount(minor, code) {
   const fraction = digits ? '.' + String(absolute % base).padStart(digits, '0') : '';
   return sign + String(absolute / base) + fraction + ' ' + code;
 }
-function addEvent(kind, data) {
+function addEvent(kind, data, quickPrefs = state.quickPrefs) {
   const trip = activeTrip();
   if (!trip) throw new Error('请先选择旅行');
   const entry = { id: crypto.randomUUID(), tripId: trip.id, kind, at: Date.now(), data };
-  const nextState = { ...state, events: state.events.concat(entry) };
+  const nextState = { ...state, events: state.events.concat(entry), quickPrefs };
   save(nextState);
   state = nextState;
   render();
@@ -343,14 +429,15 @@ function renderTrips(trip) {
     '<div class="page-heading"><span class="eyebrow">YOUR TRIPS</span><h1>我的旅行</h1>' +
     '<p>选择一段旅行后，记账页会一直打开它。</p></div>' +
     '<div class="action-row trip-actions"><button class="button primary" data-action="new">新建旅行</button>' +
-    '<button class="button' + (deletingTrips ? ' delete-mode-active' : '') +
+    '<button class="button trip-delete-toggle' + (deletingTrips ? ' delete-mode-active' : '') +
     '" data-action="toggle-trip-delete" aria-pressed="' + deletingTrips + '">' +
     (deletingTrips ? '完成' : '删除旅行') + '</button>' +
-    '<button class="button" data-action="join">凭邀请码加入</button></div>' +
+    '</div>' +
     (deletingTrips ? '<p class="trip-delete-hint">点右侧 × 选择旅行，随后确认删除。</p>' : '') +
     '<div class="trip-list">' + cards + '</div>' +
     '<div class="section-title"><h2>同行与同步</h2></div>' +
-    '<div class="action-row"><button class="button" data-action="invite">分享当前旅行邀请码</button></div>' +
+    '<div class="action-row"><button class="button" data-action="join">凭邀请码加入</button>' +
+    '<button class="button" data-action="invite">分享当前旅行邀请码</button></div>' +
     '<p class="sync-note">安卓应用在同一热点下可直连同步。网页版会保存在当前浏览器，连上服务后同步。</p>';
 }
 function render() {
@@ -365,8 +452,8 @@ function render() {
   if (!trip) {
     main.innerHTML = '<div class="welcome"><div class="symbol">↗</div><h1>下一段旅程，从这里开始</h1>' +
       '<p>建立旅行后，之后每次打开都会直接进入快速记账。</p>' +
-      '<div class="action-row"><button class="button primary" data-action="new">新建旅行</button>' +
-      '<button class="button" data-action="join">凭邀请码加入</button></div></div>';
+      '<div class="action-row"><button class="button primary" data-action="new">新建旅行</button></div>' +
+      '<div class="welcome-sync"><h2>同行与同步</h2><button class="button" data-action="join">凭邀请码加入</button></div></div>';
     return;
   }
   if (currentView === 'review') renderReview(trip);
@@ -393,6 +480,14 @@ function openDialog(name) {
     document.getElementById('join-form').reset();
     document.getElementById('join-identity').hidden = true;
     document.getElementById('join-preview').textContent = '';
+  }
+  if (name === 'exchange' && trip) {
+    const defaults = exchangeDefaults(trip);
+    exchangeDraftCurrency = { from: defaults.fromCurrency, to: defaults.toCurrency };
+    document.getElementById('exchange-from-currency').value = defaults.fromCurrency;
+    document.getElementById('exchange-to-currency').value = defaults.toCurrency;
+    refreshExchangeHistory('from');
+    refreshExchangeHistory('to');
   }
   document.getElementById(name + '-dialog').showModal();
 }
@@ -569,6 +664,58 @@ document.getElementById('main').addEventListener('click', event => {
   }
   openDialog(action);
 });
+document.getElementById('exchange-form').addEventListener('click', event => {
+  const remove = event.target.closest('[data-exchange-history-remove]');
+  if (remove) {
+    const field = remove.dataset.exchangeHistoryRemove;
+    const control = document.querySelector('#exchange-form [data-exchange-field="' + field + '"]');
+    try {
+      removeExchangeCurrencyHistory(activeTrip().id, field, remove.dataset.currencyCode,
+        control.querySelector('input').value);
+      refreshExchangeHistory(field, true);
+    } catch { toast('移除失败，请检查浏览器存储空间'); }
+    return;
+  }
+  const pick = event.target.closest('[data-exchange-history-pick]');
+  if (pick) {
+    const control = document.querySelector('#exchange-form [data-exchange-field="' +
+      pick.dataset.exchangeHistoryPick + '"]');
+    try {
+      control.querySelector('input').value = rememberExchangeDraftCurrency(activeTrip().id,
+        pick.dataset.exchangeHistoryPick, pick.dataset.currencyCode);
+      refreshExchangeHistory(pick.dataset.exchangeHistoryPick);
+    } catch { toast('货币记录失败，请检查浏览器存储空间'); }
+    return;
+  }
+  const toggle = event.target.closest('#exchange-form .currency-history-toggle');
+  if (toggle) {
+    const control = toggle.closest('[data-exchange-field]');
+    const field = control.dataset.exchangeField;
+    const menu = control.parentElement.querySelector('.currency-history-menu');
+    const wasOpen = !menu.hidden;
+    for (const other of ['from', 'to']) refreshExchangeHistory(other);
+    if (!wasOpen && !toggle.hidden) {
+      menu.hidden = false;
+      toggle.setAttribute('aria-expanded', 'true');
+    }
+  }
+});
+document.getElementById('exchange-form').addEventListener('input', event => {
+  const field = event.target.id === 'exchange-from-currency' ? 'from' :
+    event.target.id === 'exchange-to-currency' ? 'to' : null;
+  if (!field) return;
+  try { rememberExchangeDraftCurrency(activeTrip().id, field, event.target.value); }
+  catch { /* Keep partially entered codes editable. */ }
+  refreshExchangeHistory(field);
+});
+document.getElementById('exchange-form').addEventListener('change', event => {
+  const field = event.target.id === 'exchange-from-currency' ? 'from' :
+    event.target.id === 'exchange-to-currency' ? 'to' : null;
+  if (!field) return;
+  try { event.target.value = rememberExchangeDraftCurrency(activeTrip().id, field, event.target.value); }
+  catch { /* Submit will show a validation message. */ }
+  refreshExchangeHistory(field);
+});
 document.getElementById('bottom-nav').addEventListener('click', event => {
   const button = event.target.closest('[data-view]');
   if (!button) return;
@@ -714,12 +861,13 @@ document.getElementById('join-form').addEventListener('submit', event => {
     save(); closeDialog(form); render(); window.scrollTo(0, 0); syncNow();
   } catch (error) { toast(error.message || '邀请码无效'); }
 });
-function registerEntryForm(id, kind, makeData) {
+function registerEntryForm(id, kind, makeData, makePrefs = null) {
   document.getElementById(id).addEventListener('submit', event => {
     event.preventDefault();
     const form = event.currentTarget;
     try {
-      addEvent(kind, makeData(new FormData(form)));
+      const data = makeData(new FormData(form));
+      addEvent(kind, data, makePrefs ? makePrefs(activeTrip(), data) : state.quickPrefs);
       closeDialog(form);
     } catch (error) { toast(error.message || '记录失败'); }
   });
@@ -743,7 +891,7 @@ registerEntryForm('exchange-form', 'exchange', d => {
   return { person: d.get('person'), fromCurrency, toCurrency,
     fromAmount: parseAmount(d.get('fromAmount'), fromCurrency),
     toAmount: parseAmount(d.get('toAmount'), toCurrency) };
-});
+}, nextExchangePrefs);
 render();
 window.addEventListener('pageshow', event => {
   if (event.persisted) { currentView = 'quick'; render(); }

@@ -174,14 +174,20 @@ public final class MainActivity extends Activity {
         heading(body, "我的旅行");
         text(body, "选择旅行后，之后每次打开都会直接进入快速记账。", 14, Color.GRAY);
         List<LedgerStore.Trip> trips = store.trips();
-        if (trips.isEmpty()) row(body, button("新建旅行", this::newTrip), button("加入旅行", this::joinTrip));
+        Button createTrip = button("新建旅行", this::newTrip);
+        createTrip.setTextColor(Color.WHITE);
+        createTrip.setBackground(chip(Color.rgb(33, 132, 91), Color.rgb(33, 132, 91), false));
+        if (trips.isEmpty()) body.addView(createTrip, fullMargin());
         else {
-            row(body, button("新建旅行", this::newTrip),
-                    button(deletingTrips ? "完成" : "删除旅行", () -> {
-                        deletingTrips = !deletingTrips;
-                        renderTrips();
-                    }));
-            buttonInto(body, "凭邀请码加入", this::joinTrip);
+            Button deleteTrip = button(deletingTrips ? "完成" : "删除旅行", () -> {
+                deletingTrips = !deletingTrips;
+                renderTrips();
+            });
+            if (!deletingTrips) {
+                deleteTrip.setTextColor(Color.rgb(174, 73, 57));
+                deleteTrip.setBackground(chip(Color.WHITE, Color.rgb(239, 183, 168), false));
+            }
+            row(body, createTrip, deleteTrip);
             if (deletingTrips) text(body, "点右侧 × 选择旅行，随后确认删除。", 13,
                     Color.rgb(183, 98, 81));
         }
@@ -216,11 +222,13 @@ public final class MainActivity extends Activity {
             }
             body.addView(tripRow, fullMargin());
         }
-        if (currentTripId != null) {
+        section(body, "同行与同步");
+        if (currentTripId == null) buttonInto(body, "凭邀请码加入", this::joinTrip);
+        else {
             LedgerStore.Trip current = store.getTrip(currentTripId);
-            section(body, "同行与同步");
-            row(body, button("分享邀请码", () -> share(current)), button("连接同伴地址", this::manualConnect));
-            buttonInto(body, "云端地址设置", this::cloudSettings);
+            row(body, button("凭邀请码加入", this::joinTrip), button("分享邀请码", () -> share(current)));
+            row(body, button("连接同伴地址", this::manualConnect),
+                    button("云端地址设置", this::cloudSettings));
         }
         syncView = text(body, "", 13, Color.GRAY);
         updateSync();
@@ -235,7 +243,9 @@ public final class MainActivity extends Activity {
                     SharedPreferences.Editor prefs = uiPrefs.edit()
                             .remove("payer:" + trip.id).remove("mode:" + trip.id)
                             .remove("share:" + trip.id).remove("currency:" + trip.id)
-                            .remove("currency_history:" + trip.id).remove("currencies:" + trip.id);
+                            .remove("currency_history:" + trip.id).remove("currencies:" + trip.id)
+                            .remove(exchangeHistoryKey(trip.id, "from"))
+                            .remove(exchangeHistoryKey(trip.id, "to"));
                     if (trip.id.equals(currentTripId)) {
                         List<LedgerStore.Trip> remaining = store.trips();
                         currentTripId = remaining.isEmpty() ? null : remaining.get(0).id;
@@ -486,11 +496,11 @@ public final class MainActivity extends Activity {
 
     private void styleRecordFilter(TextView chip, boolean selected) {
         GradientDrawable background = new GradientDrawable();
-        background.setColor(selected ? Color.rgb(255, 240, 235) : Color.WHITE);
-        background.setStroke(dp(1), selected ? Color.rgb(239, 183, 168) : Color.rgb(220, 232, 223));
+        background.setColor(selected ? Color.rgb(232, 245, 235) : Color.WHITE);
+        background.setStroke(dp(1), selected ? Color.rgb(168, 209, 178) : Color.rgb(220, 232, 223));
         background.setCornerRadius(dp(24));
         chip.setBackground(background);
-        chip.setTextColor(selected ? Color.rgb(174, 73, 57) : Color.rgb(96, 121, 105));
+        chip.setTextColor(selected ? Color.rgb(23, 99, 68) : Color.rgb(96, 121, 105));
         chip.setSelected(selected);
     }
 
@@ -690,10 +700,14 @@ public final class MainActivity extends Activity {
     private void exchange(LedgerStore.Trip trip) {
         LinearLayout form = form();
         Spinner person = personChoice(form, trip, "换汇人");
+        String[] defaults = exchangeDefaults(trip.id);
+        String[] draftCurrencies = defaults.clone();
         EditText fromAmount = field(form, "付出金额", "例如：100", true);
-        EditText fromCurrency = field(form, "付出货币", "CNY", false); fromCurrency.setText("CNY");
+        EditText fromCurrency = exchangeCurrencyField(form, trip.id, "from", "付出货币",
+                defaults[0], draftCurrencies, 0);
         EditText toAmount = field(form, "得到金额", "例如：13", true);
-        EditText toCurrency = field(form, "得到货币", "EUR", false); toCurrency.setText("EUR");
+        EditText toCurrency = exchangeCurrencyField(form, trip.id, "to", "得到货币",
+                defaults[1], draftCurrencies, 1);
         showForm("记录换汇", form, () -> {
             String from = Money.code(fromCurrency.getText().toString());
             String to = Money.code(toCurrency.getText().toString());
@@ -701,8 +715,25 @@ public final class MainActivity extends Activity {
             JSONObject data = new JSONObject().put("person", person.getSelectedItemPosition() == 0 ? "a" : "b")
                     .put("fromCurrency", from).put("fromAmount", Money.parse(fromAmount.getText().toString(), from))
                     .put("toCurrency", to).put("toAmount", Money.parse(toAmount.getText().toString(), to));
-            add(trip, "exchange", data);
+            store.add(trip.id, "exchange", data);
+            rememberExchangeCurrency(trip.id, "from", draftCurrencies[0], from);
+            rememberExchangeCurrency(trip.id, "to", draftCurrencies[1], to);
+            render();
+            lan.syncNow();
+            cloud.syncNow();
         });
+    }
+
+    private String[] exchangeDefaults(String tripId) {
+        for (LedgerStore.Event event : store.summary(tripId).visible) {
+            if (!"exchange".equals(event.kind)) continue;
+            try {
+                String from = Money.code(event.data.getString("fromCurrency"));
+                String to = Money.code(event.data.getString("toCurrency"));
+                if (!from.equals(to)) return new String[]{from, to};
+            } catch (Exception ignored) { }
+        }
+        return new String[]{"CNY", "USD"};
     }
 
     private void add(LedgerStore.Trip trip, String kind, JSONObject data) {
@@ -867,8 +898,93 @@ public final class MainActivity extends Activity {
                 .remove("currencies:" + tripId).apply();
     }
 
+    private String exchangeHistoryKey(String tripId, String field) {
+        return "exchange_" + field + "_history:" + tripId;
+    }
+
+    private List<String> exchangeCurrencyHistory(String tripId, String field, String current) {
+        String saved = uiPrefs.getString(exchangeHistoryKey(tripId, field), "");
+        String selected;
+        try { selected = Money.code(current); }
+        catch (Exception ignored) { selected = ""; }
+        LinkedHashSet<String> codes = new LinkedHashSet<>();
+        for (String raw : saved.split(",")) {
+            try {
+                String code = Money.code(raw);
+                if (!code.equals(selected)) codes.add(code);
+            } catch (Exception ignored) { }
+        }
+        List<String> history = new ArrayList<>(codes);
+        return history.subList(0, Math.min(5, history.size()));
+    }
+
+    private void rememberExchangeCurrency(String tripId, String field, String previous, String current) {
+        if (previous.equals(current)) return;
+        LinkedHashSet<String> codes = new LinkedHashSet<>();
+        codes.add(previous);
+        codes.addAll(exchangeCurrencyHistory(tripId, field, previous));
+        codes.remove(current);
+        List<String> history = new ArrayList<>(codes);
+        uiPrefs.edit().putString(exchangeHistoryKey(tripId, field),
+                String.join(",", history.subList(0, Math.min(5, history.size())))).apply();
+    }
+
+    private void removeExchangeCurrencyHistory(String tripId, String field, String raw, String current) {
+        String code = Money.code(raw);
+        List<String> history = new ArrayList<>(exchangeCurrencyHistory(tripId, field, current));
+        if (!history.remove(code)) return;
+        uiPrefs.edit().putString(exchangeHistoryKey(tripId, field), String.join(",", history)).apply();
+    }
+
+    private EditText exchangeCurrencyField(LinearLayout form, String tripId, String field,
+                                           String label, String initial, String[] draftCurrencies,
+                                           int index) {
+        text(form, label, 14, Color.DKGRAY);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        EditText currency = new EditText(this);
+        currency.setSingleLine(true);
+        currency.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        currency.setFilters(new InputFilter[]{new InputFilter.AllCaps(), new InputFilter.LengthFilter(3)});
+        currency.setSelectAllOnFocus(true);
+        currency.setText(initial);
+        row.addView(currency, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView historyButton = new TextView(this);
+        historyButton.setText("⌄");
+        historyButton.setTextSize(22);
+        historyButton.setTextColor(Color.rgb(34, 108, 69));
+        historyButton.setGravity(Gravity.CENTER);
+        historyButton.setContentDescription("选择曾用" + label);
+        historyButton.setBackground(chip(Color.rgb(233, 244, 235), Color.rgb(233, 244, 235), true));
+        row.addView(historyButton, new LinearLayout.LayoutParams(dp(34), dp(40)));
+        form.addView(row, fullMargin());
+        refreshExchangeHistoryButton(tripId, field, currency, historyButton);
+        currency.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) { }
+            @Override public void afterTextChanged(Editable value) {
+                try {
+                    String selected = Money.code(value.toString());
+                    rememberExchangeCurrency(tripId, field, draftCurrencies[index], selected);
+                    draftCurrencies[index] = selected;
+                } catch (IllegalArgumentException ignored) { /* Wait for three letters. */ }
+                refreshExchangeHistoryButton(tripId, field, currency, historyButton);
+            }
+        });
+        historyButton.setOnClickListener(v -> showCurrencyHistory(tripId, currency, historyButton, field));
+        return currency;
+    }
+
     private void showCurrencyHistory(String tripId, EditText currency, TextView anchor) {
-        List<String> history = quickCurrencyHistory(tripId, quickCurrency(tripId));
+        showCurrencyHistory(tripId, currency, anchor, null);
+    }
+
+    private void showCurrencyHistory(String tripId, EditText currency, TextView anchor,
+                                     String exchangeField) {
+        List<String> history = exchangeField == null
+                ? quickCurrencyHistory(tripId, quickCurrency(tripId))
+                : exchangeCurrencyHistory(tripId, exchangeField, currency.getText().toString());
         if (history.isEmpty()) return;
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
@@ -899,9 +1015,12 @@ public final class MainActivity extends Activity {
             remove.setGravity(Gravity.CENTER);
             remove.setContentDescription("移除曾用货币 " + code);
             remove.setOnClickListener(v -> {
-                removeQuickCurrencyHistory(tripId, code);
+                if (exchangeField == null) removeQuickCurrencyHistory(tripId, code);
+                else removeExchangeCurrencyHistory(tripId, exchangeField, code,
+                        currency.getText().toString());
                 list.removeView(row);
-                refreshCurrencyHistoryButton(tripId, anchor);
+                if (exchangeField == null) refreshCurrencyHistoryButton(tripId, anchor);
+                else refreshExchangeHistoryButton(tripId, exchangeField, currency, anchor);
                 if (list.getChildCount() == 0) popup.dismiss();
             });
             row.addView(remove, new LinearLayout.LayoutParams(dp(40), dp(44)));
@@ -912,6 +1031,12 @@ public final class MainActivity extends Activity {
 
     private void refreshCurrencyHistoryButton(String tripId, TextView button) {
         button.setVisibility(quickCurrencyHistory(tripId, quickCurrency(tripId)).isEmpty()
+                ? View.GONE : View.VISIBLE);
+    }
+
+    private void refreshExchangeHistoryButton(String tripId, String field, EditText currency,
+                                               TextView button) {
+        button.setVisibility(exchangeCurrencyHistory(tripId, field, currency.getText().toString()).isEmpty()
                 ? View.GONE : View.VISIBLE);
     }
 
