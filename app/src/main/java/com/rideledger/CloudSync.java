@@ -139,8 +139,12 @@ final class CloudSync {
                 response = buffer.toByteArray();
             }
             JSONArray snapshots = new JSONObject(new String(response, StandardCharsets.UTF_8)).getJSONArray("snapshots");
-            for (int i = 0; i < snapshots.length(); i++)
-                onMerged.accept(SyncCodec.mergeBundle(store, snapshots.getJSONObject(i)));
+            Exception failure = null;
+            for (int i = 0; i < snapshots.length(); i++) {
+                try { onMerged.accept(SyncCodec.mergeBundle(store, snapshots.getJSONObject(i))); }
+                catch (Exception e) { if (failure == null) failure = e; }
+            }
+            if (failure != null) throw failure;
         } finally { conn.disconnect(); }
     }
 

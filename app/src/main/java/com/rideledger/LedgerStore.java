@@ -111,13 +111,17 @@ final class LedgerStore extends SQLiteOpenHelper {
         String clean = invite.trim();
         byte[] bytes = Base64.decode(clean, Base64.URL_SAFE | Base64.NO_WRAP);
         JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+        for (String field : new String[]{"id", "name", "personA", "personB", "secret"}) {
+            if (!(json.opt(field) instanceof String)) throw new IllegalArgumentException("邀请码字段无效");
+        }
         String inviterRole = json.optString("inviterRole", "a");
         if (!"a".equals(inviterRole) && !"b".equals(inviterRole))
             throw new IllegalArgumentException("邀请码身份无效");
         Trip trip = new Trip(json.getString("id"), json.getString("name"), json.getString("personA"),
                 json.getString("personB"), json.getString("secret"),
                 "a".equals(inviterRole) ? "b" : "a");
-        if (!trip.id.matches("[a-fA-F0-9-]{36}") || trip.name.trim().isEmpty() ||
+        if (!trip.id.matches("[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}") ||
+                trip.name.trim().isEmpty() ||
                 trip.personA.trim().isEmpty() || trip.personB.trim().isEmpty() ||
                 trip.personA.trim().equalsIgnoreCase(trip.personB.trim()) ||
                 Base64.decode(trip.secret, Base64.URL_SAFE | Base64.NO_WRAP).length != 32)

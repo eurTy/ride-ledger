@@ -50,6 +50,8 @@
 
 ## 下载与构建 APK
 
+安卓手机可直接下载 [v0.1.3-debug 调试测试包](https://github.com/eurTy/ride-ledger/releases/tag/v0.1.3-debug) 中的 `ride-ledger-debug.apk`，安装后即可离线记账，最低支持 Android 8.0。该版本包含邀请码校验与弱网同步修复，使用本项目原有调试密钥签名。
+
 已发布的 [v0.1.1-unsigned Release](https://github.com/eurTy/ride-ledger/releases/tag/v0.1.1-unsigned) 提供完全未签名的 `ride-ledger-unsigned.apk`，仅供下载和检查，**不能直接安装到安卓手机**。本地工作区的 `downloads/` 保存当前源码对应的未签名包，SHA-256 校验值见 `downloads/SHA256SUMS.txt`；继续修改界面后，它可能比已发布的 Release 更新。
 
 当前电脑已有 Android Studio `E:\Android` 和 Android SDK `E:\Android_Sdk`。在项目目录生成同样的未签名包：
@@ -95,6 +97,8 @@ node .\sync-server\server.mjs
 - 云同步服务需要用户自己的运行环境和 HTTPS 域名才能跨网使用。服务只保存加密快照；当前版本仍需在真实设备和目标网络上验证。
 
 ## 已验证与下一步
+
+邀请码和网络故障回归测试见 [tests/README.md](tests/README.md)：网页／服务端 38 项测试、安卓模拟器 23 项检查，以及安卓与网页双向邀请码、AES-GCM 数据互通检查。覆盖离线加入、各自离线记账、响应丢失、连接失败、重复与乱序快照、服务重启、损坏数据隔离和 TCP 分段传输；不同币种余额与结算金额按预期核对。
 
 已在 Android 模拟器检查记账、重启后保留数据、云端拉取另一端的加密记录，以及局域网 TCP 从另一端写入记录。网页版已检查断网保存与重新联网同步。
 

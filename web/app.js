@@ -499,13 +499,17 @@ function inviteCode(trip) {
   })));
 }
 function parseInviteCode(raw) {
-  const invite = JSON.parse(decoder.decode(fromBase64url(String(raw).trim())));
-  if (!/^[a-f0-9-]{36}$/i.test(invite.id) || typeof invite.secret !== 'string' ||
+  const invite = JSON.parse(decoder.decode(fromBase64url(String(raw).replace(/[\t\r\n ]/g, ''))));
+  if (!invite || typeof invite !== 'object' || Array.isArray(invite) ||
+      typeof invite.id !== 'string' ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(invite.id) ||
+      typeof invite.secret !== 'string' ||
       fromBase64url(invite.secret).length !== 32 ||
       ![invite.name, invite.personA, invite.personB].every(value =>
         typeof value === 'string' && value.trim()) ||
       invite.personA.trim().toLocaleLowerCase() === invite.personB.trim().toLocaleLowerCase() ||
-      !['a', 'b'].includes(invite.inviterRole || 'a')) throw new Error('邀请码无效');
+      !['a', 'b'].includes(invite.inviterRole === undefined ? 'a' : invite.inviterRole))
+    throw new Error('邀请码无效');
   return invite;
 }
 function setBadge(text, waiting = false) {
@@ -535,7 +539,9 @@ async function decryptBundle(trip, bundle) {
     name: 'AES-GCM', iv: fromBase64url(bundle.iv),
     additionalData: encoder.encode(trip.id), tagLength: 128
   }, key, fromBase64url(bundle.data));
-  return JSON.parse(decoder.decode(plain)).events;
+  const events = JSON.parse(decoder.decode(plain)).events;
+  if (!Array.isArray(events) || events.length > 10000) throw new Error('同步记录格式无效');
+  return events;
 }
 async function syncNow() {
   if (syncing || !state.trips.length) return;
@@ -550,9 +556,12 @@ async function syncNow() {
   try {
     for (const trip of [...state.trips]) {
       if (!state.trips.some(current => current.id === trip.id)) continue;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
       try {
         const response = await fetch('/sync', {
           method: 'POST',
+          signal: controller.signal,
           headers: { 'Content-Type': 'application/json', 'X-Trip-Token': await tripToken(trip) },
           body: JSON.stringify({
             tripId: trip.id, deviceId: state.deviceId, bundle: await encryptedBundle(trip)
@@ -560,26 +569,32 @@ async function syncNow() {
         });
         if (!response.ok) throw new Error('服务返回 ' + response.status);
         const { snapshots } = await response.json();
+        if (!Array.isArray(snapshots)) throw new Error('同步响应格式无效');
         if (!state.trips.some(current => current.id === trip.id)) continue;
         for (const bundle of snapshots) {
-          const incoming = await decryptBundle(trip, bundle);
-          if (!state.trips.some(current => current.id === trip.id)) break;
-          const known = new Set(state.events.map(event => event.id));
-          const fresh = [];
-          for (const event of incoming) {
-            if (event.tripId !== trip.id || !event.id || known.has(event.id)) continue;
-            normalizeEventCurrency(event);
-            fresh.push(event);
-            known.add(event.id);
+          try {
+            const incoming = await decryptBundle(trip, bundle);
+            if (!state.trips.some(current => current.id === trip.id)) break;
+            const known = new Set(state.events.map(event => event.id));
+            const fresh = [];
+            for (const event of incoming) {
+              if (event.tripId !== trip.id || !event.id || known.has(event.id)) continue;
+              normalizeEventCurrency(event);
+              fresh.push(event);
+              known.add(event.id);
+            }
+            if (!fresh.length) continue;
+            const nextState = { ...state, events: state.events.concat(fresh) };
+            save(nextState);
+            state = nextState;
+            added += fresh.length;
+            if (currentView !== 'quick') render();
+          } catch {
+            failed = true;
           }
-          if (!fresh.length) continue;
-          const nextState = { ...state, events: state.events.concat(fresh) };
-          save(nextState);
-          state = nextState;
-          added += fresh.length;
-          if (currentView !== 'quick') render();
         }
       } catch { failed = true; }
+      finally { clearTimeout(timeout); }
     }
     setBadge(failed ? '同步未完成 · 待重试' :
       added ? '已同步 · 新增 ' + added + ' 笔' : '已同步', failed);
@@ -852,13 +867,15 @@ document.getElementById('join-form').addEventListener('submit', event => {
     if (document.getElementById('join-identity').hidden || !['a', 'b'].includes(localPerson))
       throw new Error('请选择这台设备的使用者');
     if (state.trips.some(trip => trip.id === invite.id)) throw new Error('这个旅行已加入');
-    state.trips.unshift({ id: invite.id, name: invite.name, personA: invite.personA,
-      personB: invite.personB, secret: invite.secret, localPerson });
-    state.activeTripId = invite.id;
+    const nextState = { ...state, trips: [{ id: invite.id, name: invite.name, personA: invite.personA,
+      personB: invite.personB, secret: invite.secret, localPerson }, ...state.trips],
+      activeTripId: invite.id };
+    save(nextState);
+    state = nextState;
     currentView = 'quick';
     deletingTrips = false;
     recordFilter = 'all';
-    save(); closeDialog(form); render(); window.scrollTo(0, 0); syncNow();
+    closeDialog(form); render(); window.scrollTo(0, 0); syncNow();
   } catch (error) { toast(error.message || '邀请码无效'); }
 });
 function registerEntryForm(id, kind, makeData, makePrefs = null) {

@@ -9,7 +9,8 @@ const webDir = path.resolve(import.meta.dirname, '../web');
 const maxBytes = 12_000_000;
 await fs.mkdir(dataDir, { recursive: true });
 
-const validId = value => typeof value === 'string' && /^[a-f0-9-]{36}$/i.test(value);
+const validId = value => typeof value === 'string' &&
+  /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const locks = new Map();
 

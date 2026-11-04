@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.IntConsumer;
 
 final class LanSync {
     interface Listener { void changed(String status, int newEvents); }
@@ -198,13 +199,16 @@ final class LanSync {
             try {
                 Socket socket = server.accept();
                 workers.execute(() -> {
+                    int[] added = {0};
                     try (Socket peer = socket) {
                         peer.setSoTimeout(12000);
                         JSONObject incoming = readFrame(peer);
                         writeFrame(peer, localSnapshot());
-                        int added = merge(incoming);
-                        publish("局域网同步完成，新增 " + added + " 笔", added);
-                    } catch (Exception e) { publish("局域网接收失败：" + e.getMessage(), 0); }
+                        merge(incoming, count -> added[0] += count);
+                        publish("局域网同步完成，新增 " + added[0] + " 笔", added[0]);
+                    } catch (Exception e) {
+                        publish("局域网接收待重试：" + e.getMessage() + "，已新增 " + added[0] + " 笔", added[0]);
+                    }
                 });
             } catch (Exception e) { if (running) publish("局域网监听失败：" + e.getMessage(), 0); }
         }
@@ -212,13 +216,16 @@ final class LanSync {
 
     private void exchange(InetSocketAddress endpoint) {
         if (!running) return;
+        int[] added = {0};
         try (Socket socket = new Socket()) {
             socket.connect(endpoint, 3500);
             socket.setSoTimeout(12000);
             writeFrame(socket, localSnapshot());
-            int added = merge(readFrame(socket));
-            publish("局域网同步完成，新增 " + added + " 笔", added);
-        } catch (Exception e) { publish("等待同伴设备：" + e.getMessage(), 0); }
+            merge(readFrame(socket), count -> added[0] += count);
+            publish("局域网同步完成，新增 " + added[0] + " 笔", added[0]);
+        } catch (Exception e) {
+            publish("等待同伴设备：" + e.getMessage() + "，已新增 " + added[0] + " 笔", added[0]);
+        }
     }
 
     private JSONObject localSnapshot() throws Exception {
@@ -227,12 +234,15 @@ final class LanSync {
         return new JSONObject().put("version", 1).put("bundles", bundles);
     }
 
-    private int merge(JSONObject message) throws Exception {
+    private void merge(JSONObject message, IntConsumer onMerged) throws Exception {
         if (message.getInt("version") != 1) throw new IllegalArgumentException("同步协议版本不一致");
-        int added = 0;
+        Exception failure = null;
         JSONArray bundles = message.getJSONArray("bundles");
-        for (int i = 0; i < bundles.length(); i++) added += SyncCodec.mergeBundle(store, bundles.getJSONObject(i));
-        return added;
+        for (int i = 0; i < bundles.length(); i++) {
+            try { onMerged.accept(SyncCodec.mergeBundle(store, bundles.getJSONObject(i))); }
+            catch (Exception e) { if (failure == null) failure = e; }
+        }
+        if (failure != null) throw failure;
     }
 
     private void writeFrame(Socket socket, JSONObject message) throws Exception {
