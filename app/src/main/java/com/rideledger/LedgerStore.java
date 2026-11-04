@@ -24,15 +24,20 @@ import java.util.UUID;
 
 final class LedgerStore extends SQLiteOpenHelper {
     static final class Trip {
-        final String id, name, personA, personB, secret, localPerson;
+        final String id, name, personA, personB, secret, localPerson, syncUrl;
 
         Trip(String id, String name, String personA, String personB, String secret, String localPerson) {
+            this(id, name, personA, personB, secret, localPerson, "");
+        }
+
+        Trip(String id, String name, String personA, String personB, String secret, String localPerson, String syncUrl) {
             this.id = id;
             this.name = name;
             this.personA = personA;
             this.personB = personB;
             this.secret = secret;
             this.localPerson = localPerson;
+            this.syncUrl = syncUrl;
         }
 
         String nameOf(String person) { return "a".equals(person) ? personA : personB; }
@@ -71,18 +76,19 @@ final class LedgerStore extends SQLiteOpenHelper {
         final List<Event> visible = new ArrayList<>();
     }
 
-    LedgerStore(Context context) { super(context, "ride_ledger.db", null, 1); }
+    LedgerStore(Context context) { super(context, "ride_ledger.db", null, 2); }
 
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE trips (id TEXT PRIMARY KEY, name TEXT NOT NULL, person_a TEXT NOT NULL, " +
-                "person_b TEXT NOT NULL, secret TEXT NOT NULL, local_person TEXT NOT NULL, created_at INTEGER NOT NULL)");
+                "person_b TEXT NOT NULL, secret TEXT NOT NULL, local_person TEXT NOT NULL, created_at INTEGER NOT NULL, " +
+                "sync_url TEXT NOT NULL DEFAULT '')");
         db.execSQL("CREATE TABLE events (id TEXT PRIMARY KEY, trip_id TEXT NOT NULL, kind TEXT NOT NULL, " +
                 "at INTEGER NOT NULL, data TEXT NOT NULL)");
         db.execSQL("CREATE INDEX events_trip ON events(trip_id, at, id)");
     }
 
     @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        throw new IllegalStateException("尚未定义数据库升级路径");
+        if (oldVersion < 2) db.execSQL("ALTER TABLE trips ADD COLUMN sync_url TEXT NOT NULL DEFAULT ''");
     }
 
     synchronized Trip createTrip(String name, String personA, String personB) {
@@ -101,8 +107,16 @@ final class LedgerStore extends SQLiteOpenHelper {
         if (!"a".equals(localPerson) && !"b".equals(localPerson))
             throw new IllegalArgumentException("请选择这台设备的使用者");
         Trip trip = new Trip(candidate.id, candidate.name, candidate.personA, candidate.personB,
-                candidate.secret, localPerson);
-        if (getTrip(trip.id) != null) throw new IllegalArgumentException("这个旅行已加入");
+                candidate.secret, localPerson, candidate.syncUrl);
+        Trip existing = getTrip(trip.id);
+        if (existing != null) {
+            if (candidate.syncUrl.isEmpty()) throw new IllegalArgumentException("这个旅行已加入");
+            if (!java.util.Arrays.equals(Base64.decode(existing.secret, Base64.URL_SAFE | Base64.NO_WRAP),
+                    Base64.decode(candidate.secret, Base64.URL_SAFE | Base64.NO_WRAP)))
+                throw new IllegalArgumentException("邀请码与已有旅行的密钥不一致");
+            setTripSyncUrl(trip.id, candidate.syncUrl);
+            return getTrip(trip.id);
+        }
         saveTrip(trip);
         return trip;
     }
@@ -117,9 +131,14 @@ final class LedgerStore extends SQLiteOpenHelper {
         String inviterRole = json.optString("inviterRole", "a");
         if (!"a".equals(inviterRole) && !"b".equals(inviterRole))
             throw new IllegalArgumentException("邀请码身份无效");
+        String syncUrl = "";
+        if (json.has("syncUrl")) {
+            if (!(json.opt("syncUrl") instanceof String)) throw new IllegalArgumentException("邀请码连接地址无效");
+            syncUrl = SyncEndpoint.normalize(json.getString("syncUrl"), false);
+        }
         Trip trip = new Trip(json.getString("id"), json.getString("name"), json.getString("personA"),
                 json.getString("personB"), json.getString("secret"),
-                "a".equals(inviterRole) ? "b" : "a");
+                "a".equals(inviterRole) ? "b" : "a", syncUrl);
         if (!trip.id.matches("[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}") ||
                 trip.name.trim().isEmpty() ||
                 trip.personA.trim().isEmpty() || trip.personB.trim().isEmpty() ||
@@ -130,9 +149,15 @@ final class LedgerStore extends SQLiteOpenHelper {
     }
 
     synchronized String inviteCode(Trip trip) throws JSONException {
+        return inviteCode(trip, trip.syncUrl);
+    }
+
+    synchronized String inviteCode(Trip trip, String syncUrl) throws JSONException {
         JSONObject json = new JSONObject().put("id", trip.id).put("name", trip.name)
                 .put("personA", trip.personA).put("personB", trip.personB)
                 .put("secret", trip.secret).put("inviterRole", trip.localPerson);
+        if (syncUrl != null && syncUrl.startsWith("https://"))
+            json.put("syncUrl", SyncEndpoint.normalize(syncUrl, false));
         return Base64.encodeToString(json.toString().getBytes(StandardCharsets.UTF_8),
                 Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
     }
@@ -145,6 +170,7 @@ final class LedgerStore extends SQLiteOpenHelper {
         values.put("person_b", trip.personB);
         values.put("secret", trip.secret);
         values.put("local_person", trip.localPerson);
+        values.put("sync_url", trip.syncUrl);
         values.put("created_at", System.currentTimeMillis());
         getWritableDatabase().insertOrThrow("trips", null, values);
     }
@@ -152,7 +178,7 @@ final class LedgerStore extends SQLiteOpenHelper {
     synchronized List<Trip> trips() {
         List<Trip> result = new ArrayList<>();
         try (Cursor c = getReadableDatabase().rawQuery(
-                "SELECT id,name,person_a,person_b,secret,local_person FROM trips ORDER BY created_at DESC", null)) {
+                "SELECT id,name,person_a,person_b,secret,local_person,sync_url FROM trips ORDER BY created_at DESC", null)) {
             while (c.moveToNext()) result.add(readTrip(c));
         }
         return result;
@@ -160,7 +186,7 @@ final class LedgerStore extends SQLiteOpenHelper {
 
     synchronized Trip getTrip(String id) {
         try (Cursor c = getReadableDatabase().rawQuery(
-                "SELECT id,name,person_a,person_b,secret,local_person FROM trips WHERE id=?", new String[]{id})) {
+                "SELECT id,name,person_a,person_b,secret,local_person,sync_url FROM trips WHERE id=?", new String[]{id})) {
             return c.moveToFirst() ? readTrip(c) : null;
         }
     }
@@ -176,9 +202,17 @@ final class LedgerStore extends SQLiteOpenHelper {
         } finally { db.endTransaction(); }
     }
 
+    synchronized void setTripSyncUrl(String id, String raw) {
+        String syncUrl = SyncEndpoint.normalize(raw, true);
+        ContentValues values = new ContentValues();
+        values.put("sync_url", syncUrl);
+        if (getWritableDatabase().update("trips", values, "id=?", new String[]{id}) == 0)
+            throw new IllegalArgumentException("旅行不存在");
+    }
+
     private Trip readTrip(Cursor c) {
         return new Trip(c.getString(0), c.getString(1), c.getString(2), c.getString(3),
-                c.getString(4), c.getString(5));
+                c.getString(4), c.getString(5), c.getString(6));
     }
 
     synchronized Event add(String tripId, String kind, JSONObject data) {

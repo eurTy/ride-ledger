@@ -1,1 +1,1 @@
-ce028a5f1681ac831ffc7484b16cf7d266e6e4129112176e4be2139d3eb45127  ride-ledger-unsigned.apk
+3b98a74ec1989e4597dda9db0631fd8c92a6989bfe2b3d260c7919a13fb0d200  ride-ledger-unsigned.apk

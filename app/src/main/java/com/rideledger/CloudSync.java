@@ -48,21 +48,11 @@ final class CloudSync {
     }
 
     String endpoint() { return prefs.getString("endpoint", ""); }
+    String effectiveEndpoint(LedgerStore.Trip trip) { return trip.syncUrl.isEmpty() ? endpoint() : trip.syncUrl; }
     String status() { return status; }
 
     void setEndpoint(String raw) {
-        String endpoint = raw.trim().replaceAll("/+$", "");
-        if (!endpoint.isEmpty()) {
-            try {
-                URL url = new URL(endpoint);
-                String host = url.getHost();
-                boolean local = host.equals("localhost") || host.equals("127.0.0.1") ||
-                        host.startsWith("192.168.") || host.startsWith("10.") ||
-                        host.matches("172\\.(1[6-9]|2[0-9]|3[01])\\..*");
-                if (!"https".equals(url.getProtocol()) && !("http".equals(url.getProtocol()) && local))
-                    throw new IllegalArgumentException("远程云服务必须使用 HTTPS");
-            } catch (Exception e) { throw new IllegalArgumentException("请输入有效的 HTTPS 地址"); }
-        }
+        String endpoint = SyncEndpoint.normalize(raw, true);
         prefs.edit().putString("endpoint", endpoint).apply();
         publish(endpoint.isEmpty() ? "云同步未配置" : "云同步已配置", 0);
         syncNow();
@@ -94,18 +84,21 @@ final class CloudSync {
     };
 
     void syncNow() {
-        if (!running || endpoint().isEmpty() || busy) return;
+        if (!running || busy) return;
         busy = true;
         worker.execute(() -> {
             int[] total = {0};
             try {
                 Exception failure = null;
+                int attempted = 0;
                 for (LedgerStore.Trip trip : store.trips()) {
+                    if (effectiveEndpoint(trip).isEmpty()) continue;
+                    attempted++;
                     try { syncTrip(trip, added -> total[0] += added); }
                     catch (Exception e) { if (failure == null) failure = e; }
                 }
                 if (failure != null) throw failure;
-                publish("云同步完成，新增 " + total[0] + " 笔", total[0]);
+                publish(attempted == 0 ? "云同步未配置" : "云同步完成，新增 " + total[0] + " 笔", total[0]);
             } catch (Exception e) {
                 publish("云同步待重试：" + e.getMessage() + "，已新增 " + total[0] + " 笔", total[0]);
             }
@@ -118,7 +111,7 @@ final class CloudSync {
                 .put("bundle", SyncCodec.bundle(store, trip));
         byte[] input = body.toString().getBytes(StandardCharsets.UTF_8);
         if (input.length > 12_000_000) throw new IllegalStateException("旅行记录超出初稿上限");
-        HttpURLConnection conn = (HttpURLConnection) new URL(endpoint() + "/sync").openConnection();
+        HttpURLConnection conn = (HttpURLConnection) new URL(effectiveEndpoint(trip) + "/sync").openConnection();
         try {
             conn.setRequestMethod("POST");
             conn.setConnectTimeout(5000);

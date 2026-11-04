@@ -636,18 +636,24 @@ public final class MainActivity extends Activity {
             @Override public void afterTextChanged(Editable value) {
                 try {
                     LedgerStore.Trip trip = store.previewInvite(value.toString());
+                    LedgerStore.Trip existing = store.getTrip(trip.id);
+                    String selectedRole = existing == null ? trip.localPerson : existing.localPerson;
                     String[] labels = new String[2];
                     for (int i = 0; i < 2; i++) {
                         String role = i == 0 ? "a" : "b";
                         labels[i] = trip.nameOf(role) + (role.equals(trip.localPerson)
                                 ? " · 同伴（默认）" : " · 分享者的另一台设备");
                     }
-                    candidate[0] = trip;
+                    candidate[0] = existing == null ? trip : existing;
                     identity.setAdapter(new ArrayAdapter<>(MainActivity.this,
                             android.R.layout.simple_spinner_dropdown_item, labels));
-                    identity.setSelection("a".equals(trip.localPerson) ? 0 : 1);
+                    identity.setSelection("a".equals(selectedRole) ? 0 : 1);
+                    identity.setEnabled(existing == null);
                     identityBox.setVisibility(View.VISIBLE);
-                    preview.setText(joinPerspective(trip, trip.localPerson));
+                    preview.setText(joinPerspective(candidate[0], selectedRole) +
+                            (trip.syncUrl.isEmpty() ? "" : existing == null
+                                    ? "\n连接信息已包含，无需填写服务地址。"
+                                    : "\n将更新连接，保留当前身份和账目。"));
                 } catch (Exception ignored) {
                     candidate[0] = null;
                     identityBox.setVisibility(View.GONE);
@@ -745,7 +751,7 @@ public final class MainActivity extends Activity {
 
     private void share(LedgerStore.Trip trip) {
         try {
-            String code = store.inviteCode(trip);
+            String code = store.inviteCode(trip, cloud.effectiveEndpoint(trip));
             TextView content = new TextView(this);
             content.setText("本机是“" + trip.nameOf(trip.localPerson) + "”；对方默认以“" +
                     trip.nameOf("a".equals(trip.localPerson) ? "b" : "a") +
@@ -777,10 +783,13 @@ public final class MainActivity extends Activity {
 
     private void cloudSettings() {
         LinearLayout form = form();
-        text(form, "不同 Wi-Fi 之间同步需要可访问的云端服务地址。远程地址必须使用 HTTPS。", 14, Color.DKGRAY);
+        LedgerStore.Trip trip = store.getTrip(currentTripId);
+        text(form, "新版邀请码会自动带入连接信息。这里可修改当前旅行的同步地址；其他旅行不受影响。", 14, Color.DKGRAY);
         EditText endpoint = field(form, "云同步服务地址", "https://example.com", false);
-        endpoint.setText(cloud.endpoint());
-        showForm("云端同步", form, () -> { cloud.setEndpoint(endpoint.getText().toString()); updateSync(); });
+        endpoint.setText(cloud.effectiveEndpoint(trip));
+        showForm("当前旅行连接", form, () -> {
+            store.setTripSyncUrl(trip.id, endpoint.getText().toString()); cloud.syncNow(); updateSync();
+        });
     }
 
     private interface SaveAction { void run() throws Exception; }

@@ -115,6 +115,12 @@ try {
     assert.equal(invite.id, t.id); assert.equal(invite.inviterRole, 'b');
     assert.equal(invite.personA, t.personA); assert.equal(invite.personB, t.personB);
   }
+  if (result.connectedInvite) {
+    const connected = web.api.parseInviteCode(result.connectedInvite);
+    assert.equal(connected.syncUrl, 'https://relay.example.test');
+    assert.equal(connected.inviterRole, 'b');
+    console.log('INTEROP_PASS Android connection-bearing invitation read by desktop/web client');
+  }
   if (result.androidBundle) {
     const decoded = await web.api.decryptBundle(t, JSON.parse(result.androidBundle));
     const sort = values => JSON.parse(JSON.stringify(values)).sort((a, b) => a.id.localeCompare(b.id));

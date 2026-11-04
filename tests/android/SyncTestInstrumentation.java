@@ -40,9 +40,12 @@ public final class SyncTestInstrumentation extends Instrumentation {
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
-            JSONObject fixture = new JSONObject(new String(Base64.decode(arguments.getString("fixture"),
-                    Base64.URL_SAFE | Base64.NO_WRAP), StandardCharsets.UTF_8));
-            runChecks(fixture, result);
+            if (arguments.containsKey("desktopInvite")) runDesktopConnection(result);
+            else {
+                JSONObject fixture = new JSONObject(new String(Base64.decode(arguments.getString("fixture"),
+                        Base64.URL_SAFE | Base64.NO_WRAP), StandardCharsets.UTF_8));
+                runChecks(fixture, result);
+            }
         } catch (Throwable error) {
             failed.put("test harness: " + error.toString());
         } finally {
@@ -68,6 +71,36 @@ public final class SyncTestInstrumentation extends Instrumentation {
     }
     private LedgerStore store(TestContext context) {
         LedgerStore store = new LedgerStore(context); stores.add(store); return store;
+    }
+
+    private void runDesktopConnection(Bundle result) throws Exception {
+        TestContext context = context();
+        LedgerStore phone = store(context);
+        LedgerStore.Trip travel = phone.joinTrip(arguments.getString("desktopInvite"), "b");
+        int expected = Integer.parseInt(arguments.getString("expectedEvents"));
+        check("desktop public invitation automatically configures Android connection", () -> {
+            require(travel.syncUrl.startsWith("https://") && travel.localPerson.equals("b"), "connection or role missing");
+            SyncResult sync = cloud(context, phone, "");
+            require(!sync.failed && phone.events(travel.id).size() == expected,
+                    "Android could not receive desktop records using only the invitation");
+        });
+        check("Android offline entry uploads to desktop through public HTTPS", () -> {
+            phone.add(travel.id, "expense", new JSONObject().put("payer", "b").put("currency", "CNY")
+                    .put("amount", 700).put("shareA", 5000).put("mode", "shared")
+                    .put("note", "Android offline entry via public invitation"));
+            require(phone.events(travel.id).size() == expected + 1, "offline entry was not stored");
+            SyncResult sync = cloud(context, phone, "");
+            require(!sync.failed, "Android entry could not upload to desktop");
+        });
+        check("Android connection and ledger survive reopening without manual server configuration", () -> {
+            phone.close();
+            LedgerStore reopened = store(context);
+            require(reopened.getTrip(travel.id).syncUrl.equals(travel.syncUrl), "connection was lost");
+            require(reopened.events(travel.id).size() == expected + 1, "ledger was lost");
+            SyncResult sync = cloud(context, reopened, "");
+            require(!sync.failed && reopened.events(travel.id).size() == expected + 1, "repeated sync duplicated records");
+            result.putString("phoneBundle", SyncCodec.bundle(reopened, reopened.getTrip(travel.id)).toString());
+        });
     }
 
     private void runChecks(JSONObject fixture, Bundle result) throws Exception {
@@ -112,6 +145,42 @@ public final class SyncTestInstrumentation extends Instrumentation {
             verifySummary(first.summary(tripId), fixture.getJSONObject("expectedSummary"));
         });
         result.putString("androidBundle", SyncCodec.bundle(first, joined).toString());
+        check("invitation carries per-travel connection and updates retain records and identity", () -> {
+            String connected = new JSONObject(meta.toString()).put("inviterRole", "b")
+                    .put("syncUrl", "https://relay.example.test/").toString();
+            String code = Base64.encodeToString(connected.getBytes(StandardCharsets.UTF_8),
+                    Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+            LedgerStore.Trip updated = first.joinTrip(code, "a");
+            require(updated.localPerson.equals("b") && updated.syncUrl.equals("https://relay.example.test"),
+                    "updating connection changed the identity");
+            require(first.events(tripId).size() == expectedCount, "updating connection changed records");
+            CloudSync cloud = new CloudSync(firstContext, first, (message, count) -> { });
+            try { require(cloud.effectiveEndpoint(updated).equals(updated.syncUrl), "invite connection was not selected"); }
+            finally { cloud.close(); }
+            result.putString("connectedInvite", first.inviteCode(updated));
+        });
+        check("version one database upgrade preserves travel, cash records and later connection", () -> {
+            TestContext oldContext = context();
+            SQLiteDatabase old = oldContext.openOrCreateDatabase("ride_ledger.db", Context.MODE_PRIVATE, null);
+            old.execSQL("CREATE TABLE trips (id TEXT PRIMARY KEY,name TEXT NOT NULL,person_a TEXT NOT NULL," +
+                    "person_b TEXT NOT NULL,secret TEXT NOT NULL,local_person TEXT NOT NULL,created_at INTEGER NOT NULL)");
+            old.execSQL("CREATE TABLE events (id TEXT PRIMARY KEY,trip_id TEXT NOT NULL,kind TEXT NOT NULL," +
+                    "at INTEGER NOT NULL,data TEXT NOT NULL)");
+            old.execSQL("INSERT INTO trips VALUES (?,?,?,?,?,?,?)", new Object[]{tripId, meta.getString("name"),
+                    meta.getString("personA"), meta.getString("personB"), meta.getString("secret"), "a", 1});
+            JSONObject entry = fixture.getJSONArray("events").getJSONObject(0);
+            old.execSQL("INSERT INTO events VALUES (?,?,?,?,?)", new Object[]{entry.getString("id"), tripId,
+                    entry.getString("kind"), entry.getLong("at"), entry.getJSONObject("data").toString()});
+            old.setVersion(1); old.close();
+            LedgerStore upgraded = store(oldContext);
+            require(upgraded.getTrip(tripId).syncUrl.isEmpty(), "old trip default connection changed");
+            require(upgraded.events(tripId).size() == 1 && upgraded.summary(tripId).cashA.get("CNY") == 100000,
+                    "database upgrade lost original money");
+            upgraded.setTripSyncUrl(tripId, "https://persist.example.test"); upgraded.close();
+            LedgerStore reopened = store(oldContext);
+            require(reopened.getTrip(tripId).syncUrl.equals("https://persist.example.test") &&
+                    reopened.events(tripId).size() == 1, "connection or money did not survive restart");
+        });
         check("incorrect key cannot import records", () -> {
             LedgerStore other = store(context());
             other.joinTrip(fixture.getString("wrongKeyInvite"), "a");
@@ -165,6 +234,14 @@ public final class SyncTestInstrumentation extends Instrumentation {
             require(sync.failed, "corrupt snapshot reported complete success");
             require(c.events(tripId).size() == expectedCount + 2 && sync.added == expectedCount + 2,
                     "corrupt snapshot blocked valid records or progress reporting");
+        });
+        check("per-travel connection takes precedence over an unrelated global endpoint", () -> {
+            TestContext connectedContext = context(); LedgerStore connected = store(connectedContext);
+            connected.joinTrip(invite, "b");
+            connected.setTripSyncUrl(tripId, endpoint + "/normal");
+            SyncResult sync = cloud(connectedContext, connected, "http://127.0.0.1:1");
+            require(!sync.failed && connected.events(tripId).size() == expectedCount + 2,
+                    "global endpoint overrode the travel's connection");
         });
         result.putString("androidCloudBundle", SyncCodec.bundle(a, aTrip).toString());
 

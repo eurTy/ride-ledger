@@ -16,6 +16,9 @@ let recordFilter = 'all';
 let deletingTrips = false;
 let pendingDeleteTripId = null;
 let exchangeDraftCurrency = null;
+let desktopConnection = { state: 'idle', url: '' };
+let desktopLan = { status: '', addresses: [] };
+let desktopSyncPending = false;
 const RECORD_FILTERS = [
   { key: 'all', label: '全部' },
   { key: 'shared', label: '共同支出' },
@@ -437,8 +440,16 @@ function renderTrips(trip) {
     '<div class="trip-list">' + cards + '</div>' +
     '<div class="section-title"><h2>同行与同步</h2></div>' +
     '<div class="action-row"><button class="button" data-action="join">凭邀请码加入</button>' +
-    '<button class="button" data-action="invite">分享当前旅行邀请码</button></div>' +
-    '<p class="sync-note">安卓应用在同一热点下可直连同步。网页版会保存在当前浏览器，连上服务后同步。</p>';
+    '<button class="button" data-action="invite">分享当前旅行邀请码</button>' +
+    '<button class="button" data-action="connection">连接设置</button>' +
+    (window.rideLedgerDesktop ? '<button class="button" data-action="lan">同热点地址直连</button>' : '') + '</div>' +
+    (window.rideLedgerDesktop ? '<div class="connection-panel"><strong>' +
+      escapeHtml(desktopConnection.message || '分享邀请码时自动连接手机') + '</strong>' +
+      '<p>不同 Wi-Fi：分享邀请码后，手机会自动读取连接信息。请保持电脑和软件运行。</p>' +
+      (desktopLan.addresses.length ? '<details class="connection-addresses"><summary>查看本机局域网地址</summary><small>' +
+        escapeHtml(desktopLan.addresses.join(' / ')) + '</small></details>' : '') +
+      (desktopConnection.state === 'ready' ? '<button class="button ghost" data-action="stop-phone">关闭手机公网连接</button>' : '') +
+      '</div>' : '<p class="sync-note">邀请码包含连接信息时会自动配置；离线记录保存在当前设备。</p>');
 }
 function render() {
   const main = document.getElementById('main');
@@ -489,14 +500,40 @@ function openDialog(name) {
     refreshExchangeHistory('from');
     refreshExchangeHistory('to');
   }
+  if (name === 'connection' && trip) {
+    document.getElementById('connection-url').value = trip.syncUrl || '';
+    document.getElementById('host-on-this-computer').hidden = !window.rideLedgerDesktop;
+  }
   document.getElementById(name + '-dialog').showModal();
 }
 function closeDialog(form) { form.closest('dialog').close(); form.reset(); }
 function inviteCode(trip) {
   return base64url(encoder.encode(JSON.stringify({
     id: trip.id, name: trip.name, personA: trip.personA, personB: trip.personB,
-    secret: trip.secret, inviterRole: trip.localPerson
+    secret: trip.secret, inviterRole: trip.localPerson,
+    ...(trip.syncUrl ? { syncUrl: normalizeSyncUrl(trip.syncUrl) } : {})
   })));
+}
+function normalizeSyncUrl(raw) {
+  if (typeof raw !== 'string') throw new Error('邀请码连接地址无效');
+  if (!raw.trim()) return '';
+  let url;
+  try { url = new URL(raw.trim()); } catch { throw new Error('邀请码连接地址无效'); }
+  if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.search || url.hash)
+    throw new Error('同步连接必须使用 HTTPS');
+  return url.href.replace(/\/+$/, '');
+}
+async function prepareInvite(trip) {
+  if (!window.rideLedgerDesktop || (trip.syncUrl && !trip.hostedHere)) return trip;
+  toast('正在准备手机连接…');
+  const connection = await window.rideLedgerDesktop.connectPhone();
+  const syncUrl = normalizeSyncUrl(connection.url);
+  if (!syncUrl) throw new Error('手机连接尚未就绪，请重试');
+  desktopConnection = connection;
+  const nextState = { ...state, trips: state.trips.map(item => item.id === trip.id
+    ? { ...item, syncUrl, hostedHere: true } : item) };
+  save(nextState); state = nextState;
+  return state.trips.find(item => item.id === trip.id);
 }
 function parseInviteCode(raw) {
   const invite = JSON.parse(decoder.decode(fromBase64url(String(raw).replace(/[\t\r\n ]/g, ''))));
@@ -510,6 +547,7 @@ function parseInviteCode(raw) {
       invite.personA.trim().toLocaleLowerCase() === invite.personB.trim().toLocaleLowerCase() ||
       !['a', 'b'].includes(invite.inviterRole === undefined ? 'a' : invite.inviterRole))
     throw new Error('邀请码无效');
+  if (Object.hasOwn(invite, 'syncUrl')) invite.syncUrl = normalizeSyncUrl(invite.syncUrl);
   return invite;
 }
 function setBadge(text, waiting = false) {
@@ -543,9 +581,29 @@ async function decryptBundle(trip, bundle) {
   if (!Array.isArray(events) || events.length > 10000) throw new Error('同步记录格式无效');
   return events;
 }
+async function mergeSyncedBundle(trip, bundle) {
+  const incoming = await decryptBundle(trip, bundle);
+  if (!state.trips.some(current => current.id === trip.id)) return 0;
+  const known = new Set(state.events.map(event => event.id));
+  const fresh = [];
+  for (const event of incoming) {
+    if (event.tripId !== trip.id || !event.id || known.has(event.id)) continue;
+    normalizeEventCurrency(event); fresh.push(event); known.add(event.id);
+  }
+  if (!fresh.length) return 0;
+  const nextState = { ...state, events: state.events.concat(fresh) };
+  save(nextState); state = nextState;
+  if (currentView !== 'quick') render();
+  return fresh.length;
+}
 async function syncNow() {
-  if (syncing || !state.trips.length) return;
-  if (!navigator.onLine) {
+  if (syncing) return;
+  if (!state.trips.length) {
+    if (window.rideLedgerDesktop?.exchangeLan)
+      await window.rideLedgerDesktop.exchangeLan({ deviceId: state.deviceId, revision: 'empty', bundles: [] }).catch(() => {});
+    return;
+  }
+  if (!navigator.onLine && !window.rideLedgerDesktop) {
     setBadge('离线保存 · 待同步', true);
     return;
   }
@@ -554,12 +612,28 @@ async function syncNow() {
   let added = 0;
   let failed = false;
   try {
+    if (window.rideLedgerDesktop?.exchangeLan) {
+      try {
+        const revision = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(
+          JSON.stringify([state.trips.map(trip => trip.id), state.events])))));
+        const snapshot = await window.rideLedgerDesktop.exchangeLan({ deviceId: state.deviceId, revision,
+          bundles: await Promise.all(state.trips.map(encryptedBundle)) });
+        desktopLan = { status: snapshot.status || '', addresses: snapshot.addresses || [] };
+        for (const bundle of snapshot.bundles || []) {
+          const trip = state.trips.find(item => item.id === bundle.tripId);
+          if (!trip) continue;
+          try { added += await mergeSyncedBundle(trip, bundle); } catch { failed = true; }
+        }
+      } catch { failed = true; }
+    }
     for (const trip of [...state.trips]) {
       if (!state.trips.some(current => current.id === trip.id)) continue;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15000);
       try {
-        const response = await fetch('/sync', {
+        const endpoint = trip.hostedHere && window.rideLedgerDesktop ? '/sync' :
+          trip.syncUrl ? normalizeSyncUrl(trip.syncUrl) + '/sync' : '/sync';
+        const response = await fetch(endpoint, {
           method: 'POST',
           signal: controller.signal,
           headers: { 'Content-Type': 'application/json', 'X-Trip-Token': await tripToken(trip) },
@@ -573,22 +647,7 @@ async function syncNow() {
         if (!state.trips.some(current => current.id === trip.id)) continue;
         for (const bundle of snapshots) {
           try {
-            const incoming = await decryptBundle(trip, bundle);
-            if (!state.trips.some(current => current.id === trip.id)) break;
-            const known = new Set(state.events.map(event => event.id));
-            const fresh = [];
-            for (const event of incoming) {
-              if (event.tripId !== trip.id || !event.id || known.has(event.id)) continue;
-              normalizeEventCurrency(event);
-              fresh.push(event);
-              known.add(event.id);
-            }
-            if (!fresh.length) continue;
-            const nextState = { ...state, events: state.events.concat(fresh) };
-            save(nextState);
-            state = nextState;
-            added += fresh.length;
-            if (currentView !== 'quick') render();
+            added += await mergeSyncedBundle(trip, bundle);
           } catch {
             failed = true;
           }
@@ -599,10 +658,13 @@ async function syncNow() {
     setBadge(failed ? '同步未完成 · 待重试' :
       added ? '已同步 · 新增 ' + added + ' 笔' : '已同步', failed);
   } catch (error) { setBadge('离线保存 · 待同步', true); }
-  finally { syncing = false; }
+  finally {
+    syncing = false;
+    if (desktopSyncPending) { desktopSyncPending = false; setTimeout(syncNow, 0); }
+  }
 }
 
-document.getElementById('main').addEventListener('click', event => {
+document.getElementById('main').addEventListener('click', async event => {
   const historyRemove = event.target.closest('[data-currency-history-remove]');
   if (historyRemove) {
     try {
@@ -644,6 +706,9 @@ document.getElementById('main').addEventListener('click', event => {
   const button = event.target.closest('[data-action]');
   if (!button) return;
   const action = button.dataset.action;
+  if (action === 'stop-phone') {
+    await window.rideLedgerDesktop.stopPhone(); return;
+  }
   if (action === 'new') return openDialog('trip');
   if (action === 'join') return openDialog('join');
   if (action === 'toggle-trip-delete') {
@@ -669,13 +734,17 @@ document.getElementById('main').addEventListener('click', event => {
     return;
   }
   if (action === 'invite') {
-    const trip = activeTrip();
-    document.getElementById('invite-code').value = inviteCode(trip);
-    document.getElementById('invite-role-note').textContent =
-      '本机是“' + personName(trip, trip.localPerson) + '”；对方默认以“' +
-      personName(trip, trip.localPerson === 'a' ? 'b' : 'a') +
-      '”加入。自己的另一台设备可在加入时选自己的名字。';
-    return openDialog('invite');
+    try {
+      const trip = await prepareInvite(activeTrip());
+      document.getElementById('invite-code').value = inviteCode(trip);
+      document.getElementById('invite-role-note').textContent =
+        '本机是“' + personName(trip, trip.localPerson) + '”；对方默认以“' +
+        personName(trip, trip.localPerson === 'a' ? 'b' : 'a') +
+        '”加入。自己的另一台设备可在加入时选自己的名字。' +
+        (trip.syncUrl ? '已包含连接信息，手机无需填写服务地址。' : '');
+      openDialog('invite');
+    } catch (error) { toast(error.message || '准备手机连接失败，请重试'); }
+    return;
   }
   openDialog(action);
 });
@@ -812,21 +881,30 @@ document.getElementById('copy-invite').addEventListener('click', async () => {
   catch { document.getElementById('invite-code').select(); toast('已选中邀请码，请手动复制'); }
 });
 function updateJoinPreview(invite, ownRole) {
+  const existing = state.trips.find(trip => trip.id === invite.id);
+  if (existing && invite.syncUrl) {
+    document.getElementById('join-preview').textContent = '将更新此旅行的连接；保留“' +
+      personName(existing, existing.localPerson) + '”身份和已有账目。';
+    return;
+  }
   document.getElementById('join-preview').textContent = '你将以“' + personName(invite, ownRole) +
-    '”加入；另一位是“' + personName(invite, ownRole === 'a' ? 'b' : 'a') + '”。';
+    '”加入；另一位是“' + personName(invite, ownRole === 'a' ? 'b' : 'a') + '”。' +
+    (invite.syncUrl ? '连接信息已包含，无需填写服务地址。' : '');
 }
 document.querySelector('#join-form textarea[name="code"]').addEventListener('input', event => {
   const identity = document.getElementById('join-identity');
   const preview = document.getElementById('join-preview');
   try {
     const invite = parseInviteCode(event.target.value);
-    const selected = invite.inviterRole === 'b' ? 'a' : 'b';
+    const existing = state.trips.find(trip => trip.id === invite.id);
+    const selected = existing?.localPerson || (invite.inviterRole === 'b' ? 'a' : 'b');
     const select = identity.querySelector('select');
     for (const role of ['a', 'b']) {
       select.querySelector('[value="' + role + '"]').textContent =
         personName(invite, role) + (role === selected ? ' · 同伴（默认）' : ' · 分享者的另一台设备');
     }
     select.value = selected;
+    select.disabled = Boolean(existing);
     identity.hidden = false;
     updateJoinPreview(invite, selected);
   } catch { identity.hidden = true; preview.textContent = ''; }
@@ -849,7 +927,7 @@ document.getElementById('trip-form').addEventListener('submit', event => {
   const secret = base64url(crypto.getRandomValues(new Uint8Array(32)));
   const trip = { id: crypto.randomUUID(), name,
     personA, personB,
-    secret, localPerson: 'a' };
+    secret, localPerson: 'a', ...(window.rideLedgerDesktop ? { hostedHere: true } : {}) };
   state.trips.unshift(trip);
   state.activeTripId = trip.id;
   currentView = 'quick';
@@ -863,12 +941,18 @@ document.getElementById('join-form').addEventListener('submit', event => {
   try {
     const data = new FormData(form);
     const invite = parseInviteCode(data.get('code'));
-    const localPerson = data.get('localPerson');
+    const existing = state.trips.find(trip => trip.id === invite.id);
+    const localPerson = existing?.localPerson || data.get('localPerson');
     if (document.getElementById('join-identity').hidden || !['a', 'b'].includes(localPerson))
       throw new Error('请选择这台设备的使用者');
-    if (state.trips.some(trip => trip.id === invite.id)) throw new Error('这个旅行已加入');
-    const nextState = { ...state, trips: [{ id: invite.id, name: invite.name, personA: invite.personA,
-      personB: invite.personB, secret: invite.secret, localPerson }, ...state.trips],
+    if (existing && !invite.syncUrl) throw new Error('这个旅行已加入');
+    if (existing && base64url(fromBase64url(existing.secret)) !== base64url(fromBase64url(invite.secret)))
+      throw new Error('邀请码与已有旅行的密钥不一致');
+    const nextTrips = existing ? state.trips.map(trip => trip.id === invite.id
+      ? { ...trip, syncUrl: invite.syncUrl } : trip) :
+      [{ id: invite.id, name: invite.name, personA: invite.personA, personB: invite.personB,
+        secret: invite.secret, localPerson, ...(invite.syncUrl ? { syncUrl: invite.syncUrl } : {}) }, ...state.trips];
+    const nextState = { ...state, trips: nextTrips,
       activeTripId: invite.id };
     save(nextState);
     state = nextState;
@@ -877,6 +961,37 @@ document.getElementById('join-form').addEventListener('submit', event => {
     recordFilter = 'all';
     closeDialog(form); render(); window.scrollTo(0, 0); syncNow();
   } catch (error) { toast(error.message || '邀请码无效'); }
+});
+document.getElementById('connection-form').addEventListener('submit', event => {
+  event.preventDefault();
+  try {
+    const trip = activeTrip();
+    const syncUrl = normalizeSyncUrl(document.getElementById('connection-url').value);
+    const nextState = { ...state, trips: state.trips.map(item => item.id === trip.id
+      ? { ...item, syncUrl, hostedHere: !syncUrl && Boolean(window.rideLedgerDesktop) } : item) };
+    save(nextState); state = nextState;
+    closeDialog(event.currentTarget); render(); syncNow();
+  } catch (error) { toast(error.message); }
+});
+document.getElementById('host-on-this-computer').addEventListener('click', async () => {
+  try {
+    const trip = activeTrip();
+    const nextState = { ...state, trips: state.trips.map(item => item.id === trip.id
+      ? { ...item, hostedHere: true } : item) };
+    save(nextState); state = nextState;
+    const connected = await prepareInvite(activeTrip());
+    document.getElementById('connection-dialog').close();
+    document.getElementById('invite-code').value = inviteCode(connected);
+    document.getElementById('invite-role-note').textContent = '已由这台电脑提供连接。手机再次粘贴此码即可更新连接，保留身份和已有账目。';
+    openDialog('invite'); syncNow();
+  } catch (error) { toast(error.message || '连接失败，请重试'); }
+});
+document.getElementById('lan-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  try {
+    await window.rideLedgerDesktop.connectLanAddress(document.getElementById('lan-address').value);
+    closeDialog(event.currentTarget); toast('正在连接同伴'); syncNow();
+  } catch (error) { toast(error.message); }
 });
 function registerEntryForm(id, kind, makeData, makePrefs = null) {
   document.getElementById(id).addEventListener('submit', event => {
@@ -910,6 +1025,25 @@ registerEntryForm('exchange-form', 'exchange', d => {
     toAmount: parseAmount(d.get('toAmount'), toCurrency) };
 }, nextExchangePrefs);
 render();
+if (window.rideLedgerDesktop) {
+  document.title = '双人旅行账本';
+  const subtitle = document.querySelector('.brand small');
+  if (subtitle) subtitle.textContent = '电脑客户端';
+  const applyConnection = connection => {
+    desktopConnection = connection;
+    if (connection.state === 'ready' && connection.url) {
+      const syncUrl = normalizeSyncUrl(connection.url);
+      const nextState = { ...state, trips: state.trips.map(trip => trip.hostedHere ? { ...trip, syncUrl } : trip) };
+      try { save(nextState); state = nextState; } catch { toast('连接已建立，保存信息失败，请重试'); }
+    }
+    if (currentView === 'trips' && activeTrip()) renderTrips(activeTrip());
+  };
+  window.rideLedgerDesktop.getConnection().then(applyConnection).catch(() => {});
+  window.rideLedgerDesktop.onConnectionChanged(applyConnection);
+  window.rideLedgerDesktop.onRemoteChanged(() => {
+    if (syncing) desktopSyncPending = true; else syncNow();
+  });
+}
 window.addEventListener('pageshow', event => {
   if (event.persisted) { currentView = 'quick'; render(); }
   window.scrollTo(0, 0);

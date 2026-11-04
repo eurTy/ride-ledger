@@ -5,7 +5,7 @@ import vm from 'node:vm';
 const source = readFileSync(new URL('../../web/app.js', import.meta.url), 'utf8');
 const key = 'ride-ledger-web-v1';
 
-export function client(initial = {}) {
+export function client(initial = {}, { desktopBridge } = {}) {
   const storage = new Map([[key, JSON.stringify(initial)]]);
   const elements = new Map();
   const windowListeners = new Map(), documentListeners = new Map();
@@ -28,7 +28,7 @@ export function client(initial = {}) {
     return elements.get(id);
   }
   const context = vm.createContext({
-    TextEncoder, TextDecoder, btoa, atob, DOMException, AbortController, AbortSignal,
+    TextEncoder, TextDecoder, btoa, atob, DOMException, AbortController, AbortSignal, URL,
     crypto: webcrypto, history: {}, navigator: { onLine: false },
     localStorage: { getItem: name => storage.get(name) ?? null,
       setItem: (name, value) => storage.set(name, value) },
@@ -38,7 +38,8 @@ export function client(initial = {}) {
         if (selector === '#join-form select[name="localPerson"]') return element('join-select');
         return element(selector);
       }, querySelectorAll: () => [], addEventListener: listen(documentListeners) },
-    window: { addEventListener: listen(windowListeners), scrollTo() {} },
+    window: { addEventListener: listen(windowListeners), scrollTo() {},
+      ...(desktopBridge ? { rideLedgerDesktop: desktopBridge } : {}) },
     FormData: class { constructor(form) { this.form = form; }
       get(name) {
         if (this.form === element('join-form'))
@@ -51,7 +52,8 @@ export function client(initial = {}) {
   vm.runInContext(source, context, { filename: 'web/app.js' });
   const run = expression => vm.runInContext(expression, context);
   const api = run('({ base64url, encryptedBundle, decryptBundle, tripToken, syncNow, save, ' +
-    'inviteCode, parseInviteCode, addEvent, summary, getState: () => state, setState: next => state = next })');
+    'inviteCode, parseInviteCode, addEvent, summary, mergeSyncedBundle, prepareInvite, ' +
+    'getState: () => state, setState: next => state = next })');
   const emit = async (name, event = {}, target = 'window') => {
     const registry = target === 'window' ? windowListeners : documentListeners;
     await Promise.all((registry.get(name) || []).map(callback => callback(event)));
