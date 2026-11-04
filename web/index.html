@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#144937">
   <title>双人旅行账本 · 网页试用</title>
   <link rel="icon" href="data:,">
@@ -48,7 +48,7 @@
     <div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">保存</button></div>
   </form></dialog>
 
-  <dialog id="invite-dialog"><div class="dialog-form"><div class="dialog-title"><span class="eyebrow">INVITE</span><h2>邀请同伴加入</h2></div><p class="muted">邀请码包含旅行密钥。对方可在安卓应用或网页试用版中加入同一旅行。</p><p id="invite-role-note" class="muted"></p><textarea id="invite-code" rows="5" readonly></textarea><div class="dialog-actions"><button type="button" class="button ghost cancel">关闭</button><button type="button" class="button primary" id="copy-invite">复制邀请码</button></div></div></dialog>
+  <dialog id="invite-dialog"><div class="dialog-form"><div class="dialog-title"><span class="eyebrow">INVITE</span><h2>邀请同伴加入</h2></div><p class="muted">邀请码包含旅行密钥。对方可在手机、电脑版或网页中加入同一旅行。</p><p id="invite-role-note" class="muted"></p><textarea id="invite-code" rows="5" readonly></textarea><div class="dialog-actions"><button type="button" class="button ghost cancel">关闭</button><button type="button" class="button" id="share-invite" hidden>系统分享</button><button type="button" class="button primary" id="copy-invite">复制邀请码</button></div></div></dialog>
   <div id="toast" role="status" aria-live="polite"></div>
   <dialog id="connection-dialog"><form id="connection-form" class="dialog-form">
     <div class="dialog-title"><h2>当前旅行连接</h2></div>

@@ -1,10 +1,11 @@
 const STORAGE_KEY = 'ride-ledger-web-v1';
+const deviceBridge = window.rideLedgerDesktop || window.rideLedgerIOS;
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 let state;
-try { state = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
-catch { state = {}; }
+try { state = JSON.parse(window.rideLedgerIOS ? window.rideLedgerIOS.loadState() : localStorage.getItem(STORAGE_KEY) || '{}'); }
+catch (error) { if (window.rideLedgerIOS) throw error; state = {}; }
 state.trips ||= [];
 state.events ||= [];
 state.quickPrefs ||= {};
@@ -38,11 +39,15 @@ function normalizeEventCurrency(event) {
 }
 let migratedCurrency = false;
 for (const event of state.events) migratedCurrency = normalizeEventCurrency(event) || migratedCurrency;
-if (migratedCurrency) localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+if (migratedCurrency) save();
 let syncing = false;
 let toastTimer;
 
-function save(nextState = state) { localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState)); }
+function save(nextState = state) {
+  const serialized = JSON.stringify(nextState);
+  if (window.rideLedgerIOS) window.rideLedgerIOS.writeState(serialized);
+  else localStorage.setItem(STORAGE_KEY, serialized);
+}
 function activeTrip() { return state.trips.find(trip => trip.id === state.activeTripId); }
 function personName(trip, person) { return person === 'a' ? trip.personA : trip.personB; }
 function personChoiceLabel(trip, person) {
@@ -442,14 +447,20 @@ function renderTrips(trip) {
     '<div class="action-row"><button class="button" data-action="join">凭邀请码加入</button>' +
     '<button class="button" data-action="invite">分享当前旅行邀请码</button>' +
     '<button class="button" data-action="connection">连接设置</button>' +
-    (window.rideLedgerDesktop ? '<button class="button" data-action="lan">同热点地址直连</button>' : '') + '</div>' +
+    (deviceBridge ? '<button class="button" data-action="lan">同热点地址直连</button>' : '') +
+    (window.rideLedgerIOS ? '<button class="button" data-action="export-backup">导出本机备份</button>' : '') + '</div>' +
     (window.rideLedgerDesktop ? '<div class="connection-panel"><strong>' +
       escapeHtml(desktopConnection.message || '分享邀请码时自动连接手机') + '</strong>' +
       '<p>不同 Wi-Fi：分享邀请码后，手机会自动读取连接信息。请保持电脑和软件运行。</p>' +
       (desktopLan.addresses.length ? '<details class="connection-addresses"><summary>查看本机局域网地址</summary><small>' +
         escapeHtml(desktopLan.addresses.join(' / ')) + '</small></details>' : '') +
       (desktopConnection.state === 'ready' ? '<button class="button ghost" data-action="stop-phone">关闭手机公网连接</button>' : '') +
-      '</div>' : '<p class="sync-note">邀请码包含连接信息时会自动配置；离线记录保存在当前设备。</p>');
+      '</div>' : window.rideLedgerIOS ? '<div class="connection-panel"><strong>' +
+      escapeHtml(desktopLan.status || '同一热点下可自动同步') + '</strong>' +
+      '<p>允许本地网络访问后，可与安卓和电脑交换离线记录。不同 Wi-Fi 时，加入电脑分享的邀请码即可取得连接。</p>' +
+      (desktopLan.addresses.length ? '<details class="connection-addresses"><summary>查看本机局域网地址</summary><small>' +
+        escapeHtml(desktopLan.addresses.join(' / ')) + '</small></details>' : '') + '</div>' :
+      '<p class="sync-note">邀请码包含连接信息时会自动配置；离线记录保存在当前设备。</p>');
 }
 function render() {
   const main = document.getElementById('main');
@@ -599,11 +610,11 @@ async function mergeSyncedBundle(trip, bundle) {
 async function syncNow() {
   if (syncing) return;
   if (!state.trips.length) {
-    if (window.rideLedgerDesktop?.exchangeLan)
-      await window.rideLedgerDesktop.exchangeLan({ deviceId: state.deviceId, revision: 'empty', bundles: [] }).catch(() => {});
+    if (deviceBridge?.exchangeLan)
+      await deviceBridge.exchangeLan({ deviceId: state.deviceId, revision: 'empty', bundles: [] }).catch(() => {});
     return;
   }
-  if (!navigator.onLine && !window.rideLedgerDesktop) {
+  if (!navigator.onLine && !deviceBridge) {
     setBadge('离线保存 · 待同步', true);
     return;
   }
@@ -612,11 +623,11 @@ async function syncNow() {
   let added = 0;
   let failed = false;
   try {
-    if (window.rideLedgerDesktop?.exchangeLan) {
+    if (deviceBridge?.exchangeLan) {
       try {
         const revision = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(
           JSON.stringify([state.trips.map(trip => trip.id), state.events])))));
-        const snapshot = await window.rideLedgerDesktop.exchangeLan({ deviceId: state.deviceId, revision,
+        const snapshot = await deviceBridge.exchangeLan({ deviceId: state.deviceId, revision,
           bundles: await Promise.all(state.trips.map(encryptedBundle)) });
         desktopLan = { status: snapshot.status || '', addresses: snapshot.addresses || [] };
         for (const bundle of snapshot.bundles || []) {
@@ -628,6 +639,7 @@ async function syncNow() {
     }
     for (const trip of [...state.trips]) {
       if (!state.trips.some(current => current.id === trip.id)) continue;
+      if (window.rideLedgerIOS && !trip.syncUrl) continue;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15000);
       try {
@@ -706,6 +718,12 @@ document.getElementById('main').addEventListener('click', async event => {
   const button = event.target.closest('[data-action]');
   if (!button) return;
   const action = button.dataset.action;
+  if (action === 'export-backup' && window.rideLedgerIOS) {
+    if (!confirm('备份包含旅行密钥和全部账目，请妥善保管。继续导出？')) return;
+    try { await window.rideLedgerIOS.exportBackup(); }
+    catch (error) { toast(error.message || '导出失败，请重试'); }
+    return;
+  }
   if (action === 'stop-phone') {
     await window.rideLedgerDesktop.stopPhone(); return;
   }
@@ -877,8 +895,17 @@ document.getElementById('confirm-delete-trip').addEventListener('click', () => {
   toast('旅行及本机记录已删除');
 });
 document.getElementById('copy-invite').addEventListener('click', async () => {
-  try { await navigator.clipboard.writeText(document.getElementById('invite-code').value); toast('邀请码已复制'); }
+  try {
+    const code = document.getElementById('invite-code').value;
+    if (window.rideLedgerIOS) await window.rideLedgerIOS.copyText(code);
+    else await navigator.clipboard.writeText(code);
+    toast('邀请码已复制');
+  }
   catch { document.getElementById('invite-code').select(); toast('已选中邀请码，请手动复制'); }
+});
+document.getElementById('share-invite').addEventListener('click', async () => {
+  try { await window.rideLedgerIOS.shareInvite(document.getElementById('invite-code').value); }
+  catch (error) { toast(error.message || '分享失败，请重试'); }
 });
 function updateJoinPreview(invite, ownRole) {
   const existing = state.trips.find(trip => trip.id === invite.id);
@@ -989,7 +1016,7 @@ document.getElementById('host-on-this-computer').addEventListener('click', async
 document.getElementById('lan-form').addEventListener('submit', async event => {
   event.preventDefault();
   try {
-    await window.rideLedgerDesktop.connectLanAddress(document.getElementById('lan-address').value);
+    await deviceBridge.connectLanAddress(document.getElementById('lan-address').value);
     closeDialog(event.currentTarget); toast('正在连接同伴'); syncNow();
   } catch (error) { toast(error.message); }
 });
@@ -1044,6 +1071,16 @@ if (window.rideLedgerDesktop) {
     if (syncing) desktopSyncPending = true; else syncNow();
   });
 }
+if (window.rideLedgerIOS) {
+  document.title = '双人旅行账本';
+  document.querySelector(':root').setAttribute('data-platform', 'ios');
+  const subtitle = document.querySelector('.brand small');
+  if (subtitle) subtitle.textContent = 'iPhone 客户端';
+  document.getElementById('share-invite').hidden = false;
+  window.rideLedgerIOS.onRemoteChanged(() => {
+    if (syncing) desktopSyncPending = true; else syncNow();
+  });
+}
 window.addEventListener('pageshow', event => {
   if (event.persisted) { currentView = 'quick'; render(); }
   window.scrollTo(0, 0);
@@ -1053,4 +1090,4 @@ syncNow();
 setInterval(syncNow, 15000);
 window.addEventListener('online', syncNow);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+if (!window.rideLedgerIOS && 'serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

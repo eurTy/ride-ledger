@@ -6,9 +6,10 @@
   "description": "Two-person offline travel ledger with desktop-to-phone invitation sync",
   "main": "desktop/main.cjs",
   "scripts": {
+    "ios:prepare": "node ios/generate-project.mjs",
     "desktop": "node desktop/run.mjs",
     "desktop:package": "node desktop/package.mjs",
-    "test": "node --test tests/web-sync.test.mjs tests/invite-network.test.mjs tests/desktop-sync.test.mjs"
+    "test": "node --test tests/web-sync.test.mjs tests/invite-network.test.mjs tests/desktop-sync.test.mjs tests/ios-bridge.test.mjs"
   },
   "devDependencies": {
     "electron": "45.2.2",

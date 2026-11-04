@@ -1,0 +1,74 @@
+name: iOS build and simulator checks
+
+on:
+  push:
+    branches: [main, codex/ios-testflight]
+    paths: ['ios/**', 'web/**', 'tests/support/**', '.github/workflows/ios-build.yml']
+  pull_request:
+    paths: ['ios/**', 'web/**', 'tests/support/**', '.github/workflows/ios-build.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Prepare assets and verify Apple SDK
+        run: |
+          node ios/generate-project.mjs
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          node -e "const {execFileSync}=require('node:child_process');const v=execFileSync('xcrun',['--sdk','iphoneos','--show-sdk-version'],{encoding:'utf8'}).trim();if(Number(v.split('.')[0])<26)throw Error('iOS 26 SDK or later is required')"
+          plutil -lint ios/RideLedger/Info.plist ios/RideLedger/PrivacyInfo.xcprivacy ios/RideLedger.xcodeproj/project.pbxproj
+      - name: Select an available iPhone simulator
+        run: |
+          node <<'NODE'
+          const {execFileSync}=require('node:child_process');
+          const {appendFileSync}=require('node:fs');
+          const values=JSON.parse(execFileSync('xcrun',['simctl','list','devices','available','--json']));
+          const device=Object.entries(values.devices).filter(([runtime])=>runtime.includes('.iOS-'))
+            .flatMap(([,items])=>items).find(item=>item.isAvailable&&item.name.startsWith('iPhone'));
+          if(!device||!/^[0-9A-F-]{36}$/i.test(device.udid))throw Error('No iPhone simulator is available');
+          appendFileSync(process.env.GITHUB_ENV,'SIMULATOR_UDID='+device.udid+'\n');
+          console.log('Selected '+device.name);
+          NODE
+        shell: bash
+      - name: Build and test the real iOS application
+        run: |
+          xcrun simctl bootstatus "$SIMULATOR_UDID" -b
+          set -o pipefail
+          xcodebuild test -project ios/RideLedger.xcodeproj -scheme RideLedger \
+            -configuration Debug -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -parallel-testing-enabled NO -derivedDataPath ios/build/DerivedData \
+            -resultBundlePath ios/build/TestResults.xcresult \
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO DEVELOPMENT_TEAM="" \
+            2>&1 | tee ios-test.log
+      - name: Build an unsigned device archive
+        run: |
+          set -o pipefail
+          xcodebuild archive -project ios/RideLedger.xcodeproj -scheme RideLedger \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath ios/build/RideLedger-unsigned.xcarchive \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee ios-archive.log
+          ditto -c -k --sequesterRsrc --keepParent ios/build/RideLedger-unsigned.xcarchive ios/build/RideLedger-unsigned.xcarchive.zip
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ios-build-and-test-results
+          path: |
+            ios/build/TestResults.xcresult
+            ios/build/RideLedger-unsigned.xcarchive.zip
+            ios-test.log
+            ios-archive.log
+          retention-days: 14
+          if-no-files-found: warn

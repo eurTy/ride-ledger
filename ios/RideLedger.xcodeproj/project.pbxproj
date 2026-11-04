@@ -1,0 +1,48 @@
+// !$*UTF8*$!
+{ archiveVersion = 1; classes = {}; objectVersion = 56;
+ objects = {
+000000000000000000000001 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RideLedger/LocalLedger.swift"; sourceTree = "<group>"; };
+000000000000000000000002 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RideLedger/LocalWebServer.swift"; sourceTree = "<group>"; };
+000000000000000000000003 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RideLedger/LanSync.swift"; sourceTree = "<group>"; };
+000000000000000000000004 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RideLedger/IOSController.swift"; sourceTree = "<group>"; };
+000000000000000000000005 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RideLedger/RideLedgerApp.swift"; sourceTree = "<group>"; };
+000000000000000000000006 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RideLedgerTests/NativeTests.swift"; sourceTree = "<group>"; };
+000000000000000000000007 = { isa = PBXFileReference; lastKnownFileType = folder; path = "generated/Web"; sourceTree = "<group>"; };
+000000000000000000000008 = { isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "generated/Assets.xcassets"; sourceTree = "<group>"; };
+000000000000000000000009 = { isa = PBXFileReference; lastKnownFileType = text.xml; path = "RideLedger/PrivacyInfo.xcprivacy"; sourceTree = "<group>"; };
+00000000000000000000000A = { isa = PBXFileReference; lastKnownFileType = text.json; path = "generated/interop.json"; sourceTree = "<group>"; };
+00000000000000000000000B = { isa = PBXFileReference; explicitFileType = wrapper.application; path = RideLedger.app; sourceTree = BUILT_PRODUCTS_DIR; };
+00000000000000000000000C = { isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = RideLedgerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+00000000000000000000000D = { isa = PBXBuildFile; fileRef = 000000000000000000000001; };
+00000000000000000000000E = { isa = PBXBuildFile; fileRef = 000000000000000000000002; };
+00000000000000000000000F = { isa = PBXBuildFile; fileRef = 000000000000000000000003; };
+000000000000000000000010 = { isa = PBXBuildFile; fileRef = 000000000000000000000004; };
+000000000000000000000011 = { isa = PBXBuildFile; fileRef = 000000000000000000000005; };
+000000000000000000000012 = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ("00000000000000000000000D","00000000000000000000000E","00000000000000000000000F","000000000000000000000010","000000000000000000000011",); runOnlyForDeploymentPostprocessing = 0; };
+000000000000000000000013 = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+000000000000000000000014 = { isa = PBXBuildFile; fileRef = 000000000000000000000007; };
+000000000000000000000015 = { isa = PBXBuildFile; fileRef = 000000000000000000000008; };
+000000000000000000000016 = { isa = PBXBuildFile; fileRef = 000000000000000000000009; };
+000000000000000000000017 = { isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ("000000000000000000000014","000000000000000000000015","000000000000000000000016",); runOnlyForDeploymentPostprocessing = 0; };
+000000000000000000000018 = { isa = PBXBuildFile; fileRef = 000000000000000000000006; };
+000000000000000000000019 = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = ("000000000000000000000018",); runOnlyForDeploymentPostprocessing = 0; };
+00000000000000000000001A = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+00000000000000000000001B = { isa = PBXBuildFile; fileRef = 00000000000000000000000A; };
+00000000000000000000001C = { isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ("00000000000000000000001B",); runOnlyForDeploymentPostprocessing = 0; };
+00000000000000000000001D = { isa = XCBuildConfiguration; name = Debug; buildSettings = { SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 16.0; SWIFT_VERSION = 5.0; CLANG_ENABLE_MODULES = YES; ENABLE_USER_SCRIPT_SANDBOXING = YES; DEBUG_INFORMATION_FORMAT = dwarf; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; }; };
+00000000000000000000001E = { isa = XCBuildConfiguration; name = Release; buildSettings = { SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 16.0; SWIFT_VERSION = 5.0; CLANG_ENABLE_MODULES = YES; ENABLE_USER_SCRIPT_SANDBOXING = YES; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; SWIFT_COMPILATION_MODE = wholemodule; }; };
+00000000000000000000001F = { isa = XCConfigurationList; buildConfigurations = ("00000000000000000000001D","00000000000000000000001E",); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+000000000000000000000020 = { isa = XCBuildConfiguration; name = Debug; buildSettings = { PRODUCT_NAME = RideLedger; PRODUCT_BUNDLE_IDENTIFIER = com.eurty.rideledger; INFOPLIST_FILE = RideLedger/Info.plist; MARKETING_VERSION = 0.1.4; CURRENT_PROJECT_VERSION = 1; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO; ENABLE_TESTABILITY = YES; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; }; };
+000000000000000000000021 = { isa = XCBuildConfiguration; name = Release; buildSettings = { PRODUCT_NAME = RideLedger; PRODUCT_BUNDLE_IDENTIFIER = com.eurty.rideledger; INFOPLIST_FILE = RideLedger/Info.plist; MARKETING_VERSION = 0.1.4; CURRENT_PROJECT_VERSION = 1; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO; }; };
+000000000000000000000022 = { isa = XCConfigurationList; buildConfigurations = ("000000000000000000000020","000000000000000000000021",); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+000000000000000000000023 = { isa = PBXNativeTarget; name = RideLedger; productName = RideLedger; productReference = 00000000000000000000000B; productType = "com.apple.product-type.application"; buildConfigurationList = 000000000000000000000022; buildPhases = ("000000000000000000000012","000000000000000000000013","000000000000000000000017",); buildRules = (); dependencies = (); };
+000000000000000000000024 = { isa = XCBuildConfiguration; name = Debug; buildSettings = { PRODUCT_NAME = RideLedgerTests; PRODUCT_BUNDLE_IDENTIFIER = com.eurty.rideledger.tests; GENERATE_INFOPLIST_FILE = YES; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/RideLedger.app/RideLedger"; BUNDLE_LOADER = "$(TEST_HOST)"; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic; }; };
+000000000000000000000025 = { isa = XCBuildConfiguration; name = Release; buildSettings = { PRODUCT_NAME = RideLedgerTests; PRODUCT_BUNDLE_IDENTIFIER = com.eurty.rideledger.tests; GENERATE_INFOPLIST_FILE = YES; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/RideLedger.app/RideLedger"; BUNDLE_LOADER = "$(TEST_HOST)"; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic; }; };
+000000000000000000000026 = { isa = XCConfigurationList; buildConfigurations = ("000000000000000000000024","000000000000000000000025",); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+000000000000000000000027 = { isa = PBXTargetDependency; target = 000000000000000000000023; };
+000000000000000000000028 = { isa = PBXNativeTarget; name = RideLedgerTests; productName = RideLedgerTests; productReference = 00000000000000000000000C; productType = "com.apple.product-type.bundle.unit-test"; buildConfigurationList = 000000000000000000000026; buildPhases = ("000000000000000000000019","00000000000000000000001A","00000000000000000000001C",); buildRules = (); dependencies = ("000000000000000000000027",); };
+000000000000000000000029 = { isa = PBXGroup; children = ("00000000000000000000000B","00000000000000000000000C",); name = Products; sourceTree = "<group>"; };
+00000000000000000000002A = { isa = PBXGroup; children = ("000000000000000000000001","000000000000000000000002","000000000000000000000003","000000000000000000000004","000000000000000000000005","000000000000000000000006","000000000000000000000007","000000000000000000000008","000000000000000000000009","00000000000000000000000A","000000000000000000000029",); sourceTree = "<group>"; };
+00000000000000000000002B = { isa = PBXProject; attributes = { LastUpgradeCheck = 2600; BuildIndependentTargetsInParallel = YES; }; buildConfigurationList = 00000000000000000000001F; compatibilityVersion = "Xcode 14.0"; developmentRegion = "zh-Hans"; knownRegions = ("zh-Hans", en, Base); mainGroup = 00000000000000000000002A; productRefGroup = 000000000000000000000029; projectDirPath = ""; projectRoot = ""; targets = ("000000000000000000000023","000000000000000000000028",); };
+ }; rootObject = 00000000000000000000002B;
+}

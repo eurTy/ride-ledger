@@ -5,7 +5,7 @@ import vm from 'node:vm';
 const source = readFileSync(new URL('../../web/app.js', import.meta.url), 'utf8');
 const key = 'ride-ledger-web-v1';
 
-export function client(initial = {}, { desktopBridge } = {}) {
+export function client(initial = {}, { desktopBridge, iosBridge } = {}) {
   const storage = new Map([[key, JSON.stringify(initial)]]);
   const elements = new Map();
   const windowListeners = new Map(), documentListeners = new Map();
@@ -39,7 +39,8 @@ export function client(initial = {}, { desktopBridge } = {}) {
         return element(selector);
       }, querySelectorAll: () => [], addEventListener: listen(documentListeners) },
     window: { addEventListener: listen(windowListeners), scrollTo() {},
-      ...(desktopBridge ? { rideLedgerDesktop: desktopBridge } : {}) },
+      ...(desktopBridge ? { rideLedgerDesktop: desktopBridge } : {}),
+      ...(iosBridge ? { rideLedgerIOS: iosBridge } : {}) },
     FormData: class { constructor(form) { this.form = form; }
       get(name) {
         if (this.form === element('join-form'))
@@ -59,7 +60,7 @@ export function client(initial = {}, { desktopBridge } = {}) {
     await Promise.all((registry.get(name) || []).map(callback => callback(event)));
   };
   return { api, run, context, element, emit,
-    stored: () => JSON.parse(storage.get(key)) };
+    stored: () => JSON.parse(iosBridge ? iosBridge.loadState() : storage.get(key)) };
 }
 
 export function trip(localPerson = 'a') {

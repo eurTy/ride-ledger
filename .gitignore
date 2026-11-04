@@ -10,4 +10,11 @@ sync-server/data/
 node_modules/
 .env
 .env.*
+ios/generated/
+ios/build/
+ios/*.xcarchive/
+**/xcuserdata/
+*.p12
+*.mobileprovision
+AuthKey_*.p8
 

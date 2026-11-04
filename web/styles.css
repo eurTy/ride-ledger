@@ -254,6 +254,17 @@ dialog::backdrop { background: rgba(15,40,27,.44); }
   color: #fff; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s;
 }
 #toast.show { opacity: 1; }
+:root[data-platform="ios"] .topbar {
+  height: calc(60px + env(safe-area-inset-top));
+  padding-top: env(safe-area-inset-top);
+}
+:root[data-platform="ios"] .main { padding-bottom: calc(114px + env(safe-area-inset-bottom)); }
+:root[data-platform="ios"] .dialog-form input,
+:root[data-platform="ios"] .dialog-form select,
+:root[data-platform="ios"] .dialog-form textarea,
+:root[data-platform="ios"] .note-field input { font-size: 16px; }
+:root[data-platform="ios"] dialog { max-height: calc(100dvh - 32px); }
+:root[data-platform="ios"] #toast { bottom: calc(90px + env(safe-area-inset-bottom)); }
 @media (max-width: 760px) {
   .topbar { height: 60px; padding: 0 16px; }
   .brand strong { font-size: 13px; }
