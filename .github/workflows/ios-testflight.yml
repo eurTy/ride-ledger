@@ -1,0 +1,40 @@
+name: Upload iOS to TestFlight
+
+# Signing and uploading never run on push or pull requests.
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: 'New positive build number, higher than the previous TestFlight upload'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: macos-15
+    timeout-minutes: 30
+    environment: ios-testflight
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Select stable Xcode 26 or later
+        run: node ios/select-xcode.mjs
+      - name: Prepare and upload signed build
+        env:
+          IOS_BUILD_NUMBER: ${{ inputs.build_number }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          IOS_DISTRIBUTION_P12_BASE64: ${{ secrets.IOS_DISTRIBUTION_P12_BASE64 }}
+          IOS_DISTRIBUTION_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_PASSWORD }}
+          IOS_PROFILE_BASE64: ${{ secrets.IOS_PROFILE_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: bash ios/upload-testflight.sh

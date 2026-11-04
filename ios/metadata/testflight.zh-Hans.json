@@ -1,0 +1,9 @@
+{
+  "appName": "双人旅行账本",
+  "bundleId": "com.eurty.rideledger",
+  "description": "为两位同行者记录旅行现金。分别填写原始资金，快速记录共同或个人支出、还款和换汇，按不同货币复盘现金余额与应还金额。没有网络也能记账；连入同一热点后可同步。连接不同 Wi-Fi 时，可凭电脑版分享的邀请码使用电脑提供的 HTTPS 中转服务。",
+  "whatToTest": "测试新建旅行、快速记账、货币记忆、换汇、删除与重开保留。允许本地网络后，核对同热点安卓或 Windows 设备的双向同步。不同网络时，使用 Windows 分享的邀请码自动配置连接；电脑需持续开机联网。请仅用虚构记录测试。",
+  "privacyPolicyURL": null,
+  "exportComplianceAnsweredInAppStoreConnect": false,
+  "reviewNotes": "无需登录，可单机离线测试全部记账功能。新建虚构旅行，给甲添加 CNY 100 原始资金，再由甲记录 CNY 20 共同支出，甲现金应为 CNY 80，乙应还甲 CNY 10。不同币种分别结算。多设备请使用同一旅行的邀请码。同步仅在应用前台运行；跨网临时服务需要电脑持续运行。"
+}

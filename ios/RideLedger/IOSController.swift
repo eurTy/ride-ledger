@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import UIKit
 import UniformTypeIdentifiers
 
 @MainActor
@@ -84,7 +85,7 @@ final class IOSController: NSObject, ObservableObject, WKScriptMessageHandlerWit
         view.isOpaque = false; view.backgroundColor = UIColor(red: 0.95, green: 0.97, blue: 0.95, alpha: 1)
         view.allowsBackForwardNavigationGestures = false
         #if DEBUG
-        view.isInspectable = true
+        if #available(iOS 16.4, *) { view.isInspectable = true }
         #endif
         webView = view
         if let origin = origin { view.load(URLRequest(url: origin)) }

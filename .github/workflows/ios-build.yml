@@ -17,12 +17,14 @@ concurrency:
 
 jobs:
   ios:
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Select stable Xcode 26 or later
+        run: node ios/select-xcode.mjs
       - name: Prepare assets and verify Apple SDK
         run: |
           node ios/generate-project.mjs
@@ -37,6 +39,7 @@ jobs:
           const {appendFileSync}=require('node:fs');
           const values=JSON.parse(execFileSync('xcrun',['simctl','list','devices','available','--json']));
           const device=Object.entries(values.devices).filter(([runtime])=>runtime.includes('.iOS-'))
+            .sort(([a],[b])=>b.localeCompare(a,undefined,{numeric:true}))
             .flatMap(([,items])=>items).find(item=>item.isAvailable&&item.name.startsWith('iPhone'));
           if(!device||!/^[0-9A-F-]{36}$/i.test(device.udid))throw Error('No iPhone simulator is available');
           appendFileSync(process.env.GITHUB_ENV,'SIMULATOR_UDID='+device.udid+'\n');

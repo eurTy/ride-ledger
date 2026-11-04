@@ -1,5 +1,6 @@
 import XCTest
 import WebKit
+import UIKit
 @testable import RideLedger
 
 final class NativeTests: XCTestCase {
