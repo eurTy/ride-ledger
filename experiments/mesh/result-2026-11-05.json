@@ -1,0 +1,96 @@
+{
+  "generatedAt": "2026-11-05T02:21:11.443Z",
+  "status": "protocol_checks_passed_radio_validation_pending",
+  "passed": 10,
+  "failed": 0,
+  "scope": "Real loopback TCP with production framing and ledger merge; separate multi-member operation-log prototype.",
+  "hardwareValidation": {
+    "androidToAndroid": "not_performed",
+    "hotspotRadio": "not_performed",
+    "wifiDirect": "not_performed",
+    "bluetooth": "not_performed",
+    "reason": "This program does not operate Android wireless hardware. Radio discovery, pairing, range, power and vendor compatibility require physical Android devices."
+  },
+  "releasedAppChanged": false,
+  "iosRemainsPaused": true,
+  "measurements": [
+    {
+      "scenario": "real-loopback-chain",
+      "devices": 3,
+      "links": [
+        "A-B",
+        "B-C"
+      ],
+      "uniqueEventsOnEach": 3,
+      "note": "Existing two-person ledger on three device replicas. This does not make the product support three participants."
+    },
+    {
+      "scenario": "real-loopback-store-and-forward",
+      "originOffline": true,
+      "receiverHasRecord": true
+    },
+    {
+      "scenario": "real-loopback-ring",
+      "devices": 4,
+      "duplicateMoney": false,
+      "deletedRecordResurrected": false
+    },
+    {
+      "scenario": "real-loopback-restart",
+      "staleReplicaEvents": 3,
+      "recoveredReplicaEvents": 5
+    },
+    {
+      "scenario": "prototype-three-members",
+      "cents": [
+        34,
+        34,
+        33
+      ],
+      "totals": {
+        "cash": {
+          "00000000-0000-4000-8000-000000000001": {
+            "CNY": "9933"
+          },
+          "00000000-0000-4000-8000-000000000002": {
+            "CNY": "4966",
+            "USD": "-601"
+          },
+          "00000000-0000-4000-8000-000000000003": {
+            "USD": "1500",
+            "EUR": "450"
+          }
+        },
+        "net": {
+          "00000000-0000-4000-8000-000000000001": {
+            "CNY": "33",
+            "USD": "-301"
+          },
+          "00000000-0000-4000-8000-000000000002": {
+            "CNY": "0",
+            "USD": "301"
+          },
+          "00000000-0000-4000-8000-000000000003": {
+            "CNY": "-33"
+          }
+        },
+        "spent": {
+          "CNY": "101",
+          "USD": "601"
+        }
+      },
+      "note": "Member roster replication, native migration, UI and a settlement transfer planner are not implemented."
+    },
+    {
+      "scenario": "prototype-delta-size",
+      "historicalOperations": 200,
+      "newOperations": 1,
+      "stableDigestsMatch": true,
+      "encryptedDeltaBytes": 807,
+      "bothDigestBytes": 42652,
+      "incrementalWithIndexBytes": 43459,
+      "bothFullSnapshotBytes": 275875,
+      "note": "Application JSON bytes only. Radio framing, encryption handshake and OS scheduling are not measured; digest indices still grow with history."
+    }
+  ]
+}
