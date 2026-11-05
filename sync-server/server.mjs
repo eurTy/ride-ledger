@@ -3,13 +3,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { teamEnrollmentMailbox } from './team-enrollment.mjs';
 
 export async function startSyncServer(options = {}) {
   const port = options.port ?? Number(process.env.PORT || 8787);
   const dataDir = path.resolve(options.dataDir || process.env.DATA_DIR || path.join(import.meta.dirname, 'data'));
   const webDir = path.resolve(options.webDir || path.join(import.meta.dirname, '../web'));
   const maxBytes = 12_000_000;
-  await fs.mkdir(dataDir, { recursive: true });
+  const enrollmentOnly = options.enrollmentOnly || process.env.ENROLLMENT_ONLY === '1';
+  if (!enrollmentOnly) await fs.mkdir(dataDir, { recursive: true });
 
   const validId = value => typeof value === 'string' &&
     /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
@@ -31,9 +33,12 @@ export async function startSyncServer(options = {}) {
     res.end(JSON.stringify(body));
   }
 
+  const enrollment = teamEnrollmentMailbox(reply);
   const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') return reply(res, 200,
       { ok: true, service: 'ride-ledger', instanceId: options.instanceId || '' });
+    if (req.url === '/team-enrollment') return enrollment(req, res);
+    if (enrollmentOnly) return reply(res, 404, { error: 'not found' });
     if (req.method === 'OPTIONS' && req.url === '/sync') return reply(res, 200, { ok: true });
     const staticFiles = {
       '/': ['index.html', 'text/html; charset=utf-8'],

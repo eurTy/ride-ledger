@@ -35,6 +35,7 @@ $env:TMP = $toolTemp
 
 $tools = Join-Path $Sdk 'build-tools\36.1.0'
 $androidJar = Join-Path $Sdk 'platforms\android-36.1\android.jar'
+$qrCore = & (Join-Path $project 'scripts/android-qr-core.ps1')
 $javac = Join-Path $JavaHome 'bin\javac.exe'
 $jar = Join-Path $JavaHome 'bin\jar.exe'
 $keytool = Join-Path $JavaHome 'bin\keytool.exe'
@@ -51,7 +52,7 @@ foreach ($required in $requiredTools) {
 
 $sources = @(rg --files (Join-Path $project 'app\src\main\java') -g '*.java')
 if ($sources.Count -eq 0) { throw 'No Java sources found.' }
-& $javac --release 17 -encoding UTF-8 -classpath $androidJar -d (Join-Path $build 'classes') @sources
+& $javac --release 17 -encoding UTF-8 -classpath "$androidJar;$qrCore" -d (Join-Path $build 'classes') @sources
 if ($LASTEXITCODE -ne 0) { throw 'Java compilation failed.' }
 
 $classJar = Join-Path $build 'classes.jar'
@@ -59,13 +60,14 @@ $classJar = Join-Path $build 'classes.jar'
 if ($LASTEXITCODE -ne 0) { throw 'Class archive failed.' }
 
 $env:JAVA_HOME = $JavaHome
-& (Join-Path $tools 'd8.bat') --lib $androidJar --min-api 26 --output (Join-Path $build 'dex') $classJar
+& (Join-Path $tools 'd8.bat') --lib $androidJar --min-api 26 --output (Join-Path $build 'dex') $classJar $qrCore
 if ($LASTEXITCODE -ne 0) { throw 'DEX compilation failed.' }
 
 $unsigned = Join-Path $build 'unsigned.apk'
 & (Join-Path $tools 'aapt2.exe') link -o $unsigned -I $androidJar --manifest (Join-Path $project 'app\src\main\AndroidManifest.xml')
 if ($LASTEXITCODE -ne 0) { throw 'APK resource packaging failed.' }
-& $jar --update --file $unsigned -C (Join-Path $build 'dex') classes.dex
+& $jar --update --file $unsigned -C (Join-Path $build 'dex') classes.dex `
+    -C (Join-Path $project 'app/src/main/resources') META-INF/ZXING-LICENSE.txt
 if ($LASTEXITCODE -ne 0) { throw 'Adding DEX to APK failed.' }
 
 $aligned = Join-Path $build 'aligned.apk'

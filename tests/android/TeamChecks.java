@@ -1,20 +1,30 @@
 package com.rideledger;
 
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Matrix;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.security.KeyPairGenerator;
 import java.security.KeyStore;
+import java.security.cert.CertificateFactory;
 import java.security.spec.ECGenParameterSpec;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -25,6 +35,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManagerFactory;
+
 /** Real SQLite and encrypted streams, with a simulated proximity graph for the radio routes. */
 final class TeamChecks {
     private static final List<String> MEMBERS = Arrays.asList("阿青", "小周", "大白", "阿满", "小赵");
@@ -33,7 +48,120 @@ final class TeamChecks {
         @Override public void stored(int added) { }
     };
 
-    static void run(Context base, PeerProtocolChecks.Sink sink) {
+    static void run(Context base, JSONObject fixture, PeerProtocolChecks.Sink sink) {
+        sink.check("team HTTPS: saved QR, two concurrent claims for one name, issuer restart and local admission", () -> {
+            SSLSocketFactory original = HttpsURLConnection.getDefaultSSLSocketFactory();
+            KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
+            trust.load(null);
+            byte[] certificate = Team.decode(fixture.getString("enrollmentCertificate"));
+            trust.setCertificateEntry("fixture", CertificateFactory.getInstance("X.509")
+                    .generateCertificate(new ByteArrayInputStream(certificate)));
+            TrustManagerFactory managers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            managers.init(trust);
+            SSLContext tls = SSLContext.getInstance("TLS");
+            tls.init(null, managers.getTrustManagers(), null);
+            HttpsURLConnection.setDefaultSSLSocketFactory(tls.getSocketFactory());
+            try (Device root = new Device(base); Device guest = new Device(base); Device other = new Device(base)) {
+                root.trip = root.store.createTeam("跨网登记", MEMBERS.subList(0, 2));
+                other.trip = other.store.joinTrip(root.store.inviteCode(root.trip), "m2");
+                require(other.trip.syncUrl.isEmpty(), "the original offline QR unexpectedly had a relay");
+                String endpoint = fixture.getString("enrollmentEndpoint");
+                root.store.setTripSyncUrl(root.trip.id, endpoint);
+                root.reopen();
+                record(root, "USD", 501, "private ledger record");
+                String invite = root.store.inviteCode(root.trip);
+                File file = File.createTempFile("team-qr-", ".png", base.getCacheDir());
+                Bitmap qr = InviteQr.image(invite, 760);
+                Bitmap screenshot = Bitmap.createBitmap(1280, 2560, Bitmap.Config.ARGB_8888);
+                try {
+                    Canvas canvas = new Canvas(screenshot);
+                    canvas.drawColor(Color.rgb(236, 244, 239));
+                    canvas.drawBitmap(qr, 260, 660, null);
+                    try (FileOutputStream out = new FileOutputStream(file)) {
+                        require(screenshot.compress(Bitmap.CompressFormat.PNG, 100, out), "could not save QR fixture");
+                    }
+                    String selected = InviteQr.readImage(base.getContentResolver(), Uri.fromFile(file));
+                    require(invite.equals(selected), "saved screenshot did not decode to the original invite");
+                    guest.trip = guest.store.joinTrip(selected, "m2");
+                    other.trip = other.store.joinTrip(selected, "m2");
+                    require(endpoint.equals(guest.trip.syncUrl) && endpoint.equals(other.trip.syncUrl),
+                            "the new QR did not provision or refresh the HTTPS endpoint");
+                } finally {
+                    screenshot.recycle();
+                    qr.recycle();
+                    file.delete();
+                }
+                TeamEnrollment first = new TeamEnrollment(guest.store, guest.trip, guest.id);
+                TeamEnrollment second = new TeamEnrollment(other.store, other.trip, other.id);
+                ExecutorService callers = Executors.newFixedThreadPool(2);
+                try {
+                    Future<String> a = callers.submit(first::step), b = callers.submit(second::step);
+                    require(a.get(10, TimeUnit.SECONDS).contains("等待") && b.get(10, TimeUnit.SECONDS).contains("等待"),
+                            "the relay enrolled a device without the creator");
+                } finally { callers.shutdownNow(); }
+                try {
+                    new TeamEnrollment(root.store, root.trip, root.id).step();
+                    throw new AssertionError("simulated HTTPS reply loss did not happen");
+                } catch (IllegalStateException expected) {
+                    require(root.store.teamSeatCount(root.trip.id) == 2, "two claims occupied the only open seat");
+                }
+                root.reopen();
+                new TeamEnrollment(root.store, root.trip, root.id).step();
+                boolean a = accepted(first), b = accepted(second);
+                require(a != b, "exactly one phone must win the selected name");
+                Device winner = a ? guest : other, loser = a ? other : guest;
+                require(winner.count() == 0 && loser.count() == 0, "the admission relay forwarded a ledger record");
+                require(exchange(winner, root).complete() && winner.count() == 1,
+                        "the HTTPS grant did not work for local sync");
+                require(exchange(loser, root).clientError instanceof TeamProtocol.Admission &&
+                        root.store.teamSeatCount(root.trip.id) == 2, "local admission bypassed the HTTPS seat limit");
+            } finally { HttpsURLConnection.setDefaultSSLSocketFactory(original); }
+        });
+        sink.check("team: offline QR decodes the invite and enrolls the selected member", () -> {
+            try (Device root = new Device(base); Device guest = new Device(base)) {
+                root.create();
+                record(root, "CNY", 305, "before QR");
+                String invite = root.store.inviteCode(root.trip);
+                Bitmap qr = InviteQr.image(invite, 520);
+                Matrix rotation = new Matrix();
+                rotation.postRotate(90);
+                Bitmap rotated = Bitmap.createBitmap(qr, 0, 0, qr.getWidth(), qr.getHeight(), rotation, false);
+                int width = rotated.getWidth(), height = rotated.getHeight();
+                int[] pixels = new int[width * height];
+                byte[] luminance = new byte[pixels.length];
+                try {
+                    rotated.getPixels(pixels, 0, width, 0, 0, width, height);
+                    for (int i = 0; i < pixels.length; i++) luminance[i] = (byte) Color.red(pixels[i]);
+                } finally {
+                    rotated.recycle();
+                    qr.recycle();
+                }
+                String scanned = InviteQr.readFrame(luminance, width, height);
+                require(invite.equals(scanned), scanned == null ? "camera frame found no QR code" : "camera-frame decode altered the invitation");
+                guest.trip = guest.store.joinTrip(scanned, "m4");
+                require("阿满".equals(guest.trip.nameOf(guest.trip.localPerson)), "scanned roster could not select the fourth member");
+                require(!guest.store.teamReady(guest.trip), "scanning bypassed enrollment");
+                require(exchange(guest, root).complete() && guest.store.teamReady(guest.trip) && guest.count() == 1,
+                        "scanned invite did not enroll and receive existing records");
+                record(guest, "USD", 71, "after QR");
+                require(exchange(root, guest).complete() && root.count() == 2,
+                        "registered peer did not sync again with its saved credentials");
+            }
+        });
+        sink.check("team: solo trip records the full amount and reopens with one member", () -> {
+            try (Device solo = new Device(base)) {
+                solo.trip = solo.store.createTeam("独行", Collections.singletonList("阿青"));
+                record(solo, "CNY", 101, "solo expense");
+                solo.reopen();
+                require(solo.trip.people() == 1 && solo.store.teamReady(solo.trip), "solo trip or identity was lost");
+                LedgerStore.Summary sum = solo.store.summary(solo.trip.id);
+                require(sum.spent.get("CNY") == 101 && sum.teamNet.get("m1").get("CNY") == 0, "solo split created debt");
+                try {
+                    solo.store.inviteCode(solo.trip);
+                    throw new AssertionError("solo trip issued an invitation without another seat");
+                } catch (IllegalArgumentException expected) { }
+            }
+        });
         sink.check("team: one signed seat per member, limit five, and lost enrollment response retries", () -> {
             try (Device root = new Device(base); Device b = new Device(base); Device c = new Device(base);
                  Device d = new Device(base); Device e = new Device(base); Device extra = new Device(base)) {
@@ -162,6 +290,17 @@ final class TeamChecks {
             clock.addAndGet(5001);
             require(only(routes.readyForRevision(2, ""), "wifi"), "restored Wi-Fi did not regain priority");
         });
+    }
+
+    private static boolean accepted(TeamEnrollment enrollment) throws Exception {
+        try {
+            require("首次登记完成".equals(enrollment.step()), "still waiting after the issuer answered");
+            return true;
+        } catch (TeamProtocol.Admission denied) {
+            require(denied.getMessage().contains("名额已满") || denied.getMessage().contains("另一台设备"),
+                    "wrong denial for the second claim: " + denied.getMessage());
+            return false;
+        }
     }
 
     private static boolean only(List<PeerRoutePolicy.Endpoint> ready, String key) {

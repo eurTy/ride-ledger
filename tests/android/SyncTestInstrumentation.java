@@ -217,7 +217,7 @@ public final class SyncTestInstrumentation extends Instrumentation {
             finally { cloud.close(); }
             result.putString("connectedInvite", first.inviteCode(updated));
         });
-        check("version one database upgrade preserves travel, cash records and later connection", () -> {
+        check("version one database upgrade removes old dual trips and their records", () -> {
             TestContext oldContext = context();
             SQLiteDatabase old = oldContext.openOrCreateDatabase("ride_ledger.db", Context.MODE_PRIVATE, null);
             old.execSQL("CREATE TABLE trips (id TEXT PRIMARY KEY,name TEXT NOT NULL,person_a TEXT NOT NULL," +
@@ -231,13 +231,8 @@ public final class SyncTestInstrumentation extends Instrumentation {
                     entry.getString("kind"), entry.getLong("at"), entry.getJSONObject("data").toString()});
             old.setVersion(1); old.close();
             LedgerStore upgraded = store(oldContext);
-            require(upgraded.getTrip(tripId).syncUrl.isEmpty(), "old trip default connection changed");
-            require(upgraded.events(tripId).size() == 1 && upgraded.summary(tripId).cashA.get("CNY") == 100000,
-                    "database upgrade lost original money");
-            upgraded.setTripSyncUrl(tripId, "https://persist.example.test"); upgraded.close();
-            LedgerStore reopened = store(oldContext);
-            require(reopened.getTrip(tripId).syncUrl.equals("https://persist.example.test") &&
-                    reopened.events(tripId).size() == 1, "connection or money did not survive restart");
+            require(upgraded.getTrip(tripId) == null && upgraded.events(tripId).isEmpty(),
+                    "old dual trip or events survived upgrade");
         });
         check("incorrect key cannot import records", () -> {
             LedgerStore other = store(context());
@@ -324,10 +319,25 @@ public final class SyncTestInstrumentation extends Instrumentation {
                     "corrupt LAN bundle blocked healthy records or partial progress");
         });
         PeerProtocolChecks.run(getTargetContext(), fixture, (name, action) -> check(name, action::run));
-        check("UI: offline quick entry, Bluetooth settings without authorization, and reopening retain records", () -> PeerUiChecks.run(this));
+        check("UI: one team creation entry and no sync coordinator on an empty ledger", () -> PeerUiChecks.run(this));
         if (android.os.Build.VERSION.SDK_INT >= 29) {
-            TeamChecks.run(getTargetContext(), (name, action) -> check(name, action::run));
-            check("team UI: quick entry, review and travel have no manual sync controls", () -> PeerUiChecks.runTeam(this));
+            check("mixed version three database upgrade keeps team records and enrollment", () -> {
+                TestContext mixed = context();
+                LedgerStore before = store(mixed);
+                LedgerStore.Trip oldTrip = before.createTrip("Old", "A", "B");
+                before.add(oldTrip.id, "opening", new JSONObject().put("person", "a").put("currency", "CNY").put("amount", 123));
+                LedgerStore.Trip team = before.createTeam("Team", java.util.Arrays.asList("A", "B"));
+                before.add(team.id, "opening", new JSONObject().put("person", "m1").put("currency", "CNY").put("amount", 456));
+                before.getWritableDatabase().setVersion(3);
+                before.close();
+                LedgerStore after = store(mixed);
+                require(after.getTrip(oldTrip.id) == null && after.events(oldTrip.id).isEmpty(), "old trip was not removed");
+                LedgerStore.Trip retained = after.getTrip(team.id);
+                require(retained != null && after.teamReady(retained) &&
+                        after.summary(team.id).teamCash.get("m1").get("CNY") == 456L, "team cash or enrollment was lost");
+            });
+            TeamChecks.run(getTargetContext(), fixture, (name, action) -> check(name, action::run));
+            check("two-person team UI: quick entry, review and sync use the same team flow", () -> PeerUiChecks.runTeam(this));
         }
     }
 

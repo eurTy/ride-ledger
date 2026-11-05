@@ -125,7 +125,10 @@ final class PeerSync {
         if (running && routes.offer(endpoint)) request(team != null);
     }
     /** Called only after SQLite accepted a local mutation; no separate fragile outbox is needed. */
-    void syncNow() { request(false); }
+    void syncNow() {
+        if (team != null && !enrolled) enrolled = store.teamReady(team);
+        request(false);
+    }
     void retryNow() { routes.resetBackoff(); request(false); }
     private void request(boolean unchangedRevision) {
         synchronized (this) { if (!unchangedRevision) revision++; pending = true; }

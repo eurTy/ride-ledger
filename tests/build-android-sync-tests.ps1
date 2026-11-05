@@ -15,17 +15,18 @@ foreach ($folder in @('classes', 'dex')) {
 }
 $tools = Join-Path $Sdk 'build-tools\36.1.0'
 $androidJar = Join-Path $Sdk 'platforms\android-36.1\android.jar'
+$qrCore = & (Join-Path $project 'scripts/android-qr-core.ps1')
 $env:JAVA_HOME = $JavaHome
 Set-Location -LiteralPath $project
 $sources = @(rg --files 'app/src/main/java' -g '*.java')
 $sources += @(rg --files 'tests/android' -g '*.java')
-& (Join-Path $JavaHome 'bin\javac.exe') --release 17 -encoding UTF-8 -classpath $androidJar `
+& (Join-Path $JavaHome 'bin\javac.exe') --release 17 -encoding UTF-8 -classpath "$androidJar;$qrCore" `
     -d (Join-Path $testBuild 'classes') @sources
 if ($LASTEXITCODE -ne 0) { throw 'Android sync test compilation failed.' }
 $jar = Join-Path $testBuild 'classes.jar'
 & (Join-Path $JavaHome 'bin\jar.exe') --create --file $jar -C (Join-Path $testBuild 'classes') .
 if ($LASTEXITCODE -ne 0) { throw 'Android test archive failed.' }
-& (Join-Path $tools 'd8.bat') --lib $androidJar --min-api 26 --output (Join-Path $testBuild 'dex') $jar
+& (Join-Path $tools 'd8.bat') --lib $androidJar --min-api 26 --output (Join-Path $testBuild 'dex') $jar $qrCore
 if ($LASTEXITCODE -ne 0) { throw 'Android test DEX generation failed.' }
 $unsigned = Join-Path $testBuild 'unsigned.apk'
 & (Join-Path $tools 'aapt2.exe') link -o $unsigned -I $androidJar `

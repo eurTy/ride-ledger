@@ -15,8 +15,8 @@ android {
         applicationId = "com.rideledger"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.2.0-test.2"
+        versionCode = 13
+        versionName = "0.2.0-test.8"
     }
 
     signingConfigs {
@@ -40,5 +40,9 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    implementation("com.google.zxing:core:3.5.4")
 }
 

@@ -98,7 +98,7 @@ final class LedgerStore extends SQLiteOpenHelper {
     private final Context context;
 
     LedgerStore(Context context) {
-        super(context, "ride_ledger.db", null, 3);
+        super(context, "ride_ledger.db", null, 4);
         this.context = context;
     }
 
@@ -117,6 +117,10 @@ final class LedgerStore extends SQLiteOpenHelper {
         if (oldVersion < 3) {
             db.execSQL("ALTER TABLE trips ADD COLUMN team TEXT NOT NULL DEFAULT ''");
             createSeats(db);
+        }
+        if (oldVersion < 4) {
+            db.execSQL("DELETE FROM events WHERE trip_id IN (SELECT id FROM trips WHERE team = '')");
+            db.execSQL("DELETE FROM trips WHERE team = ''");
         }
     }
 
@@ -244,6 +248,12 @@ final class LedgerStore extends SQLiteOpenHelper {
         }
         Trip existing = getTrip(trip.id);
         if (existing != null) {
+            if (existing.team != null && trip.team != null && !teamReady(existing) && !trip.syncUrl.isEmpty() &&
+                    !trip.syncUrl.equals(existing.syncUrl) && trip.secret.equals(existing.secret) &&
+                    trip.team.fingerprint.equals(existing.team.fingerprint) && trip.localPerson.equals(existing.localPerson)) {
+                setTripSyncUrl(trip.id, trip.syncUrl);
+                return getTrip(trip.id);
+            }
             if (candidate.team != null || existing.team != null) throw new IllegalArgumentException("这个小队已在本机");
             if (candidate.syncUrl.isEmpty()) throw new IllegalArgumentException("这个旅行已加入");
             if (!java.util.Arrays.equals(Base64.decode(existing.secret, Base64.URL_SAFE | Base64.NO_WRAP),
@@ -263,10 +273,12 @@ final class LedgerStore extends SQLiteOpenHelper {
             if (clean.length() > 4096) throw new IllegalArgumentException("小队邀请码过长");
             JSONObject value = new JSONObject(new String(Team.decode(clean.substring(Team.INVITE_PREFIX.length())), StandardCharsets.UTF_8));
             Team team = Team.parse(value.getJSONObject("team"));
+            if (team.size() < 2) throw new IllegalArgumentException("单人旅行无需邀请码");
             String name = value.getString("name").trim(), secret = value.getString("secret");
             if (name.isEmpty() || name.length() > 80 || Team.decode(secret).length != 32)
                 throw new IllegalArgumentException("小队邀请码无效");
-            return new Trip(team.tripId, name, "", "", secret, team.member(1), "", team);
+            String syncUrl = teamEndpoint(value.has("syncUrl") ? value.getString("syncUrl") : "");
+            return new Trip(team.tripId, name, "", "", secret, team.member(1), syncUrl, team);
         }
         byte[] bytes = Base64.decode(clean, Base64.URL_SAFE | Base64.NO_WRAP);
         JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
@@ -299,7 +311,10 @@ final class LedgerStore extends SQLiteOpenHelper {
 
     synchronized String inviteCode(Trip trip, String syncUrl) throws JSONException {
         if (trip.team != null) {
+            if (trip.people() < 2) throw new IllegalArgumentException("单人旅行无需邀请码");
             JSONObject value = new JSONObject().put("team", trip.team.json()).put("name", trip.name).put("secret", trip.secret);
+            String endpoint = teamEndpoint(syncUrl);
+            if (!endpoint.isEmpty()) value.put("syncUrl", endpoint);
             return Team.INVITE_PREFIX + Team.encode(value.toString().getBytes(StandardCharsets.UTF_8));
         }
         JSONObject json = new JSONObject().put("id", trip.id).put("name", trip.name)
@@ -354,11 +369,19 @@ final class LedgerStore extends SQLiteOpenHelper {
     }
 
     synchronized void setTripSyncUrl(String id, String raw) {
-        String syncUrl = SyncEndpoint.normalize(raw, true);
+        Trip trip = getTrip(id);
+        if (trip == null) throw new IllegalArgumentException("旅行不存在");
+        String syncUrl = trip.team == null ? SyncEndpoint.normalize(raw, true) : teamEndpoint(raw);
         ContentValues values = new ContentValues();
         values.put("sync_url", syncUrl);
         if (getWritableDatabase().update("trips", values, "id=?", new String[]{id}) == 0)
             throw new IllegalArgumentException("旅行不存在");
+    }
+
+    private static String teamEndpoint(String raw) {
+        String endpoint = SyncEndpoint.normalize(raw, false);
+        if (endpoint.length() > 250) throw new IllegalArgumentException("HTTPS 中转地址过长");
+        return endpoint;
     }
 
     private Trip readTrip(Cursor c) {

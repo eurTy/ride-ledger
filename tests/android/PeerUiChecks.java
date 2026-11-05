@@ -4,7 +4,6 @@ import android.app.Activity;
 import android.app.Instrumentation;
 import android.content.Context;
 import android.content.Intent;
-import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
@@ -21,47 +20,27 @@ final class PeerUiChecks {
     static void run(Instrumentation instrumentation) throws Exception {
         Context context = instrumentation.getTargetContext();
         if (!"com.rideledger.synctest".equals(context.getPackageName())) throw new AssertionError("UI test package is not isolated");
-        LedgerStore store = new LedgerStore(context);
-        LedgerStore.Trip trip = store.createTrip("双通道界面检查", "骑手甲", "骑手乙");
-        context.getSharedPreferences("ui", 0).edit().putString("last_trip", trip.id).commit();
-        // Fresh Android 12+ installations have not granted Nearby devices. Opening the app must still work.
-        context.getSharedPreferences("nearby", 0).edit().putBoolean("enabled", true).commit();
-        Activity activity = null;
+        context.getSharedPreferences("ui", 0).edit().remove("last_trip").commit();
+        Activity activity = instrumentation.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         try {
-            activity = instrumentation.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-            final Activity first = activity;
             instrumentation.runOnMainSync(() -> {
-                View root = first.getWindow().getDecorView();
-                require(text(root, "快速记账") != null, "existing trip did not open quick entry");
-                EditText amount = amount(root);
-                require(amount != null, "amount input missing"); amount.setText("12.34");
-                require(text(root, "保存这笔支出").performClick(), "save action missing");
+                View root = activity.getWindow().getDecorView();
+                require(countText(root, "新建小队旅行") == 1, "single creation entry missing");
+                require(text(root, "新建旅行") == null && text(root, "加入小队旅行") != null, "team join entry was missing");
             });
-            instrumentation.waitForIdleSync();
-            require(store.events(trip.id).size() == 1 && store.summary(trip.id).spent.get("CNY") == 1234L,
-                    "offline quick entry failed while Bluetooth unavailable or unauthorized");
-            instrumentation.runOnMainSync(() -> {
-                require(text(first.getWindow().getDecorView(), "旅行").performClick(), "travel navigation missing");
-                require(text(first.getWindow().getDecorView(), "蓝牙连接").performClick(), "Bluetooth settings entry missing");
-                try {
-                    Field status = MainActivity.class.getDeclaredField("bluetoothStatus"); status.setAccessible(true);
-                    require(status.get(first) != null, "Bluetooth dialog did not open");
-                    Field toggle = MainActivity.class.getDeclaredField("bluetoothToggle"); toggle.setAccessible(true);
-                    require(((View) toggle.get(first)).performClick(), "Bluetooth disable action missing");
-                } catch (ReflectiveOperationException error) { throw new AssertionError(error); }
-            });
-            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK); instrumentation.waitForIdleSync();
-            require(!context.getSharedPreferences("nearby", 0).getBoolean("enabled", true), "Bluetooth preference did not persist");
-            instrumentation.runOnMainSync(first::finish); instrumentation.waitForIdleSync();
-            activity = instrumentation.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-            final Activity reopened = activity;
-            instrumentation.runOnMainSync(() -> require(text(reopened.getWindow().getDecorView(), "快速记账") != null,
-                    "reopening did not return directly to quick entry"));
-            require(store.events(trip.id).size() == 1, "reopening lost or duplicated a local record");
-        } finally {
-            if (activity != null) { Activity closing = activity; instrumentation.runOnMainSync(closing::finish); instrumentation.waitForIdleSync(); }
-            store.close();
+            Field peers = MainActivity.class.getDeclaredField("teamPeers");
+            peers.setAccessible(true);
+            require(peers.get(activity) == null, "empty screen started a sync coordinator");
+        } finally { instrumentation.runOnMainSync(activity::finish); instrumentation.waitForIdleSync(); }
+    }
+
+    private static int countText(View view, String expected) {
+        int count = view instanceof TextView && expected.contentEquals(((TextView) view).getText()) ? 1 : 0;
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) count += countText(group.getChildAt(i), expected);
         }
+        return count;
     }
 
     static void runTeam(Instrumentation instrumentation) throws Exception {
@@ -69,7 +48,7 @@ final class PeerUiChecks {
         require("com.rideledger.synctest".equals(context.getPackageName()), "UI test package is not isolated");
         PeerProtocolChecks.Ctx other = new PeerProtocolChecks.Ctx(context);
         try (LedgerStore store = new LedgerStore(context); LedgerStore companion = new LedgerStore(other)) {
-            LedgerStore.Trip trip = store.createTeam("小队界面检查", Arrays.asList("骑手甲", "骑手乙", "骑手丙"));
+            LedgerStore.Trip trip = store.createTeam("小队界面检查", Arrays.asList("骑手甲", "骑手乙"));
             LedgerStore.Trip peer = companion.joinTrip(store.inviteCode(trip, ""), "m2");
             context.getSharedPreferences("ui", 0).edit().putString("last_trip", trip.id).putBoolean("team_ble_prompted", true).commit();
             Activity activity = instrumentation.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
@@ -107,7 +86,7 @@ final class PeerUiChecks {
                     require(text(root, "3 笔") != null, "review did not refresh after durable sync");
                     require(text(root, "旅行").performClick(), "travel navigation missing");
                     root = activity.getWindow().getDecorView();
-                    require(text(root, "新建小队旅行") != null && text(root, "分享邀请码") != null, "first setup entries missing");
+                    require(countText(root, "新建小队旅行") == 1 && text(root, "邀请同伴") != null, "first setup entries missing");
                     require(text(root, "蓝牙连接") == null && text(root, "热点地址直连") == null &&
                             text(root, "重新连接并补传") == null, "manual sync controls appeared in group trip");
                 });

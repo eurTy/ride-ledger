@@ -36,7 +36,7 @@ final class Team {
     final String fingerprint;
 
     Team(String tripId, String issuer, String issuerKey, List<String> names) throws JSONException {
-        if (!PeerIdentity.valid(tripId) || !PeerIdentity.valid(issuer) || names.size() < 2 || names.size() > MAX_DEVICES)
+        if (!PeerIdentity.valid(tripId) || !PeerIdentity.valid(issuer) || names.isEmpty() || names.size() > MAX_DEVICES)
             throw new IllegalArgumentException("小队资料无效");
         try { publicKey(issuerKey); }
         catch (Exception e) { throw new IllegalArgumentException("建队设备身份无效"); }

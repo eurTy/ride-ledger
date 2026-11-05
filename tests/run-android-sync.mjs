@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, unlink, rmdir, writeFile } from 'node:fs/promises';
 import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -35,6 +36,44 @@ const receivedFrames = [];
 const servers = [];
 
 try {
+  await mkdir(output, { recursive: true });
+  const tlsDir = await mkdtemp(path.join(output, 'tls-'));
+  const p12 = path.join(tlsDir, 'relay.p12'), cer = path.join(tlsDir, 'relay.cer');
+  const passphrase = 'isolated-android-test';
+  const keytool = (...args) => run(path.join(javaHome, 'bin', 'keytool.exe'), args, { windowsHide: true });
+  let pfx, certificate;
+  try {
+    await keytool('-genkeypair', '-alias', 'relay', '-keyalg', 'RSA', '-keysize', '2048', '-dname', 'CN=10.0.2.2',
+      '-ext', 'SAN=IP:10.0.2.2', '-validity', '2', '-storetype', 'PKCS12', '-keystore', p12, '-storepass', passphrase);
+    await keytool('-exportcert', '-alias', 'relay', '-keystore', p12, '-storepass', passphrase, '-file', cer);
+    [pfx, certificate] = await Promise.all([readFile(p12), readFile(cer)]);
+  } finally {
+    await Promise.all([unlink(p12).catch(() => {}), unlink(cer).catch(() => {})]);
+    await rmdir(tlsDir);
+  }
+  let dropFirstAnswer = true;
+  const enrollment = https.createServer({ pfx, passphrase }, async (req, res) => {
+    try {
+      assert.equal(req.url, '/team-enrollment');
+      const parts = [];
+      for await (const part of req) parts.push(part);
+      const input = Buffer.concat(parts);
+      if (dropFirstAnswer && JSON.parse(input).answers?.length) {
+        dropFirstAnswer = false;
+        res.writeHead(503).end('{}');
+        return;
+      }
+      const response = await fetch(relay.origin + req.url, {
+        method: 'POST', body: input,
+        headers: { 'Content-Type': 'application/json', 'X-Trip-Token': req.headers['x-trip-token'] }
+      });
+      res.writeHead(response.status, { 'Content-Type': 'application/json' });
+      res.end(await response.text());
+    } catch { res.writeHead(500).end('{}'); }
+  });
+  servers.push(enrollment);
+  enrollment.listen(0, '127.0.0.1'); await once(enrollment, 'listening');
+
   const proxy = http.createServer(async (req, res) => {
     try {
       const parts = [];
@@ -94,6 +133,8 @@ try {
     wrongKeyInvite: encode({ ...valid, secret: Buffer.alloc(32, 19).toString('base64url') }),
     invalidInvites: invalidInvites(valid),
     endpoint: 'http://10.0.2.2:' + proxy.address().port,
+    enrollmentEndpoint: 'https://10.0.2.2:' + enrollment.address().port,
+    enrollmentCertificate: certificate.toString('base64url'),
     lanPort: await tcp('normal'), lanDropPort: await tcp('drop'), lanCorruptPort: await tcp('corrupt')
   };
   await adbRun('install', '-r', path.join(output, 'ride-ledger-sync-tests.apk'));
