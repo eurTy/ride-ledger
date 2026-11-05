@@ -1,6 +1,6 @@
 name: Upload iOS to TestFlight
 
-# Signing and uploading never run on push or pull requests.
+# Paused at the user's request on 2026-11-05; even manual dispatch skips the job.
 on:
   workflow_dispatch:
     inputs:
@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   upload:
+    if: ${{ false }} # Restore only when iOS development and distribution are resumed.
     runs-on: macos-15
     timeout-minutes: 30
     environment: ios-testflight

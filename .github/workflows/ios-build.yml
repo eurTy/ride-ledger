@@ -1,11 +1,7 @@
 name: iOS build and simulator checks
 
+# Archived at the user's request on 2026-11-05. Automatic triggers are disabled.
 on:
-  push:
-    branches: [main, codex/ios-testflight]
-    paths: ['ios/**', 'web/**', 'tests/support/**', '.github/workflows/ios-build.yml']
-  pull_request:
-    paths: ['ios/**', 'web/**', 'tests/support/**', '.github/workflows/ios-build.yml']
   workflow_dispatch:
 
 permissions:
@@ -17,6 +13,7 @@ concurrency:
 
 jobs:
   ios:
+    if: ${{ false }} # Resume only after the user explicitly requests iOS work.
     runs-on: macos-15
     timeout-minutes: 30
     steps:

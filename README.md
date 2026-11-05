@@ -25,7 +25,7 @@
 - 同一热点：安卓 NSD 与电脑版 mDNS 相互发现，TCP 直连交换加密记录；没有互联网也能工作，两端都可手动地址直连。
 - 不同 Wi-Fi：电脑版内置中转服务，通过临时 HTTPS 入口供手机访问；同步地址自动写入邀请码，手机加入后按旅行保存连接。也可使用固定 HTTPS 中转服务。
 - 网页试用：原生 HTML/CSS/JavaScript，浏览器本地保存记录；首次在线打开后可离线打开，恢复连接后通过同一中转服务同步。
-- 未来 iOS：沿用旅行邀请码、记录格式和加密同步协议，另做 iOS 客户端。
+- iOS：开发已于 2026-11-05 暂停并封档，保存在 `codex/ios-testflight` 分支及 `archive-ios-2026-11-05` 标签。源码与未完成项见 [ios/README.md](ios/README.md)，苹果平台编译与 TestFlight 分发尚未验证。
 
 ## 已有功能
 
@@ -86,6 +86,8 @@ Windows 与安卓文件见 [v0.1.4 下载页](https://github.com/eurTy/ride-ledg
 如果项目中已有 `signing/debug.keystore`，Gradle 会复用它，与 PowerShell 脚本保持相同签名；全新检出且没有该文件时，Android Studio/Gradle 使用开发环境的默认调试密钥（通常位于 `~/.android/debug.keystore`）。升级安装必须沿用首次安装的签名密钥，否则需卸载旧版才能安装新包。签名密钥不能提交到仓库。
 
 ## 网页试用
+
+iPhone 开发已暂停，封档记录在 [ios/README.md](ios/README.md)。当前没有已开放的 TestFlight 邀请链接或已验证的 iOS 构建产物。安卓 APK 与 Windows EXE 的下载方式保持原样。
 
 电脑上安装的 Node.js 即可运行本地试用页。在项目目录运行：
 

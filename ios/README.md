@@ -1,5 +1,11 @@
 # iPhone 版本与 TestFlight
 
+**2026-11-05 已按用户要求暂停并封档。** 源码保留在 `codex/ios-testflight` 分支，封档标签为 `archive-ios-2026-11-05`；状态快照见 [archive-status.json](archive-status.json)。本分支未合入 `main`，安卓和 Windows 仍沿用 v0.1.4。
+
+封档时 47 项共用协议及 iOS 接入回归已通过；两次 GitHub 苹果构建均未分配到 runner，未进入代码编译。第一轮队列提示 macOS ARM 构建机容量不足。Swift 编译、6 项苹果平台 XCTest、设备签名及 TestFlight 上传均未验证；当前没有可安装的 iOS 发布包或 TestFlight 邀请链接。
+
+iOS 构建已移除 push/PR 自动触发，构建与上传 job 都显式停用，手动触发也会跳过。恢复时先切回此分支，对照源码提交 `d6ff087d0bd77de9e1f1db47b9b430186d3498d0` 恢复需要的触发条件及 job，再完成苹果环境构建验证。未恢复前不继续排队、重试、签名或上传。
+
 本目录是 iOS 客户端，不是可直接安装的 IPA 下载。界面与金额计算复用已有网页代码；Swift 原生部分提供本机受保护文件、同热点 Bonjour/TCP 同步、系统分享、复制和备份导出。它使用系统 WebKit，网页资源全部随应用打包，断网可打开和记账。
 
 最低运行版本为 iOS 16；构建使用 iOS 26 或更新 SDK。现有安卓最低版本、Windows 安装包及数据目录保持原样。
@@ -27,7 +33,7 @@ npm run ios:prepare
 
 GitHub 的 **iOS build and simulator checks** 在标准 `macos-15` 环境选择已安装的稳定版 Xcode 26 或更新版本，构建并执行 iPhone 模拟器检查，不需要苹果账号。检查使用模拟器本地签名；设备归档明确不签名，不能安装到真实 iPhone 或上传 TestFlight。结果包保存在 Actions 的 `ios-build-and-test-results`，保留 14 天。
 
-测试涵盖原生文件保存与重开、损坏写入隔离、真实 WKWebView 解密 Node.js 生成的账本、原始资金及多币种金额、删除去重、离线补记与重开、邀请码更新后保留身份、原生长度帧 TCP 交换。测试中的 HTTPS 地址路由使用替身响应；实体 iPhone 的公网接入、本地网络授权与热点发现仍需真机检查。XCTest 结果附带实际 iPhone 模拟器界面的截图。
+已编写的 XCTest 用例覆盖原生文件保存与重开、损坏写入隔离、WKWebView 解密 Node.js 生成的账本、原始资金及多币种金额、删除去重、离线补记与重开、邀请码更新后保留身份、原生长度帧 TCP 交换；这些苹果平台用例在封档时尚未运行。测试中的 HTTPS 地址路由使用替身响应；实体 iPhone 的公网接入、本地网络授权与热点发现仍需真机检查。测试成功执行时会将 iPhone 模拟器界面截图附在 XCTest 结果中，目前没有已验证截图。
 
 ## 数据与同步
 

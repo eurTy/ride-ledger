@@ -1,0 +1,65 @@
+{
+  "status": "paused",
+  "archivedAt": "2026-11-05T10:01:33+08:00",
+  "reason": "用户要求暂停 iOS 进程并封档",
+  "repository": "eurTy/ride-ledger",
+  "branch": "codex/ios-testflight",
+  "archiveTag": "archive-ios-2026-11-05",
+  "iosSourceCommit": "d6ff087d0bd77de9e1f1db47b9b430186d3498d0",
+  "androidWindowsBaseline": {
+    "version": "0.1.4",
+    "mainCommit": "dde387aebdf48af9f812493c08b3c70892d1dabd",
+    "iosMergedIntoMain": false
+  },
+  "prepared": [
+    "WebKit 客户端与打包网页资源的 Xcode 工程生成器",
+    "原生受保护文件存储与同步保存接口",
+    "Bonjour/TCP 加密快照交换实现",
+    "系统分享、复制与备份导出接口",
+    "6 项原生 XCTest 用例",
+    "云端构建和手动 TestFlight 签名上传模板"
+  ],
+  "validation": {
+    "sharedProtocolAndIOSBridgeTests": { "passed": 47, "failed": 0 },
+    "javascriptSyntax": "passed",
+    "workflowYamlSyntax": "passed",
+    "signingScriptBashSyntax": "passed_without_executing_signing",
+    "swiftCompilation": "not_executed",
+    "applePlatformXCTests": "not_executed",
+    "physicalIPhone": "not_tested",
+    "deviceSigning": "not_executed",
+    "testFlightUpload": "not_executed"
+  },
+  "cloudRuns": [
+    {
+      "id": 41853771674,
+      "url": "https://github.com/eurTy/ride-ledger/actions/runs/41853771674",
+      "status": "completed",
+      "conclusion": "failure",
+      "runnerAllocated": false,
+      "note": "队列提示 macOS ARM 容量不足，未运行任何编译步骤"
+    },
+    {
+      "id": 41856361058,
+      "url": "https://github.com/eurTy/ride-ledger/actions/runs/41856361058",
+      "status": "completed",
+      "conclusion": "failure",
+      "runnerAllocated": false,
+      "note": "job 已结束，runner 为空且无执行步骤；未运行代码编译"
+    }
+  ],
+  "workflows": {
+    "automaticBuildTriggers": "removed",
+    "buildJobEnabled": false,
+    "testFlightJobEnabled": false,
+    "activeIOSRunsAtArchive": 0
+  },
+  "requirementsToResume": [
+    "用户明确要求恢复 iOS 开发",
+    "切回 codex/ios-testflight 分支，解除 iOS job 停用并按需要恢复触发条件",
+    "取得可用的 macOS runner，完成 Swift 编译和 6 项 XCTest；如有失败再修复",
+    "在实体 iPhone 核对本地网络权限、热点发现与跨网同步",
+    "TestFlight 分发前配置本人 Apple Developer 付费账号、签名和 App Store Connect 应用",
+    "私下配置发布密钥及审核联系人，完成隐私与加密出口合规资料"
+  ]
+}
