@@ -1,5 +1,21 @@
 # 邀请码与同步验证
 
+## 2026-11-05 安卓双通道
+
+新增生产热点 TCP、备用 UDP 发现和蓝牙 RFCOMM 适配器，共用加密增量协议与 SQLite 去重。Android 10（API 29，官方 AOSP x86_64 镜像）和 Android 16.1（API 36，现有镜像）分别通过 45 项原生检查，覆盖下列新增场景；网页／桌面／服务端既有 44 项回归仍通过。结果留档在 [android-peer-2026-11-05.json](results/android-peer-2026-11-05.json)。最终发布 APK 也已在 Android 10 上安装和启动，包版本 0.1.5、minSdk 26、targetSdk 35，调试签名证书与 v0.1.4 一致。
+
+- 两个独立 Android SQLite 副本、任意分片的有序流、加密摘要／索引对账、相同摘要不重传、下一轮只发送一笔新记录。
+- 约 48 KB 分批传输中断、进程内重开数据库后补缺失批次；最终确认丢失、跨通道重试不重复计账。
+- 密文损坏、错误邀请码密钥、伪造保存确认、同 ID 不同内容事务回滚；删除标记、乱序时间戳、交换中新增记录不丢失。
+- v1 未知端点协商与旧版 TCP／AES-GCM 互通，保留设备身份、原有数据库与账目。
+- 路由策略的热点优先、失败退避、重复发现不清退避、热点地址变化；真实 `PeerSync` 协调器接入注入的流，验证热点失败后自动走蓝牙、热点恢复后重新优先。
+- 阻塞读和阻塞写都会被 watchdog 关闭，工作线程可释放；UDP 请求与回复发现双方且不会无限回声。
+- Android 10/11 与 12+ 权限分支；实际启动生产界面，检查无蓝牙授权时离线快速记账、打开蓝牙设置、关闭备用通道、再次打开仍保留一笔账目。
+
+测试包仍为独立的 `com.rideledger.synctest`，不读取用户账本。界面检查会创建虚构旅行，并短暂启动本机 NSD／UDP 发现（发现信息仅含随机设备 ID 和端口，没有邀请码或流水）。蓝牙协调器检查使用注入流，**未替代两台实体安卓的配对和无线测试**。实机步骤及限制见 [安卓直连说明](../docs/android-peer-sync.md)。
+
+Android 10 首次开机的镜像需先连接其虚拟 AndroidWifi，否则所有宿主机 HTTP/TCP 检查会因无网络失败，回环协议检查仍可通过。无需改变手机代码绕过网络。
+
 2026-11-04 使用虚构旅行与独立中转服务执行。网页／桌面协议／服务端测试 44 项通过，安卓模拟器检查 26 项通过，另完成两端邀请码、AES-GCM 数据互通。新增公网流程调用真实 Electron 客户端、临时 HTTPS 入口和真实安卓代码，3 项安卓公网连接检查通过。测试使用独立用户目录，安卓测试包使用应用 ID `com.rideledger.synctest`，结束后卸载。
 
 ## 验证范围
@@ -47,7 +63,7 @@ npm test
 node tests/run-android-sync.mjs
 ```
 
-可通过 `ANDROID_SDK_ROOT`、`JAVA_HOME`、`ANDROID_TEST_SERIAL` 指定现有工具和模拟器。测试结果写入 `build/android-sync-tests/report.json`。独立测试包调用生产代码中的 SQLite、邀请码解析、AES-GCM、HTTP 和 TCP 实现；不会注册 NSD 或向实际 Wi-Fi 广播测试旅行。
+可通过 `ANDROID_SDK_ROOT`、`JAVA_HOME`、`ANDROID_TEST_SERIAL` 指定现有工具和模拟器。测试结果及系统版本写入 `build/android-sync-tests/report.json`；完整 instrumentation 输出在同目录。独立测试包调用生产代码中的 SQLite、邀请码解析、AES-GCM、HTTP、TCP、UDP 与界面实现；界面检查启动发现服务，但不会向 Wi-Fi 广播旅行密钥或金额。
 
 真实客户端与公网流程在已安装项目开发依赖后运行：
 

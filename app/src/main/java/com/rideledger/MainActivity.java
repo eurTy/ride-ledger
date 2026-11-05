@@ -2,6 +2,8 @@ package com.rideledger;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -12,6 +14,8 @@ import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.os.Bundle;
+import android.os.Build;
+import android.content.pm.PackageManager;
 import android.text.Editable;
 import android.text.InputFilter;
 import android.text.InputType;
@@ -48,7 +52,7 @@ import java.util.TreeMap;
 public final class MainActivity extends Activity {
     private static final int QUICK = 0, REVIEW = 1, TRIPS = 2;
     private LedgerStore store;
-    private LanSync lan;
+    private PeerSync peers;
     private CloudSync cloud;
     private SharedPreferences uiPrefs;
     private String currentTripId;
@@ -56,13 +60,21 @@ public final class MainActivity extends Activity {
     private boolean deletingTrips;
     private int screen = TRIPS;
     private TextView syncView;
+    private static final int REQUEST_BLUETOOTH_PERMISSIONS = 71, REQUEST_BLUETOOTH_ENABLE = 72, REQUEST_DISCOVERABLE = 73;
+    private Runnable pendingBluetoothAction;
+    private String[] pendingBluetoothPermissions;
+    private TextView bluetoothStatus;
+    private Button bluetoothToggle;
+    private AlertDialog bluetoothDevicesDialog;
+    private ArrayAdapter<String> bluetoothDeviceLabels;
+    private final List<BluetoothDevice> bluetoothDeviceItems = new ArrayList<>();
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().setStatusBarColor(Color.rgb(248, 249, 247));
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         store = new LedgerStore(this);
-        lan = new LanSync(this, store, (message, count) -> onSyncChanged(count));
+        peers = new PeerSync(this, store, this::onSyncChanged);
         cloud = new CloudSync(this, store, (message, count) -> onSyncChanged(count));
         uiPrefs = getSharedPreferences("ui", MODE_PRIVATE);
         currentTripId = uiPrefs.getString("last_trip", null);
@@ -81,12 +93,12 @@ public final class MainActivity extends Activity {
             screen = QUICK;
             render();
         }
-        lan.start();
+        peers.start();
         cloud.start();
         updateSync();
     }
-    @Override public void onStop() { cloud.stop(); lan.stop(); super.onStop(); }
-    @Override public void onDestroy() { cloud.close(); super.onDestroy(); }
+    @Override public void onStop() { cloud.stop(); peers.stop(); super.onStop(); }
+    @Override public void onDestroy() { peers.stop(); cloud.close(); super.onDestroy(); }
     @Override public void onBackPressed() {
         if (currentTripId != null && screen != QUICK) {
             deletingTrips = false;
@@ -102,7 +114,11 @@ public final class MainActivity extends Activity {
     }
 
     private void updateSync() {
-        if (syncView != null) syncView.setText(lan.status() + "\n" + cloud.status());
+        if (syncView != null) {
+            LedgerStore.Trip trip = currentTripId == null ? null : store.getTrip(currentTripId);
+            syncView.setText(peers.details() + (trip != null && !cloud.effectiveEndpoint(trip).isEmpty() ? "\n" + cloud.status() : ""));
+        }
+        refreshBluetoothControls();
     }
 
     private void render() {
@@ -227,8 +243,9 @@ public final class MainActivity extends Activity {
         else {
             LedgerStore.Trip current = store.getTrip(currentTripId);
             row(body, button("凭邀请码加入", this::joinTrip), button("分享邀请码", () -> share(current)));
-            row(body, button("连接同伴地址", this::manualConnect),
-                    button("云端地址设置", this::cloudSettings));
+            row(body, button("热点地址直连", this::manualConnect), button("蓝牙连接", this::bluetoothSettings));
+            row(body, button("重新连接并补传", () -> { peers.retryNow(); toast("正在连接同伴，记录已保存在本机"); }),
+                    button("跨网连接设置（可选）", this::cloudSettings));
         }
         syncView = text(body, "", 13, Color.GRAY);
         updateSync();
@@ -603,7 +620,7 @@ public final class MainActivity extends Activity {
                 throw new IllegalArgumentException("两人的名字请不同，避免记账混淆");
             LedgerStore.Trip trip = store.createTrip(name.getText().toString(), a.getText().toString(), b.getText().toString());
             selectTrip(trip);
-            lan.syncNow();
+            peers.syncNow();
             cloud.syncNow();
         });
     }
@@ -667,7 +684,7 @@ public final class MainActivity extends Activity {
             LedgerStore.Trip trip = store.joinTrip(code.getText().toString(),
                     identity.getSelectedItemPosition() == 0 ? "a" : "b");
             selectTrip(trip);
-            lan.syncNow();
+            peers.syncNow();
             cloud.syncNow();
         });
     }
@@ -725,7 +742,7 @@ public final class MainActivity extends Activity {
             rememberExchangeCurrency(trip.id, "from", draftCurrencies[0], from);
             rememberExchangeCurrency(trip.id, "to", draftCurrencies[1], to);
             render();
-            lan.syncNow();
+            peers.syncNow();
             cloud.syncNow();
         });
     }
@@ -745,7 +762,7 @@ public final class MainActivity extends Activity {
     private void add(LedgerStore.Trip trip, String kind, JSONObject data) {
         store.add(trip.id, kind, data);
         render();
-        lan.syncNow();
+        peers.syncNow();
         cloud.syncNow();
     }
 
@@ -778,7 +795,106 @@ public final class MainActivity extends Activity {
         LinearLayout form = form();
         text(form, "同伴手机的局域网地址可在“旅行”页面底部看到。", 14, Color.DKGRAY);
         EditText address = field(form, "同伴地址", "例如：192.168.43.1:12345", false);
-        showForm("地址直连", form, () -> { lan.connectManual(address.getText().toString()); toast("正在尝试连接"); });
+        showForm("地址直连", form, () -> { peers.connectManual(address.getText().toString()); toast("正在尝试连接"); });
+    }
+
+    private void bluetoothSettings() {
+        BluetoothSync bluetooth = peers.bluetooth;
+        LinearLayout form = form();
+        text(form, "两台手机先加入同一旅行，再开启蓝牙备用。首次选择同伴并确认系统配对；以后热点优先，热点不可用时自动改用蓝牙。两端保持应用打开即可，不需要电脑。", 14, Color.DKGRAY);
+        bluetoothStatus = text(form, bluetooth.status(), 14, Color.GRAY);
+        bluetoothToggle = button(bluetooth.enabled() ? "关闭蓝牙备用通道" : "开启蓝牙备用通道", () -> {
+            if (bluetooth.enabled()) { bluetooth.setEnabled(false); refreshBluetoothControls(); }
+            else withBluetooth(BluetoothSync.usePermissions(Build.VERSION.SDK_INT), () -> {
+                bluetooth.setEnabled(true); peers.retryNow(); refreshBluetoothControls();
+            });
+        });
+        form.addView(bluetoothToggle, fullMargin());
+        buttonInto(form, "选择已配对的同伴", () -> withBluetooth(BluetoothSync.usePermissions(Build.VERSION.SDK_INT), () -> {
+            bluetooth.setEnabled(true); bluetooth.refresh(); showBluetoothDevices();
+        }));
+        buttonInto(form, "查找新手机", () -> withBluetooth(BluetoothSync.scanPermissions(Build.VERSION.SDK_INT), () -> {
+            bluetooth.setEnabled(true); bluetooth.discover(); showBluetoothDevices();
+        }));
+        buttonInto(form, "让同伴发现我（2 分钟）", () -> withBluetooth(BluetoothSync.discoverablePermissions(Build.VERSION.SDK_INT), () -> {
+            bluetooth.setEnabled(true);
+            Intent intent = new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE);
+            intent.putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 120);
+            startActivityForResult(intent, REQUEST_DISCOVERABLE);
+        }));
+        buttonInto(form, "忘记应用中的同伴连接", () -> {
+            bluetooth.forget(); refreshBluetoothControls(); toast("已清除连接选择，账目和系统配对保留");
+        });
+        text(form, "配对时请选择同行者的手机，核对两边系统显示的配对信息。拒绝授权或关闭蓝牙后，仍可离线记账和使用热点同步。", 12, Color.GRAY);
+        ScrollView scroll = new ScrollView(this); scroll.addView(form);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("蓝牙备用通道").setView(scroll).setNegativeButton("关闭", null).create();
+        dialog.setOnDismissListener(ignored -> { bluetoothStatus = null; bluetoothToggle = null; });
+        dialog.show();
+    }
+    private void refreshBluetoothControls() {
+        if (peers == null) return;
+        if (bluetoothStatus != null) bluetoothStatus.setText(peers.bluetooth.status() + "\n" + peers.bluetooth.selectedName());
+        if (bluetoothToggle != null) bluetoothToggle.setText(peers.bluetooth.enabled() ? "关闭蓝牙备用通道" : "开启蓝牙备用通道");
+        if (bluetoothDevicesDialog != null && bluetoothDevicesDialog.isShowing() && bluetoothDeviceLabels != null) {
+            bluetoothDeviceItems.clear(); bluetoothDeviceItems.addAll(peers.bluetooth.devices());
+            bluetoothDeviceLabels.clear();
+            for (BluetoothDevice device : bluetoothDeviceItems) bluetoothDeviceLabels.add(peers.bluetooth.deviceLabel(device));
+            bluetoothDeviceLabels.notifyDataSetChanged();
+        }
+    }
+    private void showBluetoothDevices() {
+        if (bluetoothDevicesDialog != null && bluetoothDevicesDialog.isShowing()) return;
+        bluetoothDeviceLabels = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, new ArrayList<>());
+        bluetoothDevicesDialog = new AlertDialog.Builder(this).setTitle("选择同行者的手机")
+                .setAdapter(bluetoothDeviceLabels, (dialog, which) -> {
+                    if (which < 0 || which >= bluetoothDeviceItems.size()) return;
+                    try { peers.bluetooth.select(bluetoothDeviceItems.get(which)); peers.retryNow(); toast("配对完成后将自动连接"); }
+                    catch (Exception error) { error(error); }
+                }).setNegativeButton("关闭", null).setNeutralButton("重新查找", null).create();
+        bluetoothDevicesDialog.setOnShowListener(ignored -> bluetoothDevicesDialog.getButton(AlertDialog.BUTTON_NEUTRAL)
+                .setOnClickListener(view -> withBluetooth(BluetoothSync.scanPermissions(Build.VERSION.SDK_INT), () -> {
+                    peers.bluetooth.discover(); refreshBluetoothControls();
+                })));
+        bluetoothDevicesDialog.setOnDismissListener(ignored -> { bluetoothDevicesDialog = null; bluetoothDeviceLabels = null; });
+        bluetoothDevicesDialog.show(); refreshBluetoothControls();
+        if (bluetoothDeviceItems.isEmpty()) toast("可先在另一台手机允许被发现，或在系统蓝牙设置中配对");
+    }
+    private void withBluetooth(String[] permissions, Runnable action) {
+        if (!peers.bluetooth.supported()) { toast("此手机没有可用蓝牙，可继续用热点同步"); return; }
+        if (!peers.bluetooth.has(permissions)) {
+            pendingBluetoothPermissions = permissions;
+            pendingBluetoothAction = () -> withBluetooth(permissions, action);
+            requestPermissions(permissions, REQUEST_BLUETOOTH_PERMISSIONS); return;
+        }
+        if (!peers.bluetooth.radioEnabled()) {
+            pendingBluetoothAction = action;
+            try { startActivityForResult(new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE), REQUEST_BLUETOOTH_ENABLE); }
+            catch (Exception error) { pendingBluetoothAction = null; toast("请在系统设置中开启蓝牙后重试"); }
+            return;
+        }
+        try { action.run(); } catch (Exception error) { error(error); }
+    }
+    @Override public void onRequestPermissionsResult(int code, String[] permissions, int[] grants) {
+        super.onRequestPermissionsResult(code, permissions, grants);
+        if (code != REQUEST_BLUETOOTH_PERMISSIONS) return;
+        Runnable action = pendingBluetoothAction; pendingBluetoothAction = null;
+        boolean allowed = pendingBluetoothPermissions != null && peers.bluetooth.has(pendingBluetoothPermissions);
+        pendingBluetoothPermissions = null;
+        if (allowed && action != null) action.run();
+        else toast("蓝牙未授权，仍可离线记账并使用热点同步");
+        peers.bluetooth.refresh(); refreshBluetoothControls();
+    }
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request == REQUEST_BLUETOOTH_ENABLE) {
+            Runnable action = pendingBluetoothAction; pendingBluetoothAction = null;
+            if (peers.bluetooth.radioEnabled() && action != null) {
+                try { action.run(); } catch (Exception error) { error(error); }
+            } else toast("蓝牙未开启，账目仍保存在本机");
+        }
+        if (request == REQUEST_BLUETOOTH_ENABLE || request == REQUEST_DISCOVERABLE) {
+            peers.bluetooth.refresh(); peers.retryNow(); refreshBluetoothControls();
+        }
     }
 
     private void cloudSettings() {

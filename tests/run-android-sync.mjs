@@ -19,7 +19,7 @@ const javaHome = process.env.JAVA_HOME || 'E:\\Android\\jbr';
 const adb = path.join(sdk, 'platform-tools', 'adb.exe');
 const serial = process.env.ANDROID_TEST_SERIAL || 'emulator-5554';
 const adbRun = (...args) => run(adb, ['-s', serial, ...args], {
-  windowsHide: true, maxBuffer: 2_000_000, timeout: 90000
+  windowsHide: true, maxBuffer: 2_000_000, timeout: 180000
 });
 const output = path.join(project, 'build', 'android-sync-tests');
 const build = await run('powershell.exe', ['-NoProfile', '-File',
@@ -108,6 +108,9 @@ try {
   }
   if (!result.report) throw new Error('Android instrumentation produced no report: ' + stdout);
   const report = JSON.parse(result.report);
+  report.environment = { serial, sdk: (await adbRun('shell', 'getprop', 'ro.build.version.sdk')).stdout.trim(),
+    release: (await adbRun('shell', 'getprop', 'ro.build.version.release')).stdout.trim() };
+  await writeFile(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
   for (const name of report.passed || []) console.log('ANDROID_PASS ' + name);
   for (const name of report.failed || []) console.log('ANDROID_FAIL ' + name);
   if (result.androidInvite) {

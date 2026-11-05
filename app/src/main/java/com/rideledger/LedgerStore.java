@@ -232,6 +232,14 @@ final class LedgerStore extends SQLiteOpenHelper {
     }
 
     synchronized int merge(String tripId, JSONArray incoming) throws JSONException {
+        return mergeInternal(tripId, incoming, false);
+    }
+
+    synchronized int mergeStrict(String tripId, JSONArray incoming) throws Exception {
+        return mergeInternal(tripId, incoming, true);
+    }
+
+    private int mergeInternal(String tripId, JSONArray incoming, boolean strict) throws JSONException {
         if (getTrip(tripId) == null) return 0;
         SQLiteDatabase db = getWritableDatabase();
         int inserted = 0;
@@ -239,11 +247,29 @@ final class LedgerStore extends SQLiteOpenHelper {
         try {
             for (int i = 0; i < incoming.length(); i++) {
                 Event event = Event.from(incoming.getJSONObject(i));
-                if (!tripId.equals(event.tripId)) continue;
+                if (!tripId.equals(event.tripId)) {
+                    if (strict) throw new JSONException("流水旅行不一致");
+                    continue;
+                }
                 normalizeCurrency(event.data, "currency");
                 normalizeCurrency(event.data, "fromCurrency");
                 normalizeCurrency(event.data, "toCurrency");
-                if (!validEvent(event)) continue;
+                if (!validEvent(event) || (strict && !PeerIdentity.valid(event.id))) {
+                    if (strict) throw new JSONException("流水格式无效");
+                    continue;
+                }
+                if (strict) {
+                    try (Cursor existing = db.rawQuery("SELECT trip_id,kind,at,data FROM events WHERE id=?", new String[]{event.id})) {
+                        if (existing.moveToFirst()) {
+                            JSONObject data = new JSONObject(existing.getString(3));
+                            normalizeCurrency(data, "currency"); normalizeCurrency(data, "fromCurrency"); normalizeCurrency(data, "toCurrency");
+                            if (!tripId.equals(existing.getString(0)) || !event.kind.equals(existing.getString(1)) ||
+                                    event.at != existing.getLong(2) || !PeerWire.canonical(event.data).equals(PeerWire.canonical(data)))
+                                throw new JSONException("发现同 ID 的冲突流水，已保留原账目");
+                        }
+                    } catch (JSONException e) { throw e; }
+                    catch (Exception e) { throw new JSONException("流水校验失败"); }
+                }
                 if (insertEvent(db, event) != -1) inserted++;
             }
             db.setTransactionSuccessful();

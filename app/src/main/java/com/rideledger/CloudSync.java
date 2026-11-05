@@ -39,12 +39,7 @@ final class CloudSync {
         this.store = store;
         this.listener = listener;
         prefs = context.getSharedPreferences("cloud", Context.MODE_PRIVATE);
-        String saved = prefs.getString("device_id", null);
-        if (saved == null) {
-            saved = UUID.randomUUID().toString();
-            prefs.edit().putString("device_id", saved).apply();
-        }
-        deviceId = saved;
+        deviceId = PeerIdentity.deviceId(context);
     }
 
     String endpoint() { return prefs.getString("endpoint", ""); }
