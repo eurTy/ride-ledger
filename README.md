@@ -35,7 +35,7 @@
 
 - Windows：独立单文件 EXE，内置 Electron 运行环境、本地账本与同步服务，日常使用无需安装 Node.js 或 Electron。
 - 安卓：使用现有 Android Studio 和 Android SDK，原生 Java 界面与 SQLite 本机数据库，最低支持 Android 8.0。
-- 同一热点：安卓 NSD 与备用 UDP 发现同伴，TCP 直连交换加密记录；与电脑版 mDNS／旧协议仍可互通，两端都可手动地址直连。
+- 同一热点：Windows 与安卓 v0.1.5 使用 mDNS 或备用 UDP 发现同伴。两端通过 TCP 加密传输缺失的记录并确认保存，也可以手动输入地址直连。
 - 安卓蓝牙：经典蓝牙安全 RFCOMM，复用热点的加密、分批补传和去重协议；双方都可监听及发起连接，热点失败后自动尝试已选择的蓝牙同伴。
 - 不同 Wi-Fi：电脑版内置中转服务，通过临时 HTTPS 入口供手机访问；同步地址自动写入邀请码，手机加入后按旅行保存连接。也可使用固定 HTTPS 中转服务。
 - 网页试用：原生 HTML/CSS/JavaScript，浏览器本地保存记录；首次在线打开后可离线打开，恢复连接后通过同一中转服务同步。
@@ -62,11 +62,11 @@ v0.1.4 起，邀请码可携带当前旅行的 HTTPS 同步地址。加入时自
 - 只保存在当前设备：当前选择的旅行、记录筛选、默认付款人及分摊方式、曾用货币、同步服务地址、整趟旅行的删除。删除旅行不会删除同伴或同步服务中的副本。
 - 旅行名称和两人名字来自邀请码；创建后尚无改名功能。两台设备须加入同一个旅行，才能同步该旅行的记录。
 
-Windows EXE 与安卓在同一热点下可局域网直连。不同 Wi-Fi 时，可由电脑提供临时同步服务：在 EXE 分享邀请码后，手机会自动取得 HTTPS 地址。普通浏览器网页不参与 NSD/TCP 直连，但可使用邀请码中的 HTTPS 服务。任一端离线时先保存在本机，恢复连接后交换记录。
+Windows EXE 与安卓加入同一旅行并连接同一热点后，会自动补传缺失的记录。“旅行 → 同行与同步”显示保存确认。不同 Wi-Fi 时，可由电脑提供临时 HTTPS 同步服务，手机通过邀请码取得连接地址。普通浏览器网页可以使用邀请码中的 HTTPS 服务。
 
 ## 一台电脑和一台手机，连接不同 Wi-Fi
 
-1. 下载 [Windows 独立 EXE](https://github.com/eurTy/ride-ledger/releases/download/v0.1.4/RideLedger-0.1.4-win-x64.exe) 和配套 [安卓 APK](https://github.com/eurTy/ride-ledger/releases/download/v0.1.4/ride-ledger-debug.apk)。电脑版双击即用，手机安装新版 APK。
+1. 电脑下载 v0.1.5 EXE 后双击运行，手机安装同版 APK。[Windows EXE](https://github.com/eurTy/ride-ledger/releases/download/v0.1.5/RideLedger-0.1.5-win-x64.exe) · [安卓 APK](https://github.com/eurTy/ride-ledger/releases/download/v0.1.5-debug/ride-ledger-debug.apk)
 2. 在电脑新建旅行，填写两人的名字。进入“旅行 → 分享当前旅行邀请码”，等待“手机连接已就绪”。电脑会自动管理本机服务和临时 HTTPS 连接。
 3. 把邀请码复制到手机“旅行 → 同行与同步 → 凭邀请码加入”。确认手机代表哪位参与者；连接地址自动带入。
 4. 两端各记一笔，等待自动同步；也可先断网记录，恢复后再次打开软件同步。电脑与手机可以处于不同 Wi-Fi，不需要 USB。
@@ -79,7 +79,7 @@ Windows EXE 与安卓在同一热点下可局域网直连。不同 Wi-Fi 时，�
 
 ## 下载与构建 APK
 
-最新版安卓见 [v0.1.5-debug 下载页](https://github.com/eurTy/ride-ledger/releases/tag/v0.1.5-debug)，Windows EXE 仍见 [v0.1.4 下载页](https://github.com/eurTy/ride-ledger/releases/tag/v0.1.4)。安卓 `ride-ledger-debug.apk` 沿用原有调试密钥签名，可直接安装到 Android 8.0 及以上手机；本轮未改变数据库版本，覆盖安装保留原有旅行和流水。
+Windows EXE 与安卓 APK 均为 v0.1.5。替换 EXE 或覆盖安装同签名 APK 可保留原有旅行和流水。安卓最低支持 Android 8.0。[Windows 下载页](https://github.com/eurTy/ride-ledger/releases/tag/v0.1.5) · [安卓下载页](https://github.com/eurTy/ride-ledger/releases/tag/v0.1.5-debug)
 
 开发电脑版使用 `npm install`、`npm run desktop`；生成独立 EXE 使用 `npm run desktop:package`，输出在 `build/desktop-release/`。开发依赖仅安装在项目内，打包文件包含运行环境与程序，不包含账本和签名私钥。
 

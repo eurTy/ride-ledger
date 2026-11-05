@@ -75,6 +75,8 @@ node tests/run-desktop-flow.mjs --packaged --public --android
 
 该流程实际操作客户端表单，覆盖原始资金、共同与个人支出、补充现金、还款、换汇和金额核对；关闭重开后再通过公网与独立模拟设备交换记录。安卓端不会手填同步地址。报告写入 `build/desktop-flow-report/report.json`；临时公网入口随客户端关闭而结束。
 
+Windows v0.1.5 的局域网验收可以独立运行。把已发布的 `RideLedger-0.1.4-win-x64.exe` 与新版 EXE 放在 `build/desktop-release/`，启动 Android 模拟器后运行 `node tests/run-desktop-flow.mjs --packaged --upgrade --android-lan`。脚本用隔离配置从旧版创建账本，在新版和安卓之间验证增量传输、写入失败后的重试、手动地址协议协商和重启去重。此流程用模拟器到宿主机的 TCP 测试端口验证协议，实体热点上的自动发现另行实测。
+
 ## 本轮修复
 
 - 网页同步增加 15 秒请求超时，连接一直无响应时允许后续重试。

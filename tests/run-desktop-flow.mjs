@@ -14,7 +14,11 @@ const run = promisify(execFile), require = createRequire(import.meta.url);
 const project = fileURLToPath(new URL('../', import.meta.url));
 const packaged = process.argv.includes('--packaged'), publicConnection = process.argv.includes('--public');
 const android = process.argv.includes('--android');
-const executable = packaged ? path.join(project, 'build/desktop-release/RideLedger-0.1.4-win-x64.exe') : require('electron');
+const androidLan = process.argv.includes('--android-lan');
+const upgrade = packaged && process.argv.includes('--upgrade');
+const { version } = JSON.parse(await readFile(path.join(project, 'package.json'), 'utf8'));
+const executable = packaged ? path.join(project, 'build/desktop-release', `RideLedger-${version}-win-x64.exe`) : require('electron');
+const previousExecutable = path.join(project, 'build/desktop-release/RideLedger-0.1.4-win-x64.exe');
 const output = path.join(project, 'build', 'desktop-flow-report');
 await mkdir(output, { recursive: true });
 const profile = await mkdtemp(path.join(project, 'build', 'desktop-flow-profile-'));
@@ -24,7 +28,7 @@ const port = reservation.address().port;
 await new Promise(resolve => reservation.close(resolve));
 let child, page, consoleLog = '';
 
-async function launch() {
+async function launch(binary = executable) {
   const environment = { ...process.env, RIDE_LEDGER_USER_DATA: profile, RIDE_LEDGER_PORT: String(port),
     RIDE_LEDGER_HEADLESS: '1', RIDE_LEDGER_DISABLE_DISCOVERY: '1' };
   delete environment.ELECTRON_RUN_AS_NODE;
@@ -34,7 +38,7 @@ async function launch() {
     environment[pathKey] = (environment[pathKey] || '').split(path.delimiter).filter(entry => !/nodejs/i.test(entry)).join(path.delimiter);
   }
   consoleLog = '';
-  child = spawn(executable, [...(packaged ? [] : [project]), '--remote-debugging-port=0'], {
+  child = spawn(binary, [...(packaged ? [] : [project]), '--remote-debugging-port=0'], {
     env: environment, cwd: packaged ? profile : project, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
   });
   child.stdout.on('data', part => { consoleLog += part; });
@@ -78,9 +82,9 @@ async function submit(id, fields) {
     form.requestSubmit();
   })()`);
 }
-const report = { packaged, publicConnection, android, passed: [] };
+const report = { version, packaged, publicConnection, android, androidLan, upgrade, passed: [] };
 try {
-  await launch();
+  await launch(upgrade ? previousExecutable : executable);
   assert.equal(await page.evaluate('document.title'), '双人旅行账本');
   assert.equal(await page.evaluate('document.querySelector(".brand small").textContent'), '电脑客户端');
   await page.evaluate('document.querySelector("[data-action=new]").click()');
@@ -112,6 +116,7 @@ try {
   assert.equal(await page.evaluate('state.events.length'), 6);
   assert.equal(await page.evaluate('currentView'), 'quick');
   report.passed.push('closing and reopening the executable preserves the ledger and selected travel');
+  if (upgrade) report.passed.push('upgrading the v0.1.4 EXE to v0.1.5 preserves existing funds, records, identities and selected travel');
   if (packaged) report.passed.push('single-file EXE launches outside the development folder without Node.js on PATH');
 
   if (publicConnection) {
@@ -158,6 +163,47 @@ try {
       } finally { await adbRun('uninstall', 'com.rideledger.synctest').catch(() => {}); }
     }
     await page.evaluate('document.getElementById("invite-dialog").close()');
+  }
+  if (androidLan) {
+    await waitFor('desktopLan.addresses.length > 0 && !syncing');
+    const code = await page.evaluate('inviteCode(activeTrip())');
+    const expected = await page.evaluate('state.events.length');
+    const tcpPort = Number((await page.evaluate('desktopLan.addresses[0]')).split(':').at(-1));
+    await page.evaluate(`(() => {
+      const original = Storage.prototype.setItem;
+      window.desktopFailedSave = 0;
+      Storage.prototype.setItem = function (key, value) {
+        if (key === STORAGE_KEY && value.includes('Android peer /') && !window.desktopFailedSave) {
+          window.desktopFailedSave++;
+          throw new Error('Injected persistence failure');
+        }
+        return original.call(this, key, value);
+      };
+    })()`);
+    const sdk = process.env.ANDROID_SDK_ROOT || 'E:\\Android_Sdk';
+    const adb = path.join(sdk, 'platform-tools', 'adb.exe');
+    const serial = process.env.ANDROID_TEST_SERIAL || 'emulator-5554';
+    const adbRun = (...args) => run(adb, ['-s', serial, ...args], { windowsHide: true, timeout: 180000, maxBuffer: 2_000_000 });
+    await run('powershell.exe', ['-NoProfile', '-File', path.join(project, 'tests/build-android-sync-tests.ps1'),
+      '-Sdk', sdk, '-JavaHome', process.env.JAVA_HOME || 'E:\\Android\\jbr'], { windowsHide: true, timeout: 60000 });
+    await adbRun('install', '-r', path.join(project, 'build/android-sync-tests/ride-ledger-sync-tests.apk'));
+    try {
+      const { stdout } = await adbRun('shell', 'am', 'instrument', '-w', '-e', 'desktopPeerInvite', code,
+        '-e', 'desktopPeerAddress', '10.0.2.2:' + tcpPort, '-e', 'expectedEvents', String(expected),
+        'com.rideledger.synctest/com.rideledger.SyncTestInstrumentation');
+      await writeFile(path.join(output, 'android-peer-result.txt'), stdout);
+      const match = stdout.match(/INSTRUMENTATION_RESULT: report=(.*)/);
+      if (!match) throw new Error(stdout);
+      const native = JSON.parse(match[1]);
+      report.androidPeerChecks = native;
+      assert.deepEqual(native.failed, [], 'Android to desktop peer checks failed');
+      assert.equal(await page.evaluate('window.desktopFailedSave'), 1, 'The local save failure was not exercised');
+      await waitFor('state.events.length === ' + (expected + 2));
+      assert.equal(await page.evaluate('desktopLan.status'), '同热点已同步 · 同伴已确认保存');
+      await close(); await launch();
+      assert.equal(await page.evaluate('state.events.length'), expected + 2);
+      report.passed.push('Android 10 production protocol and desktop renderer exchange v2 deltas, reject a failed-save receipt, negotiate v1, deduplicate and survive reopening');
+    } finally { await adbRun('uninstall', 'com.rideledger.synctest').catch(() => {}); }
   }
   await page.evaluate('document.querySelector("[data-view=trips]").click()');
   await writeFile(path.join(output, 'desktop.png'), await page.screenshot());

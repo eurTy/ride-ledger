@@ -125,3 +125,40 @@ test('desktop LAN exchanges Android-compatible frames without requiring internet
     assert.equal(a.stored().events.length, 2);
   } finally { await left.close(); await right.close(); }
 });
+
+test('a desktop-initiated connection upgrades from v1 and sends only the new record', async () => {
+  const travel = trip(), first = expense(travel.id), second = expense(travel.id);
+  function replica(initial) {
+    const book = state([travel], initial);
+    const batches = [];
+    const sync = new DesktopLanSync({ discovery: false, host: '127.0.0.1', commit: async (_trip, events) => {
+      batches.push(events.map(event => event.id));
+      for (const event of events) if (!book.events.some(current => current.id === event.id)) book.events.push(event);
+    } });
+    const refresh = async () => sync.update({ deviceId: book.deviceId, revision: book.events.map(event => event.id).join(':'),
+      peerTrips: [{ id: travel.id, secret: travel.secret }], bundles: [await client(book).api.encryptedBundle(travel)] });
+    return { book, batches, sync, refresh };
+  }
+  const left = replica([first]), right = replica([second]);
+  await left.sync.start(); await right.sync.start();
+  try {
+    await left.refresh(); await right.refresh();
+    const route = { host: '127.0.0.1', port: right.sync.port };
+    await left.sync.exchange(route);
+    assert.equal(route.modern, true, 'unknown address did not negotiate v2');
+    assert.equal(left.book.events.length, 2);
+    assert.equal(right.book.events.length, 2);
+    left.batches.length = 0;
+    right.batches.length = 0;
+    const third = expense(travel.id);
+    left.book.events.push(third);
+    await left.refresh(); await right.refresh();
+    await left.sync.exchange(route);
+    assert.deepEqual(right.batches, [[third.id]]);
+    assert.deepEqual(left.batches, []);
+    assert.equal(left.sync.status, '同热点已同步 · 同伴已确认保存');
+    await right.refresh();
+    await left.sync.exchange(route);
+    assert.deepEqual(right.batches, [[third.id]], 'matching roots resent saved records');
+  } finally { await left.sync.close(); await right.sync.close(); }
+});

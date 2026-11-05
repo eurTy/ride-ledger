@@ -7,7 +7,7 @@
   "directories": { "output": "build/desktop-release" },
   "files": [
     "desktop/main.cjs", "desktop/preload.cjs", "desktop/phone-tunnel.mjs",
-    "desktop/lan-sync.mjs", "desktop/assets/**", "web/**", "sync-server/server.mjs", "package.json"
+    "desktop/lan-sync.mjs", "desktop/peer-protocol.mjs", "desktop/assets/**", "web/**", "sync-server/server.mjs", "package.json"
   ],
   "win": { "target": ["portable"], "signExecutable": false, "icon": "desktop/assets/icon.ico" },
   "nsis": { "packElevateHelper": false },

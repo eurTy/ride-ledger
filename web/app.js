@@ -446,6 +446,7 @@ function renderTrips(trip) {
     (window.rideLedgerDesktop ? '<div class="connection-panel"><strong>' +
       escapeHtml(desktopConnection.message || '分享邀请码时自动连接手机') + '</strong>' +
       '<p>不同 Wi-Fi：分享邀请码后，手机会自动读取连接信息。请保持电脑和软件运行。</p>' +
+      '<p id="desktop-lan-status">' + escapeHtml(desktopLan.status || '等待同热点的同伴') + '</p>' +
       (desktopLan.addresses.length ? '<details class="connection-addresses"><summary>查看本机局域网地址</summary><small>' +
         escapeHtml(desktopLan.addresses.join(' / ')) + '</small></details>' : '') +
       (desktopConnection.state === 'ready' ? '<button class="button ghost" data-action="stop-phone">关闭手机公网连接</button>' : '') +
@@ -555,10 +556,10 @@ function setBadge(text, waiting = false) {
   badge.textContent = text;
   badge.classList.toggle('waiting', waiting);
 }
-async function encryptedBundle(trip) {
+async function encryptedBundle(trip, events = eventsFor(trip.id)) {
   const key = await crypto.subtle.importKey('raw', fromBase64url(trip.secret), 'AES-GCM', false, ['encrypt']);
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const plain = encoder.encode(JSON.stringify({ events: eventsFor(trip.id) }));
+  const plain = encoder.encode(JSON.stringify({ events }));
   const data = new Uint8Array(await crypto.subtle.encrypt({
     name: 'AES-GCM', iv, additionalData: encoder.encode(trip.id), tagLength: 128
   }, key, plain));
@@ -584,11 +585,57 @@ async function decryptBundle(trip, bundle) {
 async function mergeSyncedBundle(trip, bundle) {
   const incoming = await decryptBundle(trip, bundle);
   if (!state.trips.some(current => current.id === trip.id)) return 0;
-  const known = new Set(state.events.map(event => event.id));
+  return mergeIncomingEvents(trip, incoming);
+}
+
+function validPeerEvent(event) {
+  const data = event.data;
+  if (!data || !Number.isSafeInteger(event.at) ||
+      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(event.id)) return false;
+  const person = value => value === 'a' || value === 'b';
+  const amount = value => Number.isSafeInteger(value) && value > 0;
+  const currency = value => typeof value === 'string' && /^[A-Z]{3}$/.test(value) && value.length === 3;
+  switch (event.kind) {
+    case 'opening': case 'topup': return person(data.person) && currency(data.currency) && amount(data.amount);
+    case 'expense': return person(data.payer) && currency(data.currency) && amount(data.amount) &&
+      Number.isInteger(data.shareA) && data.shareA >= 0 && data.shareA <= 10000;
+    case 'transfer': return person(data.from) && currency(data.currency) && amount(data.amount);
+    case 'exchange': return person(data.person) && currency(data.fromCurrency) && currency(data.toCurrency) &&
+      amount(data.fromAmount) && amount(data.toAmount);
+    case 'delete': return typeof data.target === 'string' && data.target.length > 0;
+    default: return false;
+  }
+}
+
+function samePeerData(left, right) {
+  if (left === right) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object' ||
+      Array.isArray(left) !== Array.isArray(right)) return false;
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length &&
+    keys.every(key => Object.hasOwn(right, key) && samePeerData(left[key], right[key]));
+}
+
+function mergeIncomingEvents(trip, incoming, strict = false) {
+  const known = new Map(state.events.map(event => [event.id, event]));
   const fresh = [];
-  for (const event of incoming) {
-    if (event.tripId !== trip.id || !event.id || known.has(event.id)) continue;
-    normalizeEventCurrency(event); fresh.push(event); known.add(event.id);
+  for (const raw of incoming) {
+    if (raw?.tripId !== trip.id || !raw.id) {
+      if (strict) throw new Error('流水旅行不一致');
+      continue;
+    }
+    if (!strict && known.has(raw.id)) continue;
+    // Context bridge arguments are read-only. Normalize a local copy before comparing or storing.
+    const event = strict && raw.data ? { ...raw, data: { ...raw.data } } : raw;
+    normalizeEventCurrency(event);
+    if (strict && !validPeerEvent(event)) throw new Error('流水格式无效');
+    const previous = known.get(event.id);
+    if (previous) {
+      if (!samePeerData(previous, event)) throw new Error('同 ID 流水内容冲突');
+      continue;
+    }
+    fresh.push(event);
+    known.set(event.id, event);
   }
   if (!fresh.length) return 0;
   const nextState = { ...state, events: state.events.concat(fresh) };
@@ -596,11 +643,26 @@ async function mergeSyncedBundle(trip, bundle) {
   if (currentView !== 'quick') render();
   return fresh.length;
 }
+
+function savePeerBatch({ tripId, secret, events }) {
+  const trip = state.trips.find(current => current.id === tripId && current.secret === secret);
+  if (!trip) throw new Error('旅行已从本机移除');
+  const added = mergeIncomingEvents(trip, events, true);
+  if (added) {
+    if (syncing) desktopSyncPending = true;
+    else setTimeout(syncNow, 0);
+  }
+  return added;
+}
+
 async function syncNow() {
-  if (syncing) return;
+  if (syncing) {
+    if (window.rideLedgerDesktop) desktopSyncPending = true;
+    return;
+  }
   if (!state.trips.length) {
     if (window.rideLedgerDesktop?.exchangeLan)
-      await window.rideLedgerDesktop.exchangeLan({ deviceId: state.deviceId, revision: 'empty', bundles: [] }).catch(() => {});
+      await window.rideLedgerDesktop.exchangeLan({ deviceId: state.deviceId, revision: 'empty', bundles: [], peerTrips: [] }).catch(() => {});
     return;
   }
   if (!navigator.onLine && !window.rideLedgerDesktop) {
@@ -614,11 +676,15 @@ async function syncNow() {
   try {
     if (window.rideLedgerDesktop?.exchangeLan) {
       try {
+        const { trips, events } = state;
+        const peerTrips = trips.map(({ id, secret }) => ({ id, secret }));
         const revision = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(
-          JSON.stringify([state.trips.map(trip => trip.id), state.events])))));
-        const snapshot = await window.rideLedgerDesktop.exchangeLan({ deviceId: state.deviceId, revision,
-          bundles: await Promise.all(state.trips.map(encryptedBundle)) });
+          JSON.stringify([peerTrips, events])))));
+        const snapshot = await window.rideLedgerDesktop.exchangeLan({ deviceId: state.deviceId, revision, peerTrips,
+          bundles: await Promise.all(trips.map(trip => encryptedBundle(trip, events.filter(event => event.tripId === trip.id)))) });
         desktopLan = { status: snapshot.status || '', addresses: snapshot.addresses || [] };
+        const lanStatus = document.getElementById('desktop-lan-status');
+        if (lanStatus) lanStatus.textContent = desktopLan.status;
         for (const bundle of snapshot.bundles || []) {
           const trip = state.trips.find(item => item.id === bundle.tripId);
           if (!trip) continue;
@@ -1039,6 +1105,7 @@ if (window.rideLedgerDesktop) {
     if (currentView === 'trips' && activeTrip()) renderTrips(activeTrip());
   };
   window.rideLedgerDesktop.getConnection().then(applyConnection).catch(() => {});
+  window.rideLedgerDesktop.onPeerBatch?.(savePeerBatch);
   window.rideLedgerDesktop.onConnectionChanged(applyConnection);
   window.rideLedgerDesktop.onRemoteChanged(() => {
     if (syncing) desktopSyncPending = true; else syncNow();

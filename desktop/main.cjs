@@ -10,6 +10,7 @@ const ownsLock = app.requestSingleInstanceLock();
 if (!ownsLock) app.quit();
 
 let window, relay, tunnel, lan, desktopDeviceId = '', quitting = false;
+const pendingPeerWrites = new Map();
 const send = (channel, data) => { if (window && !window.isDestroyed()) window.webContents.send(channel, data); };
 const authorize = event => {
   if (!window || event.sender !== window.webContents ||
@@ -17,11 +18,29 @@ const authorize = event => {
 };
 const moduleUrl = file => pathToFileURL(path.join(__dirname, file)).href;
 
+function savePeerBatch(trip, events) {
+  if (!window || window.isDestroyed()) throw new Error('本机账本未打开');
+  const requestId = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const finish = added => {
+      clearTimeout(timeout);
+      pendingPeerWrites.delete(requestId);
+      if (Number.isInteger(added) && added >= 0 && added <= events.length) resolve(added);
+      else reject(new Error('本机记录保存待重试'));
+    };
+    const timeout = setTimeout(() => finish(null), 10000);
+    pendingPeerWrites.set(requestId, finish);
+    try { send('lan:peer-batch', { requestId, tripId: trip.id, secret: trip.secret, events }); }
+    catch { finish(null); }
+  });
+}
+
 app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.focus(); } });
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', event => {
   if (quitting) return;
   event.preventDefault(); quitting = true; tunnel?.stop();
+  for (const finish of pendingPeerWrites.values()) finish(null);
   Promise.allSettled([lan?.close(), relay?.close()]).finally(() => app.quit());
 });
 
@@ -37,7 +56,7 @@ if (ownsLock) app.whenReady().then(async () => {
   tunnel = new PhoneTunnel({ port: new URL(relay.origin).port, userData: app.getPath('userData'), instanceId });
   tunnel.on('status', status => send('phone:status', status));
   lan = new DesktopLanSync({ discovery: process.env.RIDE_LEDGER_DISABLE_DISCOVERY !== '1',
-    host: process.env.RIDE_LEDGER_DISABLE_DISCOVERY === '1' ? '127.0.0.1' : '0.0.0.0' });
+    host: process.env.RIDE_LEDGER_DISABLE_DISCOVERY === '1' ? '127.0.0.1' : '0.0.0.0', commit: savePeerBatch });
   await lan.start();
   lan.on('incoming', () => send('remote:changed'));
 
@@ -51,6 +70,13 @@ if (ownsLock) app.whenReady().then(async () => {
     return lan.update(snapshot);
   });
   ipcMain.handle('lan:connect', (event, address) => { authorize(event); lan.connectManual(address); });
+  ipcMain.handle('lan:peer-saved', (event, requestId, added) => {
+    authorize(event);
+    const finish = pendingPeerWrites.get(requestId);
+    if (!finish) return;
+    if (Number.isInteger(added) && added >= 0) event.sender.session.flushStorageData();
+    finish(added);
+  });
 
   Menu.setApplicationMenu(null);
   window = new BrowserWindow({ width: 1040, height: 840, minWidth: 390, minHeight: 650,
