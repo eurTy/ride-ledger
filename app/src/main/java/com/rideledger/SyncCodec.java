@@ -50,6 +50,7 @@ final class SyncCodec {
     }
 
     static JSONObject bundle(LedgerStore store, LedgerStore.Trip trip) throws Exception {
+        if (trip.team != null) throw new IllegalArgumentException("小队账目需要设备认证");
         byte[] iv = new byte[12];
         new SecureRandom().nextBytes(iv);
         JSONObject plain = new JSONObject().put("events", store.eventsJson(trip.id));
@@ -62,11 +63,12 @@ final class SyncCodec {
 
     static int mergeBundle(LedgerStore store, JSONObject bundle) throws Exception {
         LedgerStore.Trip trip = store.getTrip(bundle.getString("tripId"));
-        if (trip == null) return 0;
+        if (trip == null || trip.team != null) return 0;
         return store.merge(trip.id, legacyEvents(trip, bundle));
     }
 
     static JSONArray legacyEvents(LedgerStore.Trip trip, JSONObject bundle) throws Exception {
+        if (trip.team != null) throw new IllegalArgumentException("小队账目需要设备认证");
         byte[] iv = Base64.decode(bundle.getString("iv"), Base64.NO_WRAP | Base64.URL_SAFE);
         byte[] ciphertext = Base64.decode(bundle.getString("data"), Base64.NO_WRAP | Base64.URL_SAFE);
         if (iv.length != 12 || ciphertext.length > 8_000_000) throw new JSONException("同步数据大小不合法");

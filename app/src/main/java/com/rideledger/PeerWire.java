@@ -24,11 +24,12 @@ final class PeerWire {
     PeerWire(InputStream in, OutputStream out, Progress progress) {
         this.in = in; this.out = out; this.progress = progress;
     }
-    JSONObject read() throws Exception {
+    JSONObject read() throws Exception { return read(MAX_FRAME); }
+    JSONObject read(int maxBytes) throws Exception {
         byte[] header = exact(4);
         int length = ((header[0] & 255) << 24) | ((header[1] & 255) << 16) |
                 ((header[2] & 255) << 8) | (header[3] & 255);
-        if (length < 1 || length > MAX_FRAME) throw new IllegalArgumentException("同步帧大小无效");
+        if (length < 1 || length > maxBytes) throw new IllegalArgumentException("同步帧大小无效");
         return new JSONObject(new String(exact(length), StandardCharsets.UTF_8));
     }
     private byte[] exact(int count) throws Exception {

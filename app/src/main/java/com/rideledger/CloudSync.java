@@ -43,7 +43,10 @@ final class CloudSync {
     }
 
     String endpoint() { return prefs.getString("endpoint", ""); }
-    String effectiveEndpoint(LedgerStore.Trip trip) { return trip.syncUrl.isEmpty() ? endpoint() : trip.syncUrl; }
+    String effectiveEndpoint(LedgerStore.Trip trip) {
+        if (trip.team != null) return "";
+        return trip.syncUrl.isEmpty() ? endpoint() : trip.syncUrl;
+    }
     String status() { return status; }
 
     void setEndpoint(String raw) {

@@ -2,6 +2,7 @@ package com.rideledger;
 
 import android.content.Context;
 import android.net.DhcpInfo;
+import android.net.Network;
 import android.net.wifi.WifiManager;
 import org.json.JSONObject;
 import java.net.DatagramPacket;
@@ -23,12 +24,14 @@ import java.util.concurrent.TimeUnit;
  */
 final class HotspotDiscovery {
     interface Listener { void found(InetSocketAddress address, String deviceId); }
-    private static final int DISCOVERY_PORT = 45871, MAX_PACKET = 1024;
+    static final int DISCOVERY_PORT = 45871;
+    private static final int MAX_PACKET = 1024;
     private final Context context;
     private final String deviceId;
     private final int tcpPort, listenPort;
     private final boolean allowLoopback;
     private final Listener listener;
+    private final String scope;
     private volatile DatagramSocket socket;
     private ScheduledExecutorService timer;
 
@@ -36,8 +39,11 @@ final class HotspotDiscovery {
         this(context, deviceId, tcpPort, DISCOVERY_PORT, false, listener);
     }
     HotspotDiscovery(Context context, String deviceId, int tcpPort, int listenPort, boolean allowLoopback, Listener listener) {
+        this(context, deviceId, tcpPort, listenPort, allowLoopback, "", listener);
+    }
+    HotspotDiscovery(Context context, String deviceId, int tcpPort, int listenPort, boolean allowLoopback, String scope, Listener listener) {
         this.context = context; this.deviceId = deviceId; this.tcpPort = tcpPort;
-        this.listenPort = listenPort; this.allowLoopback = allowLoopback; this.listener = listener;
+        this.listenPort = listenPort; this.allowLoopback = allowLoopback; this.scope = scope; this.listener = listener;
     }
     synchronized void start() {
         if (socket != null) return;
@@ -49,7 +55,7 @@ final class HotspotDiscovery {
             Thread receiver = new Thread(() -> receive(current), "RideLedger-hotspot-discovery");
             receiver.setDaemon(true); receiver.start();
             timer = Executors.newSingleThreadScheduledExecutor();
-            if (!allowLoopback) timer.scheduleWithFixedDelay(this::beacon, 0, 12, TimeUnit.SECONDS);
+            if (!allowLoopback) timer.scheduleWithFixedDelay(this::beacon, 0, scope.isEmpty() ? 12 : 4, TimeUnit.SECONDS);
         } catch (Exception ignored) {
             if (listening != null) listening.close(); socket = null;
         }
@@ -65,13 +71,15 @@ final class HotspotDiscovery {
                 JSONObject value = new JSONObject(new String(packet.getData(), packet.getOffset(), packet.getLength(), StandardCharsets.UTF_8));
                 String peer = value.optString("deviceId"); int port = value.optInt("port");
                 if (!"ride-ledger-nearby".equals(value.optString("app")) || value.optInt("version") != 2 ||
-                        !PeerIdentity.valid(peer) || peer.equals(deviceId) || port < 1 || port > 65535) continue;
+                        !scope.equals(value.optString("team")) || !PeerIdentity.valid(peer) || peer.equals(deviceId) ||
+                        port < 1 || port > 65535) continue;
                 if (socket != listening) return;
                 listener.found(new InetSocketAddress(host, port), peer);
                 long now = android.os.SystemClock.elapsedRealtime();
                 if (now - responseWindow > 1000) { responseWindow = now; responses = 0; }
                 // One reply to a request; replies never produce further replies.
-                if (value.optBoolean("request") && responses++ < 16) send(new InetSocketAddress(host, packet.getPort()), false);
+                if (value.optBoolean("request") && responses++ < 16)
+                    send(new InetSocketAddress(host, scope.isEmpty() || allowLoopback ? packet.getPort() : listenPort), false);
             } catch (Exception ignored) { if (listening.isClosed()) return; }
         }
     }
@@ -98,7 +106,7 @@ final class HotspotDiscovery {
             if (info != null && info.gateway != 0) targets.add(InetAddress.getByAddress(new byte[]{
                     (byte) info.gateway, (byte) (info.gateway >> 8), (byte) (info.gateway >> 16), (byte) (info.gateway >> 24)}));
         } catch (Exception ignored) {}
-        for (InetAddress target : targets) send(new InetSocketAddress(target, DISCOVERY_PORT), true);
+        for (InetAddress target : targets) send(new InetSocketAddress(target, listenPort), true);
     }
     // Also used by the isolated Android test to exercise actual UDP request/reply without a Wi-Fi radio.
     void probe(InetSocketAddress address) { send(address, true); }
@@ -108,8 +116,17 @@ final class HotspotDiscovery {
         if (current == null || current.isClosed()) return;
         try {
             byte[] bytes = new JSONObject().put("app", "ride-ledger-nearby").put("version", 2)
-                    .put("deviceId", deviceId).put("port", tcpPort).put("request", request).toString().getBytes(StandardCharsets.UTF_8);
-            current.send(new DatagramPacket(bytes, bytes.length, target));
+                    .put("deviceId", deviceId).put("port", tcpPort).put("request", request)
+                    .put("team", scope).toString().getBytes(StandardCharsets.UTF_8);
+            DatagramPacket packet = new DatagramPacket(bytes, bytes.length, target);
+            // A local-only Wi-Fi network can coexist with cellular as the default route.
+            Network network = scope.isEmpty() || allowLoopback ? null : LanSync.localNetwork(context, target.getAddress());
+            if (network == null) current.send(packet);
+            else try (DatagramSocket outgoing = new DatagramSocket()) {
+                outgoing.setBroadcast(true);
+                network.bindSocket(outgoing);
+                outgoing.send(packet);
+            }
         } catch (Exception ignored) {}
     }
     synchronized void stop() {

@@ -22,7 +22,8 @@ final class PeerConnection implements Closeable {
     void watch(ScheduledExecutorService scheduler) {
         watch(scheduler, 15000, 180000);
     }
-    void watch(ScheduledExecutorService scheduler, long idleTimeout, long totalTimeout) {
+    synchronized void watch(ScheduledExecutorService scheduler, long idleTimeout, long totalTimeout) {
+        if (closed) return;
         movedAt = android.os.SystemClock.elapsedRealtime();
         final long started = movedAt;
         deadline = scheduler.scheduleAtFixedRate(() -> {

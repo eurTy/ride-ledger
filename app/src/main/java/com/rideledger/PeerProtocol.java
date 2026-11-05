@@ -28,6 +28,8 @@ final class PeerProtocol {
     private final LedgerStore store;
     private final String deviceId;
     private final Listener listener;
+    private final String remoteDevice;
+    private final String sessionKey;
     private final Map<String, Snapshot> snapshots = new LinkedHashMap<>();
     private final Map<String, Travel> common = new LinkedHashMap<>();
     private final Result result = new Result();
@@ -54,10 +56,19 @@ final class PeerProtocol {
     }
 
     PeerProtocol(LedgerStore store, String deviceId, Listener listener) throws Exception {
+        this(store, deviceId, listener, null, "", "");
+    }
+
+    PeerProtocol(LedgerStore store, String deviceId, Listener listener, LedgerStore.Trip teamTrip,
+                 String remoteDevice, String sessionKey) throws Exception {
         this.store = store; this.deviceId = deviceId; this.listener = listener;
+        this.remoteDevice = remoteDevice;
+        this.sessionKey = sessionKey;
         if (!PeerIdentity.valid(deviceId)) throw new IllegalArgumentException("设备身份无效");
         synchronized (store) {
             for (LedgerStore.Trip trip : store.trips()) {
+                if (teamTrip == null ? trip.team != null : trip.team == null || !trip.id.equals(teamTrip.id) ||
+                        !trip.team.fingerprint.equals(teamTrip.team.fingerprint) || !trip.secret.equals(teamTrip.secret)) continue;
                 Snapshot snapshot = new Snapshot(trip);
                 for (LedgerStore.Event entry : store.events(trip.id)) {
                     JSONObject event = entry.json(), data = event.getJSONObject("data");
@@ -74,7 +85,7 @@ final class PeerProtocol {
     Result progress() { return result; }
     Result exchange(PeerWire wire, boolean modern) throws Exception {
         this.wire = wire;
-        if (!modern) return legacyInitiator();
+        if (!modern && sessionKey.isEmpty()) return legacyInitiator();
         session = UUID.randomUUID().toString();
         wire.write(hello(false));
         JSONObject remote = wire.read(); readHello(remote, "hello");
@@ -89,7 +100,7 @@ final class PeerProtocol {
     Result accept(PeerWire wire) throws Exception {
         this.wire = wire;
         JSONObject first = wire.read();
-        if (first.getInt("version") == 1) return legacyReceiver(first);
+        if (first.getInt("version") == 1 && sessionKey.isEmpty()) return legacyReceiver(first);
         session = first.getString("session");
         if (!PeerIdentity.valid(session)) throw new IllegalArgumentException("同步会话无效");
         readHello(first, "hello"); wire.write(hello(true));
@@ -106,11 +117,14 @@ final class PeerProtocol {
     private JSONObject payload(String kind) throws Exception {
         return new JSONObject().put("type", kind).put("session", session).put("sender", deviceId);
     }
+    private LedgerStore.Trip wireTrip(LedgerStore.Trip trip) {
+        return sessionKey.isEmpty() ? trip : trip.withKey(sessionKey);
+    }
     private JSONObject hello(boolean onlyCommon) throws Exception {
         JSONArray values = new JSONArray();
         for (Snapshot value : snapshots.values()) {
             if (onlyCommon && !common.containsKey(value.trip.id)) continue;
-            values.put(SyncCodec.sealPeer(value.trip, payload("manifest").put("root", value.root).put("count", value.events.size())));
+            values.put(SyncCodec.sealPeer(wireTrip(value.trip), payload("manifest").put("root", value.root).put("count", value.events.size())));
         }
         return frame("hello").put("bundles", values);
     }
@@ -118,7 +132,8 @@ final class PeerProtocol {
         if (frame.getInt("version") != VERSION || !kind.equals(frame.getString("kind")) || !session.equals(frame.getString("session")))
             throw new IllegalArgumentException("同步协议不匹配");
         result.remoteId = frame.getString("deviceId"); result.modern = true;
-        if (!PeerIdentity.valid(result.remoteId) || deviceId.equals(result.remoteId))
+        if (!PeerIdentity.valid(result.remoteId) || deviceId.equals(result.remoteId) ||
+                (!remoteDevice.isEmpty() && !remoteDevice.equals(result.remoteId)))
             throw new IllegalArgumentException("同伴设备身份无效");
         JSONArray bundles = frame.getJSONArray("bundles");
         if (bundles.length() > 100) throw new IllegalArgumentException("旅行数量过多");
@@ -137,7 +152,7 @@ final class PeerProtocol {
         result.authenticated = true; listener.authenticated(result.remoteId);
     }
     private JSONObject open(Snapshot own, JSONObject bundle, String type) throws Exception {
-        JSONObject value = SyncCodec.openPeer(own.trip, bundle);
+        JSONObject value = SyncCodec.openPeer(wireTrip(own.trip), bundle);
         if (!type.equals(value.getString("type")) || !session.equals(value.getString("session")) ||
                 !result.remoteId.equals(value.getString("sender"))) throw new IllegalArgumentException("同步消息身份不一致");
         return value;
@@ -155,7 +170,7 @@ final class PeerProtocol {
         JSONArray values = new JSONArray();
         for (Travel value : common.values()) {
             if (!value.local.root.equals(value.remoteRoot))
-                values.put(SyncCodec.sealPeer(value.local.trip, payload("index").put("entries", value.local.hashes)));
+                values.put(SyncCodec.sealPeer(wireTrip(value.local.trip), payload("index").put("entries", value.local.hashes)));
         }
         return frame("index").put("bundles", values);
     }
@@ -203,7 +218,7 @@ final class PeerProtocol {
         }
     }
     private void sendBatch(Travel value, JSONArray batch) throws Exception {
-        JSONObject bundle = SyncCodec.sealPeer(value.local.trip, payload("events").put("events", batch));
+        JSONObject bundle = SyncCodec.sealPeer(wireTrip(value.local.trip), payload("events").put("events", batch));
         wire.write(frame("delta").put("bundle", bundle));
         value.sentHashes.put(PeerWire.hash(bundle)); result.sent += batch.length();
     }
@@ -228,7 +243,9 @@ final class PeerProtocol {
                 int added;
                 synchronized (store) {
                     LedgerStore.Trip current = store.getTrip(value.local.trip.id);
-                    if (current == null || !current.secret.equals(value.local.trip.secret)) throw new IllegalArgumentException("旅行已从本机移除");
+                    if (current == null || !current.secret.equals(value.local.trip.secret) || (value.local.trip.team != null &&
+                            (current.team == null || !value.local.trip.team.fingerprint.equals(current.team.fingerprint))))
+                        throw new IllegalArgumentException("旅行已从本机移除");
                     added = store.mergeStrict(current.id, events);
                 }
                 for (int i = 0; i < events.length(); i++) value.missing.remove(events.getJSONObject(i).getString("id"));
@@ -244,7 +261,7 @@ final class PeerProtocol {
         for (Travel value : common.values()) {
             if (value.failed || !value.missing.isEmpty() || store.getTrip(value.local.trip.id) == null) continue;
             result.put(new JSONObject().put("tripId", value.local.trip.id).put("token",
-                    SyncCodec.receipt(value.local.trip, session, this.result.remoteId, deviceId, value.receivedHashes)));
+                    SyncCodec.receipt(wireTrip(value.local.trip), session, this.result.remoteId, deviceId, value.receivedHashes)));
         }
         return result;
     }
@@ -256,7 +273,7 @@ final class PeerProtocol {
         }
         boolean complete = true;
         for (Travel value : common.values()) {
-            String expected = SyncCodec.receipt(value.local.trip, session, deviceId, result.remoteId, value.sentHashes);
+            String expected = SyncCodec.receipt(wireTrip(value.local.trip), session, deviceId, result.remoteId, value.sentHashes);
             String actual = tokens.get(value.local.trip.id);
             if (actual == null || !MessageDigest.isEqual(expected.getBytes(StandardCharsets.US_ASCII), actual.getBytes(StandardCharsets.US_ASCII))) complete = false;
         }
@@ -284,7 +301,7 @@ final class PeerProtocol {
                 JSONObject bundle = bundles.getJSONObject(i);
                 synchronized (store) {
                     LedgerStore.Trip trip = store.getTrip(bundle.getString("tripId"));
-                    if (trip == null) continue;
+                    if (trip == null || trip.team != null) continue;
                     int added = store.mergeStrict(trip.id, SyncCodec.legacyEvents(trip, bundle));
                     result.added += added; if (added > 0) listener.stored(added);
                     accepted.put(bundle);
@@ -299,7 +316,7 @@ final class PeerProtocol {
         JSONArray receipts = new JSONArray();
         for (int i = 0; i < values.length(); i++) {
             JSONObject bundle = values.getJSONObject(i); LedgerStore.Trip trip = store.getTrip(bundle.getString("tripId"));
-            if (trip != null) receipts.put(new JSONObject().put("tripId", trip.id).put("token",
+            if (trip != null && trip.team == null) receipts.put(new JSONObject().put("tripId", trip.id).put("token",
                     SyncCodec.receipt(trip, session, sender, receiver, new JSONArray().put(PeerWire.hash(bundle)))));
         }
         return receipts;

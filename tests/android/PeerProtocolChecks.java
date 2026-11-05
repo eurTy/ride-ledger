@@ -345,12 +345,12 @@ final class PeerProtocolChecks {
             return pair;
         }finally{for(Socket socket:sockets)try{socket.close();}catch(Exception ignored){}pool.shutdownNow();}
     }
-    private static InputStream fragment(InputStream stream){return new FilterInputStream(stream){
+    static InputStream fragment(InputStream stream){return new FilterInputStream(stream){
         @Override public int read(byte[] data,int offset,int count)throws IOException{return super.read(data,offset,Math.min(37,count));}
     };}
-    private static final class FaultOutput extends OutputStream {
+    static final class FaultOutput extends OutputStream {
         private final Socket socket; private final OutputStream out; private final String mode;
-        private final ByteArrayOutputStream buffered=new ByteArrayOutputStream(); private int deltas;
+        private final ByteArrayOutputStream buffered=new ByteArrayOutputStream(); private int deltas, frames;
         FaultOutput(Socket socket,String mode)throws Exception{this.socket=socket;out=socket.getOutputStream();this.mode=mode;}
         @Override public void write(int value)throws IOException{write(new byte[]{(byte)value});}
         @Override public void write(byte[] data,int offset,int length)throws IOException{
@@ -360,7 +360,8 @@ final class PeerProtocolChecks {
             if(bytes.length<4+size)return;
             try{
                 JSONObject value=new JSONObject(new String(bytes,4,size,java.nio.charset.StandardCharsets.UTF_8));
-                String kind=value.optString("kind");if("delta".equals(kind))deltas++;
+                String kind=value.optString("kind");if("delta".equals(kind))deltas++;frames++;
+                if(mode.equals("drop-second-frame")&&frames==2){socket.close();throw new IOException("simulated missing admission");}
                 if((mode.equals("drop-confirm")&&kind.equals("confirm"))||(mode.equals("drop-second-delta")&&kind.equals("delta")&&deltas==2)){
                     if(kind.equals("delta"))out.write(bytes,0,bytes.length/2);
                     socket.close();throw new IOException("simulated interrupted stream");
@@ -383,7 +384,7 @@ final class PeerProtocolChecks {
         void reopen(){store.close();store=new LedgerStore(context);}
         @Override public void close(){store.close();context.cleanup();}
     }
-    private static final class Ctx extends ContextWrapper {
+    static final class Ctx extends ContextWrapper {
         final String prefix="peer_"+UUID.randomUUID()+"_";
         Ctx(Context base){super(base);}
         @Override public Context getApplicationContext(){return this;}

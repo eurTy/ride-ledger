@@ -325,6 +325,10 @@ public final class SyncTestInstrumentation extends Instrumentation {
         });
         PeerProtocolChecks.run(getTargetContext(), fixture, (name, action) -> check(name, action::run));
         check("UI: offline quick entry, Bluetooth settings without authorization, and reopening retain records", () -> PeerUiChecks.run(this));
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            TeamChecks.run(getTargetContext(), (name, action) -> check(name, action::run));
+            check("team UI: quick entry, review and travel have no manual sync controls", () -> PeerUiChecks.runTeam(this));
+        }
     }
 
     private static void verifySummary(LedgerStore.Summary sum, JSONObject expected) throws Exception {
