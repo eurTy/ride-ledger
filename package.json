@@ -3,7 +3,7 @@
   "version": "0.1.5",
   "private": true,
   "author": "eurTy",
-  "description": "Two-person offline travel ledger with desktop-to-phone invitation sync",
+  "description": "Offline two-person travel ledger for Windows with Android LAN and HTTPS synchronization",
   "main": "desktop/main.cjs",
   "scripts": {
     "test:mesh": "node experiments/mesh/run.mjs",

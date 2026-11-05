@@ -8,6 +8,7 @@ sync-server/data/
 .playwright-cli/
 *.iml
 node_modules/
+output/
 .env
 .env.*
 
