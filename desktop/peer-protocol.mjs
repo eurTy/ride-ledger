@@ -39,9 +39,9 @@ export class PeerWire {
     return parts.length === 1 ? parts[0] : Buffer.concat(parts, size);
   }
 
-  async read() {
+  async read(limit = maxFrame) {
     const size = (await this.exact(4)).readInt32BE();
-    if (size < 1 || size > maxFrame || this.bytesRead + size > maxSessionBytes)
+    if (size < 1 || size > limit || this.bytesRead + size > maxSessionBytes)
       throw new Error('同步数据大小无效');
     return JSON.parse((await this.exact(size)).toString('utf8'));
   }
@@ -73,7 +73,7 @@ function decimal(value) {
 
 // Match Android JSONObject.quote and BigDecimal.toPlainString before hashing.
 const quote = value => JSON.stringify(value).replaceAll('/', '\\/');
-function canonical(value) {
+export function canonical(value) {
   if (typeof value === 'string') return quote(value);
   if (typeof value === 'number') return decimal(value);
   if (value === null || typeof value === 'boolean') return String(value);
@@ -84,10 +84,10 @@ function canonical(value) {
   throw new Error('同步数据格式无效');
 }
 
-const hash = value => createHash('sha256').update(canonical(value)).digest('hex');
-const peerAad = trip => 'ride-ledger-peer-v2:' + trip.id;
+export const hash = value => createHash('sha256').update(canonical(value)).digest('hex');
+export const peerAad = trip => 'ride-ledger-peer-v2:' + trip.id;
 
-function openBundle(trip, bundle, aad) {
+export function openBundle(trip, bundle, aad) {
   if (!validBundle(bundle) || bundle.tripId !== trip.id) throw new Error('旅行不一致');
   const iv = Buffer.from(bundle.iv, 'base64url');
   const data = Buffer.from(bundle.data, 'base64url');
@@ -98,7 +98,7 @@ function openBundle(trip, bundle, aad) {
   return JSON.parse(Buffer.concat([cipher.update(data.subarray(0, -16)), cipher.final()]).toString('utf8'));
 }
 
-function sealPeer(trip, payload) {
+export function sealPeer(trip, payload) {
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', trip.key, iv);
   cipher.setAAD(Buffer.from(peerAad(trip)));
@@ -106,34 +106,20 @@ function sealPeer(trip, payload) {
   return { tripId: trip.id, iv: iv.toString('base64url'), data: encrypted.toString('base64url') };
 }
 
-function legacyEvents(trip, bundle) {
-  const { events } = openBundle(trip, bundle, trip.id);
-  if (!Array.isArray(events) || events.length > maxEvents) throw new Error('同步记录格式无效');
-  return events;
-}
-
-export function peerSnapshot({ deviceId, peerTrips, bundles }) {
-  if (!validId(deviceId) || !Array.isArray(peerTrips)) return null;
-  if (peerTrips.length > maxTrips || peerTrips.length !== bundles.length) throw new Error('同步旅行数量无效');
-  const byId = new Map(bundles.map(bundle => [bundle.tripId, bundle]));
-  const trips = new Map();
-  for (const { id, secret } of peerTrips) {
-    const key = typeof secret === 'string' && Buffer.from(secret, 'base64url');
-    if (!validId(id) || key?.length !== 32 || trips.has(id)) throw new Error('旅行密钥无效');
-    const trip = { id, secret, key, events: new Map(), hashes: Object.create(null) };
-    for (const event of legacyEvents(trip, byId.get(id))) {
-      if (!validId(event.id) || event.tripId !== id || !isObject(event.data) || trip.events.has(event.id))
+export function indexTrip(trip, events) {
+  const indexed = { ...trip, events: new Map(), hashes: Object.create(null) };
+  if (!Array.isArray(events) || events.length > maxEvents) throw new Error('同步记录数量无效');
+  for (const event of events) {
+      if (!validId(event.id) || event.tripId !== trip.id || !isObject(event.data) || indexed.events.has(event.id))
         throw new Error('同步记录格式无效');
       for (const field of ['currency', 'fromCurrency', 'toCurrency']) {
         if (typeof event.data[field] === 'string' && event.data[field].toUpperCase() === 'RMB') event.data[field] = 'CNY';
       }
-      trip.events.set(event.id, event);
-      trip.hashes[event.id] = hash(event);
-    }
-    trip.root = hash(trip.hashes);
-    trips.set(id, trip);
+      indexed.events.set(event.id, event);
+      indexed.hashes[event.id] = hash(event);
   }
-  return { deviceId, bundles, trips };
+  indexed.root = hash(indexed.hashes);
+  return indexed;
 }
 
 export class PeerProtocol {
@@ -147,9 +133,8 @@ export class PeerProtocol {
     this.manifestFailed = false;
   }
 
-  async exchange(modern) {
+  async exchange() {
     this.session = randomUUID();
-    if (!modern) return this.exchangeLegacy();
     await this.wire.write(this.hello());
     this.readHello(await this.wire.read());
     await this.wire.write(this.index());
@@ -164,7 +149,6 @@ export class PeerProtocol {
   async accept(first) {
     this.session = first.session;
     if (!validId(this.session)) throw new Error('同步会话无效');
-    if (first.version === 1) return this.acceptLegacy(first);
     this.readHello(first);
     await this.wire.write(this.hello(true));
     this.readIndex(await this.wire.read());
@@ -210,6 +194,7 @@ export class PeerProtocol {
     this.remoteId = frame.deviceId;
     this.checkFrame(frame, 'hello');
     if (!validId(this.remoteId) || this.deviceId === this.remoteId ||
+        (this.snapshot.remoteId && this.snapshot.remoteId !== this.remoteId) ||
         !Array.isArray(frame.bundles) || frame.bundles.length > maxTrips) throw new Error('同伴设备身份无效');
     for (const bundle of frame.bundles) {
       const trip = this.snapshot.trips.get(bundle?.tripId);
@@ -339,52 +324,4 @@ export class PeerProtocol {
     return { complete, modern: true, remoteId: this.remoteId };
   }
 
-  legacyMessage() {
-    return { version: 1, bundles: this.snapshot.bundles, peerProtocol: 2, deviceId: this.deviceId, session: this.session };
-  }
-
-  async mergeLegacy(message) {
-    if (message.version !== 1 || !Array.isArray(message.bundles) || message.bundles.length > maxTrips)
-      throw new Error('同步协议不一致');
-    const received = new Map();
-    let failed = false;
-    for (const bundle of message.bundles) {
-      const trip = this.snapshot.trips.get(bundle?.tripId);
-      if (!trip) continue;
-      try {
-        if (received.has(trip.id)) throw new Error('同步旅行重复');
-        await this.commit(trip, legacyEvents(trip, bundle));
-        received.set(trip.id, this.receipt(trip, this.remoteId, this.deviceId, [hash(bundle)]));
-      } catch { failed = true; }
-    }
-    return { received, failed };
-  }
-
-  expectedLegacy(received) {
-    return this.snapshot.bundles.filter(bundle => received.has(bundle.tripId)).map(bundle =>
-      this.receipt(this.snapshot.trips.get(bundle.tripId), this.deviceId, this.remoteId, [hash(bundle)]));
-  }
-
-  async exchangeLegacy() {
-    await this.wire.write(this.legacyMessage());
-    const response = await this.wire.read();
-    if (response.peerProtocol !== 2) return { legacy: response };
-    if (response.session !== this.session || !validId(response.deviceId) || response.deviceId === this.deviceId)
-      throw new Error('同步会话不匹配');
-    this.remoteId = response.deviceId;
-    const { received, failed } = await this.mergeLegacy(response);
-    const complete = !failed && this.confirmed(response.receipts, this.expectedLegacy(received));
-    await this.wire.write({ version: 1, kind: 'ack', session: this.session, receipts: [...received.values()] });
-    return this.result(complete);
-  }
-
-  async acceptLegacy(first) {
-    this.remoteId = first.deviceId;
-    const { received, failed } = await this.mergeLegacy(first);
-    await this.wire.write({ ...this.legacyMessage(), receipts: [...received.values()] });
-    const confirmation = await this.wire.read();
-    const complete = !failed && confirmation.version === 1 && confirmation.kind === 'ack' &&
-      confirmation.session === this.session && this.confirmed(confirmation.receipts, this.expectedLegacy(received));
-    return this.result(complete);
-  }
 }

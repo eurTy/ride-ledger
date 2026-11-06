@@ -9,9 +9,12 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { client, state } from './support/web-client.mjs';
+import * as codec from './support/legacy-web-codec.mjs';
 import { fixture, expectedSummary, invalidInvites } from './support/scenario.mjs';
 import { startRelay } from './support/relay.mjs';
+import { DesktopLanSync } from '../desktop/lan-sync.mjs';
+import { DesktopTeams, encodeInvite } from '../desktop/team.mjs';
+import { randomUUID } from 'node:crypto';
 
 const run = promisify(execFile);
 const project = fileURLToPath(new URL('../', import.meta.url));
@@ -30,12 +33,27 @@ const build = await run('powershell.exe', ['-NoProfile', '-File',
 process.stdout.write(build.stdout);
 const relay = await startRelay();
 const { t, events } = fixture();
-const web = client(state([t], events));
-const webBundle = await web.api.encryptedBundle(t);
+const webBundle = codec.encryptedBundle(t, events);
 const receivedFrames = [];
 const servers = [];
+let desktopTeam;
 
 try {
+  const directory = new DesktopTeams(null, () => {});
+  const team = directory.create('桌面与安卓小队', ['电脑', '手机']);
+  const ledger = new Map();
+  const opening = { id: randomUUID(), tripId: team.id, kind: 'opening', at: Date.now(),
+    data: { person: 'm1', currency: 'CNY', amount: 7500 } };
+  ledger.set(opening.id, opening);
+  desktopTeam = new DesktopLanSync({ host: '127.0.0.1', discovery: false, teams: directory,
+    commit(_trip, events) {
+      let added = 0;
+      for (const event of events) if (!ledger.has(event.id)) { ledger.set(event.id, event); added++; }
+      desktopTeam.updateTeam(directory.snapshot(team, [...ledger.values()]));
+      return added;
+    } });
+  await desktopTeam.start();
+  desktopTeam.updateTeam(directory.snapshot(team, [...ledger.values()]));
   await mkdir(output, { recursive: true });
   const tlsDir = await mkdtemp(path.join(output, 'tls-'));
   const p12 = path.join(tlsDir, 'relay.p12'), cer = path.join(tlsDir, 'relay.cer');
@@ -122,19 +140,20 @@ try {
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     return server.address().port;
   };
-  const inviteA = web.api.inviteCode(t);
+  const inviteA = codec.inviteCode(t);
   const valid = JSON.parse(Buffer.from(inviteA, 'base64url').toString('utf8'));
   const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');
   const legacy = { ...valid }; delete legacy.inviterRole;
   const data = {
     trip: t, events, expectedSummary, webBundle, inviteA,
-    inviteB: web.api.inviteCode({ ...t, localPerson: 'b' }),
+    inviteB: codec.inviteCode({ ...t, localPerson: 'b' }),
     legacyInvite: encode(legacy), wrappedInvite: inviteA.match(/.{1,39}/g).join('\r\n'),
     wrongKeyInvite: encode({ ...valid, secret: Buffer.alloc(32, 19).toString('base64url') }),
     invalidInvites: invalidInvites(valid),
     endpoint: 'http://10.0.2.2:' + proxy.address().port,
     enrollmentEndpoint: 'https://10.0.2.2:' + enrollment.address().port,
     enrollmentCertificate: certificate.toString('base64url'),
+    desktopTeamInvite: encodeInvite(team), desktopTeamPort: desktopTeam.port,
     lanPort: await tcp('normal'), lanDropPort: await tcp('drop'), lanCorruptPort: await tcp('corrupt')
   };
   await adbRun('install', '-r', path.join(output, 'ride-ledger-sync-tests.apk'));
@@ -155,38 +174,41 @@ try {
   for (const name of report.passed || []) console.log('ANDROID_PASS ' + name);
   for (const name of report.failed || []) console.log('ANDROID_FAIL ' + name);
   if (result.androidInvite) {
-    const invite = web.api.parseInviteCode(result.androidInvite);
+    const invite = codec.parseInviteCode(result.androidInvite);
     assert.equal(invite.id, t.id); assert.equal(invite.inviterRole, 'b');
     assert.equal(invite.personA, t.personA); assert.equal(invite.personB, t.personB);
   }
   if (result.connectedInvite) {
-    const connected = web.api.parseInviteCode(result.connectedInvite);
+    const connected = codec.parseInviteCode(result.connectedInvite);
     assert.equal(connected.syncUrl, 'https://relay.example.test');
     assert.equal(connected.inviterRole, 'b');
     console.log('INTEROP_PASS Android connection-bearing invitation read by desktop/web client');
   }
   if (result.androidBundle) {
-    const decoded = await web.api.decryptBundle(t, JSON.parse(result.androidBundle));
+    const decoded = codec.decryptBundle(t, JSON.parse(result.androidBundle));
     const sort = values => JSON.parse(JSON.stringify(values)).sort((a, b) => a.id.localeCompare(b.id));
     assert.deepEqual(sort(decoded), sort(events));
     console.log('INTEROP_PASS Android invitation and AES-GCM records read by web client');
   }
   if (result.androidCloudBundle) {
-    const decoded = await web.api.decryptBundle(t, JSON.parse(result.androidCloudBundle));
+    const decoded = codec.decryptBundle(t, JSON.parse(result.androidCloudBundle));
     assert.equal(new Set(decoded.map(event => event.id)).size, events.length + 2);
     for (const event of events) assert.deepEqual(JSON.parse(JSON.stringify(decoded.find(item => item.id === event.id))), event);
     console.log('INTEROP_PASS Native offline entries survive HTTP failures with original timestamps');
   }
   for (const message of receivedFrames) {
     assert.equal(message.version, 1);
-    for (const bundle of message.bundles) assert.ok(Array.isArray(await web.api.decryptBundle(t, bundle)));
+    for (const bundle of message.bundles) assert.ok(Array.isArray(codec.decryptBundle(t, bundle)));
   }
   assert.ok(receivedFrames.length >= 5, 'native TCP scenarios did not run');
+  assert.equal(ledger.size, 2, 'Android team expense did not arrive at the Windows transport');
+  console.log('INTEROP_PASS Windows and Android team enrollment, nearby bidirectional records and deduplication');
   await writeFile(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
   assert.equal(report.failed.length, 0, 'Native sync checks failed; see build/android-sync-tests/report.json');
   console.log('ANDROID_SYNC_OK checks=' + report.passed.length + ' tcp_frames=' + receivedFrames.length);
 } finally {
   await adbRun('uninstall', 'com.rideledger.synctest').catch(() => {});
   for (const server of servers) await new Promise(resolve => server.close(resolve));
+  await desktopTeam?.close();
   await relay.cleanup();
 }

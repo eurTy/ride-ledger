@@ -23,7 +23,7 @@ export async function startRelay() {
   let child;
   const start = async () => {
     child = spawn(process.execPath, [fileURLToPath(new URL('../../sync-server/server.mjs', import.meta.url))], {
-      env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: directory },
+      env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: directory, RIDE_LEDGER_LEGACY_TEST_RELAY: '1' },
       windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
     });
     await new Promise((resolve, reject) => {

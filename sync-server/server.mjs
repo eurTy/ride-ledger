@@ -11,7 +11,8 @@ export async function startSyncServer(options = {}) {
   const webDir = path.resolve(options.webDir || path.join(import.meta.dirname, '../web'));
   const maxBytes = 12_000_000;
   const enrollmentOnly = options.enrollmentOnly || process.env.ENROLLMENT_ONLY === '1';
-  if (!enrollmentOnly) await fs.mkdir(dataDir, { recursive: true });
+  const legacySync = !enrollmentOnly && options.legacySync === true;
+  if (legacySync) await fs.mkdir(dataDir, { recursive: true });
 
   const validId = value => typeof value === 'string' &&
     /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
@@ -39,7 +40,7 @@ export async function startSyncServer(options = {}) {
       { ok: true, service: 'ride-ledger', instanceId: options.instanceId || '' });
     if (req.url === '/team-enrollment') return enrollment(req, res);
     if (enrollmentOnly) return reply(res, 404, { error: 'not found' });
-    if (req.method === 'OPTIONS' && req.url === '/sync') return reply(res, 200, { ok: true });
+    if (legacySync && req.method === 'OPTIONS' && req.url === '/sync') return reply(res, 200, { ok: true });
     const staticFiles = {
       '/': ['index.html', 'text/html; charset=utf-8'],
       '/index.html': ['index.html', 'text/html; charset=utf-8'],
@@ -55,7 +56,7 @@ export async function startSyncServer(options = {}) {
         return res.end(content);
       } catch { return reply(res, 404, { error: 'not found' }); }
     }
-    if (req.method !== 'POST' || req.url !== '/sync') return reply(res, 404, { error: 'not found' });
+    if (!legacySync || req.method !== 'POST' || req.url !== '/sync') return reply(res, 404, { error: 'not found' });
     try {
       let size = 0;
       const parts = [];
@@ -111,6 +112,6 @@ export async function startSyncServer(options = {}) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const relay = await startSyncServer();
+  const relay = await startSyncServer({ legacySync: process.env.RIDE_LEDGER_LEGACY_TEST_RELAY === '1' });
   console.log(`Ride Ledger sync server listening on ${new URL(relay.origin).host}`);
 }

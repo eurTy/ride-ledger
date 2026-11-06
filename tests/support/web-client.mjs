@@ -51,9 +51,7 @@ export function client(initial = {}, { desktopBridge } = {}) {
   });
   vm.runInContext(source, context, { filename: 'web/app.js' });
   const run = expression => vm.runInContext(expression, context);
-  const api = run('({ base64url, encryptedBundle, decryptBundle, tripToken, syncNow, save, ' +
-    'inviteCode, parseInviteCode, addEvent, summary, mergeSyncedBundle, prepareInvite, ' +
-    'getState: () => state, setState: next => state = next })');
+  const api = run('({ addEvent, summary, getState: () => state, setState: next => state = next })');
   const emit = async (name, event = {}, target = 'window') => {
     const registry = target === 'window' ? windowListeners : documentListeners;
     await Promise.all((registry.get(name) || []).map(callback => callback(event)));
@@ -72,18 +70,4 @@ export function expense(tripId) {
 }
 export function state(trips, events = []) {
   return { trips, events, quickPrefs: {}, activeTripId: trips[0]?.id || null, deviceId: randomUUID() };
-}
-export function join(browser, code, ownRole) {
-  browser.run("openDialog('join')");
-  const input = browser.element('join-code');
-  input.value = code;
-  input.listeners.input({ target: input });
-  if (ownRole) {
-    const chooser = browser.element('join-select');
-    chooser.value = ownRole;
-    chooser.listeners.change({ target: chooser });
-  }
-  const form = browser.element('join-form');
-  form.listeners.submit({ preventDefault() {}, currentTarget: form });
-  return browser.api.getState().trips[0];
 }

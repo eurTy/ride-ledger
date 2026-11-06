@@ -1,12 +1,12 @@
 import net from 'node:net';
 import dgram from 'node:dgram';
 import os from 'node:os';
-import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import Bonjour from 'bonjour-service';
-import { maxFrame, PeerProtocol, PeerWire, peerSnapshot, validBundle, validId } from './peer-protocol.mjs';
+import { PeerWire, validBundle, validId } from './peer-protocol.mjs';
+import { Admission, DesktopTeamProtocol, routeId } from './team.mjs';
 
-const discoveryPort = 45871;
+const teamDiscoveryPort = 45872;
 const localInterfaces = () => Object.values(os.networkInterfaces()).flat().filter(address =>
   address && !address.internal && address.family === 'IPv4' && !address.address.startsWith('169.254.'));
 const addressNumber = ip => ip.split('.').reduce((value, octet) => value * 256 + Number(octet), 0);
@@ -28,11 +28,11 @@ function connect(socket, peer) {
 }
 
 export class DesktopLanSync extends EventEmitter {
-  constructor({ discovery = true, host = '0.0.0.0', commit } = {}) {
+  constructor({ discovery = true, host = '0.0.0.0', commit, teams } = {}) {
     super(); this.discovery = discovery; this.host = host; this.commit = commit;
-    this.bundles = []; this.revision = ''; this.incoming = new Map(); this.peers = new Map(); this.busy = new Set();
-    this.server = null; this.bonjour = null; this.browser = null; this.timer = null;
-    this.sockets = new Set(); this.status = '局域网同步准备中';
+    this.peers = new Map(); this.busy = new Set(); this.sockets = new Set();
+    this.teams = teams;
+    this.teamStatus = '等待附近设备连接';
   }
   async start() {
     this.server = net.createServer(socket => this.accept(socket));
@@ -40,38 +40,12 @@ export class DesktopLanSync extends EventEmitter {
       this.server.once('error', reject); this.server.listen(0, this.host, resolve);
     });
     this.port = this.server.address().port;
-    this.status = '同一热点下可自动同步';
     if (this.discovery) {
-      try {
-        this.serviceName = 'RideLedger-desktop-' + this.port;
-        this.bonjour = new Bonjour({}, () => { this.status = '自动发现暂不可用，可用地址直连'; });
-        this.browser = this.bonjour.find({ type: 'rideledger', protocol: 'tcp' }, service => {
-          if (service.name === this.serviceName || String(service.txt?.id) === this.peerState?.deviceId) return;
-          const host = service.addresses?.find(address => net.isIP(address) === 4) || service.referer?.address;
-          if (net.isIPv4(host || '') && service.port > 0)
-            this.remember(service.name, { host, port: service.port, modern: String(service.txt?.p) === '2' });
-        });
-        this.browser.on('down', service => this.peers.delete(service.name));
-      } catch { this.status = '自动发现暂不可用，可用地址直连'; }
+      try { this.bonjour = new Bonjour({}, () => {}); } catch { /* Scoped UDP discovery remains available. */ }
       this.startUdp();
     }
-    this.timer = setInterval(() => {
-      this.beacon();
-      this.tick();
-    }, 10000);
-    this.timer.unref();
-  }
-
-  announce() {
-    const deviceId = this.peerState?.deviceId;
-    if (!this.discovery || !deviceId || this.announcedId === deviceId) return;
-    this.announcedId = deviceId;
-    try {
-      this.advertisement?.stop();
-      this.advertisement = this.bonjour?.publish({ name: this.serviceName, type: 'rideledger', protocol: 'tcp',
-        port: this.port, txt: { p: '2', id: deviceId } });
-    } catch { this.status = '服务发现待重试，可用地址直连'; }
-    this.beacon();
+    this.teamTimer = setInterval(() => { this.beacon(); this.tick(); }, 4000);
+    this.teamTimer.unref();
   }
 
   startUdp() {
@@ -79,101 +53,98 @@ export class DesktopLanSync extends EventEmitter {
     let replyAt = 0, replies = 0;
     udp.on('error', () => {});
     udp.on('message', (packet, remote) => {
-      const deviceId = this.peerState?.deviceId;
-      if (!deviceId || packet.length >= 1024 ||
+      if (!this.teamTrip || packet.length >= 1024 ||
           !/^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(remote.address)) return;
       try {
         const value = JSON.parse(packet.toString('utf8'));
-        if (value.app !== 'ride-ledger-nearby' || value.version !== 2 || !validId(value.deviceId) ||
-            value.deviceId === deviceId || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535) return;
-        this.remember('udp:' + value.deviceId, { host: remote.address, port: value.port, modern: true, expires: Date.now() + 40000 });
+        const scope = this.teamTrip.fingerprint.slice(0, 12);
+        if (value.team !== scope || value.app !== 'ride-ledger-nearby' || value.version !== 2 || !validId(value.deviceId) ||
+            value.deviceId === this.teamRoute || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535) return;
+        this.remember('udp:' + value.deviceId, { host: remote.address, port: value.port, route: value.deviceId,
+          expires: Date.now() + 40000, team: this.teamTrip.fingerprint });
         const now = Date.now();
         if (now - replyAt >= 1000) { replyAt = now; replies = 0; }
-        if (value.request === true && replies++ < 16) this.sendBeacon(remote.address, remote.port, false);
+        if (value.request === true && replies++ < 16) this.sendBeacon(remote.address, false);
       } catch { /* Ignore unrelated datagrams. */ }
     });
-    udp.bind(discoveryPort, () => {
-      try { udp.setBroadcast(true); this.udpReady = true; this.beacon(); } catch { /* NSD and manual IP remain available. */ }
+    udp.bind(teamDiscoveryPort, () => {
+      try { udp.setBroadcast(true); this.udpReady = true; this.beacon(); } catch { /* mDNS remains available. */ }
     });
   }
 
   beacon() {
-    if (!this.udpReady || !this.peerState) return;
+    if (!this.udpReady || !this.teamRoute) return;
     const addresses = new Set(['255.255.255.255']);
     for (const { address, netmask } of localInterfaces().slice(0, 12)) {
       const broadcast = (addressNumber(address) | ~addressNumber(netmask)) >>> 0;
       addresses.add([24, 16, 8, 0].map(shift => (broadcast >>> shift) & 255).join('.'));
     }
-    for (const address of addresses) this.sendBeacon(address, discoveryPort, true);
+    for (const address of addresses) this.sendBeacon(address, true);
   }
 
-  sendBeacon(address, port, request) {
+  sendBeacon(address, request) {
     const packet = Buffer.from(JSON.stringify({ app: 'ride-ledger-nearby', version: 2,
-      deviceId: this.peerState.deviceId, port: this.port, request }));
-    this.udp.send(packet, port, address, () => {});
+      deviceId: this.teamRoute, port: this.port, request, team: this.teamTrip.fingerprint.slice(0, 12) }));
+    this.udp.send(packet, teamDiscoveryPort, address, () => {});
+  }
+
+  updateTeam(trip) {
+    const ready = trip && this.teams.ready(trip);
+    const previous = this.teamTrip;
+    this.teamTrip = trip;
+    this.teamRoute = trip ? routeId(trip, this.teams.device) : '';
+    if (previous?.fingerprint !== trip?.fingerprint) {
+      this.teamStatus = '等待附近设备连接';
+      this.peers.clear();
+      this.teamAdvertisement?.stop(); this.teamBrowser?.stop();
+      if (trip && this.bonjour) this.announceTeam(trip);
+      this.beacon();
+    }
+    if (previous?.root !== trip?.root) this.tick();
+    return trip && { status: this.teamStatus, ready };
+  }
+
+  announceTeam(trip) {
+    const type = 'rl' + trip.fingerprint.slice(0, 12);
+    const name = 'RideLedger-' + this.teamRoute.slice(0, 8);
+    try {
+      this.teamAdvertisement = this.bonjour.publish({ name, type, protocol: 'tcp', port: this.port,
+        txt: { p: '2', id: this.teamRoute } });
+      this.teamBrowser = this.bonjour.find({ type, protocol: 'tcp' }, service => {
+        if (!this.currentTeam(trip)) return;
+        const route = String(service.txt?.id);
+        const host = service.addresses?.find(net.isIPv4) || service.referer?.address;
+        if (validId(route) && route !== this.teamRoute && net.isIPv4(host || '') && service.port > 0)
+          this.remember('team:dns:' + service.name, { host, port: service.port, route, team: trip.fingerprint });
+      });
+      this.teamBrowser.on('down', service => this.peers.delete('team:dns:' + service.name));
+    } catch { /* Scoped UDP discovery remains available. */ }
+  }
+
+  currentTeam(trip) {
+    return this.teamTrip?.fingerprint === trip.fingerprint && this.teamTrip.secret === trip.secret &&
+      this.teamTrip.localPerson === trip.localPerson;
+  }
+
+  teamProtocol(wire, trip) {
+    return new DesktopTeamProtocol(wire, trip, this.teams, this.commit, current => this.currentTeam(current));
+  }
+
+  setTeamStatus(status) {
+    if (this.teamStatus === status) return;
+    this.teamStatus = status;
+    this.emit('incoming');
   }
 
   remember(name, peer) {
     const previous = this.peers.get(name);
     if (previous?.host === peer.host && previous.port === peer.port) {
-      previous.modern ||= peer.modern;
       previous.expires = peer.expires;
       return;
     }
-    if (this.peers.size >= 32 && !previous && name !== 'manual') return;
+    if (this.peers.size >= 32 && !previous) return;
     this.peers.set(name, peer);
     this.tick();
-  }
-
-  snapshot() { return { version: 1, bundles: this.bundles }; }
-  update(snapshot) {
-    if (!snapshot || !Array.isArray(snapshot.bundles) || !snapshot.bundles.every(validBundle) ||
-        Buffer.byteLength(JSON.stringify(snapshot)) > maxFrame) throw new Error('同步快照无效');
-    const revision = snapshot.revision || crypto.createHash('sha256').update(JSON.stringify(snapshot.bundles)).digest('hex');
-    const changed = revision !== this.revision;
-    if (changed) {
-      this.peerState = this.commit ? peerSnapshot(snapshot) : null;
-      this.bundles = snapshot.bundles;
-      this.revision = revision;
-      this.announce();
-    }
-    const queued = [...this.incoming.values()]; this.incoming.clear();
-    if (changed) this.tick();
-    return { bundles: queued, status: this.status, addresses: this.addresses() };
-  }
-  receive(message) {
-    if (message.version !== 1 || !Array.isArray(message.bundles)) throw new Error('同步协议不一致');
-    const known = new Set(this.bundles.map(bundle => bundle.tripId));
-    let count = 0;
-    for (const bundle of message.bundles) {
-      if (!validBundle(bundle) || !known.has(bundle.tripId)) continue;
-      const fingerprint = crypto.createHash('sha256').update(bundle.data).digest('hex');
-      this.incoming.set(bundle.tripId + ':' + fingerprint, bundle); count++;
-      if (this.incoming.size > 64) this.incoming.delete(this.incoming.keys().next().value);
-    }
-    if (count) this.emit('incoming');
-  }
-
-  setStatus(status) {
-    if (this.status === status) return;
-    this.status = status;
-    this.emit('incoming');
-  }
-
-  protocol(wire) {
-    if (!this.peerState) throw new Error('本机账本正在加载');
-    return new PeerProtocol(wire, this.peerState, this.commit, trip =>
-      this.peerState?.trips.get(trip.id)?.secret === trip.secret);
-  }
-
-  completed(result, peer) {
-    if (result.legacy) {
-      this.receive(result.legacy);
-      this.setStatus('同热点已交换记录（旧协议）');
-    } else if (result.complete) {
-      if (peer) peer.modern = true;
-      this.setStatus('同热点已同步 · 同伴已确认保存');
-    } else throw new Error('保存确认待重试');
   }
 
   track(socket) {
@@ -191,26 +162,27 @@ export class DesktopLanSync extends EventEmitter {
     if (!this.track(socket)) return;
     try {
       const wire = new PeerWire(socket);
-      const message = await wire.read();
-      if (message.version === 2 || (this.peerState && message.peerProtocol === 2 &&
-          validId(message.deviceId) && message.deviceId !== this.peerState.deviceId && validId(message.session))) {
-        this.completed(await this.protocol(wire).accept(message));
-      } else {
-        await wire.write(this.snapshot());
-        this.completed({ legacy: message });
-      }
-    } catch { this.setStatus('本机账目已保留 · 等待同伴重连'); }
+      const message = await wire.read(8192);
+      const trip = this.teamTrip;
+      if (!validBundle(message) || !trip || trip.id !== message.tripId) return;
+      const result = await this.teamProtocol(wire, trip).accept(message);
+      if (result.complete && this.currentTeam(trip)) this.setTeamStatus('附近已同步 · 同伴已确认保存');
+    } catch { /* Invalid or interrupted incoming requests are retried by the caller. */ }
     finally { socket.end(); }
   }
   tick() {
-    if (this.closing || !this.bundles.length) return;
+    const trip = this.teamTrip;
+    if (this.closing || !trip) return;
+    const ready = this.teams.ready(trip);
+    const issuer = ready ? '' : routeId(trip, trip.team.issuer);
     const now = Date.now();
     for (const [name, peer] of this.peers) {
       if (peer.expires && peer.expires < now) this.peers.delete(name);
-      else if (!peer.retryAt || peer.retryAt <= now) this.exchange(peer);
+      else if (peer.team === trip.fingerprint && (!peer.retryAt || peer.retryAt <= now) && (ready || peer.route === issuer))
+        this.exchange(peer, trip);
     }
   }
-  async exchange(peer) {
+  async exchange(peer, trip) {
     const key = peer.host + ':' + peer.port;
     if (this.busy.has(key)) return;
     const socket = new net.Socket();
@@ -218,38 +190,21 @@ export class DesktopLanSync extends EventEmitter {
     this.busy.add(key);
     try {
       await connect(socket, peer);
-      const wire = new PeerWire(socket);
-      if (this.peerState) this.completed(await this.protocol(wire).exchange(Boolean(peer.modern)), peer);
-      else {
-        await wire.write(this.snapshot());
-        this.completed({ legacy: await wire.read() });
-      }
+      const result = await this.teamProtocol(new PeerWire(socket), trip).exchange(peer.route);
+      if (!result.complete) throw new Error('保存确认待重试');
+      if (this.currentTeam(trip)) this.setTeamStatus('附近已同步 · 同伴已确认保存');
       peer.failures = 0;
       peer.retryAt = 0;
-    } catch {
+    } catch (error) {
       peer.failures = Math.min((peer.failures || 0) + 1, 5);
       peer.retryAt = Date.now() + Math.min(60000, 5000 * 2 ** (peer.failures - 1));
-      this.setStatus('本机账目已保留 · 等待同伴重连');
+      if (this.currentTeam(trip)) this.setTeamStatus(error instanceof Admission ? error.message : '本机账目已保留 · 等待附近重连');
     }
     finally { socket.end(); this.busy.delete(key); }
   }
-  connectManual(raw) {
-    const match = String(raw).trim().match(/^([^:\s]+):(\d{1,5})$/);
-    if (!match || !net.isIP(match[1]) || Number(match[2]) < 1 || Number(match[2]) > 65535)
-      throw new Error('请输入有效的 IP:端口');
-    const previous = this.peers.get('manual');
-    const port = Number(match[2]);
-    if (previous?.host === match[1] && previous.port === port) previous.retryAt = 0;
-    else this.remember('manual', { host: match[1], port });
-    this.tick();
-  }
-  addresses() {
-    if (this.host !== '0.0.0.0') return [this.host + ':' + this.port];
-    return localInterfaces().map(address => address.address + ':' + this.port);
-  }
   async close() {
     this.closing = true;
-    clearInterval(this.timer); this.browser?.stop(); this.bonjour?.destroy();
+    clearInterval(this.teamTimer); this.teamBrowser?.stop(); this.bonjour?.destroy();
     this.udpReady = false;
     try { this.udp?.close(); } catch { /* It may not have opened. */ }
     for (const socket of this.sockets) socket.destroy();

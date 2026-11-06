@@ -3,18 +3,75 @@ import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { client, trip, expense, state } from './support/web-client.mjs';
 
+test('the browser creates a two-person trip in team mode from the single entry', () => {
+  const browser = client();
+  const form = browser.element('trip-form');
+  form.fields = { name: '骑行', personA: '甲' };
+  form.querySelectorAll = () => [{ value: '乙' }];
+  assert.match(browser.element('main').innerHTML, /新建小队旅行/);
+  form.listeners.submit({ preventDefault() {}, currentTarget: form });
+  assert.deepEqual(browser.stored().trips[0].members, ['甲', '乙']);
+  assert.match(browser.element('main').innerHTML, /全员平摊/);
+});
+
+test('the browser can save a solo trip without a companion', () => {
+  const browser = client();
+  const form = browser.element('trip-form');
+  form.fields = { name: '独行', personA: '甲' };
+  form.listeners.submit({ preventDefault() {}, currentTarget: form });
+  assert.deepEqual(browser.stored().trips[0].members, ['甲']);
+  browser.run("currentView = 'review'; render()");
+  assert.doesNotMatch(browser.element('main').innerHTML, /成员还款/);
+});
+
+test('five-person preview settles shared expenses and member repayments by currency', () => {
+  const team = { id: randomUUID(), name: '小队骑行', members: ['甲', '乙', '丙', '丁', '戊'], localPerson: 'm1' };
+  const browser = client(state([team]));
+  browser.run(`
+    addEvent('opening', { person: 'm1', currency: 'CNY', amount: 200 });
+    addEvent('expense', { payer: 'm5', currency: 'CNY', amount: 101, mode: 'shared',
+      shares: teamShares(activeTrip(), 101, 'm5', 'shared') });
+    addEvent('expense', { payer: 'm3', currency: 'USD', amount: 500, mode: 'personal',
+      shares: teamShares(activeTrip(), 500, 'm3', 'personal') });
+    addEvent('transfer', { from: 'm2', to: 'm5', currency: 'CNY', amount: 20 });
+    currentView = 'review'; render();
+  `);
+  const restored = client(browser.stored());
+  const summary = restored.api.summary(team);
+  assert.deepEqual(browser.stored().events[1].data.shares, { m1: 21, m2: 20, m3: 20, m4: 20, m5: 20 });
+  assert.equal(summary.memberCash.get('m1').get('CNY'), 200n);
+  assert.equal(summary.memberNet.get('m2').get('CNY'), 0n);
+  assert.equal(summary.memberNet.get('m5').get('CNY'), 61n);
+  assert.equal(summary.memberNet.get('m3').get('USD'), 0n);
+  assert.equal(summary.spent.get('USD'), 500n);
+  assert.match(browser.element('main').innerHTML, /甲 应还 戊 0\.21 CNY/);
+  assert.match(browser.element('main').innerHTML, /小队结算/);
+});
+
+test('the current ledger removes legacy trips and their records while preserving teams', () => {
+  const team = { id: randomUUID(), name: '小队骑行', members: ['甲', '乙'], localPerson: 'm1' };
+  const dual = trip();
+  const current = { id: randomUUID(), tripId: team.id, kind: 'opening', at: 1,
+    data: { person: 'm1', currency: 'CNY', amount: 150 } };
+  const browser = client(state([dual, team], [expense(dual.id), current]));
+  assert.deepEqual(browser.stored().trips, [team]);
+  assert.deepEqual(browser.stored().events, [current]);
+  assert.match(browser.element('main').innerHTML, /小队骑行/);
+  assert.doesNotMatch(browser.element('main').innerHTML, /两人平摊/);
+});
+
 test('exchange currencies follow the latest visible record and keep removable local history', () => {
   const browser = client();
-  const t = trip();
+  const t = { ...trip(), members: ['甲', '乙'], localPerson: 'm1' };
   browser.api.setState(state([t]));
   assert.deepEqual(JSON.parse(JSON.stringify(browser.run('exchangeDefaults(activeTrip())'))),
     { fromCurrency: 'CNY', toCurrency: 'USD' });
 
   const first = { id: randomUUID(), tripId: t.id, kind: 'exchange', at: 100,
-    data: { person: 'a', fromCurrency: 'CNY', fromAmount: 1000,
+    data: { person: 'm1', fromCurrency: 'CNY', fromAmount: 1000,
       toCurrency: 'USD', toAmount: 140 } };
   const second = { id: randomUUID(), tripId: t.id, kind: 'exchange', at: 200,
-    data: { person: 'a', fromCurrency: 'USD', fromAmount: 140,
+    data: { person: 'm1', fromCurrency: 'USD', fromAmount: 140,
       toCurrency: 'EUR', toAmount: 130 } };
   browser.api.setState(state([t], [first]));
   const nextPrefs = browser.run(`nextExchangePrefs(activeTrip(), ${JSON.stringify(second.data)})`);
@@ -38,7 +95,7 @@ test('exchange currencies follow the latest visible record and keep removable lo
 
 test('editing exchange currency immediately remembers the previous code without changing defaults', () => {
   const browser = client();
-  const t = trip();
+  const t = { ...trip(), members: ['甲', '乙'], localPerson: 'm1' };
   browser.api.setState(state([t]));
   browser.run("exchangeDraftCurrency = { from: 'CNY', to: 'USD' }");
   browser.run(`rememberExchangeDraftCurrency(${JSON.stringify(t.id)}, 'to', 'EUR')`);
@@ -54,102 +111,9 @@ test('editing exchange currency immediately remembers the previous code without 
     { fromCurrency: 'CNY', toCurrency: 'USD' });
 });
 
-test('a large encrypted ledger can be encoded and decoded', async () => {
-  const browser = client();
-  const t = trip();
-  const events = Array.from({ length: 5000 }, () => expense(t.id));
-  browser.api.setState(state([t], events));
-  const bundle = await browser.api.encryptedBundle(t);
-  const received = await browser.run('decryptBundle')(t, bundle);
-  assert.equal(received.length, 5000);
-  assert.deepEqual(JSON.parse(JSON.stringify(received[0])), events[0]);
-});
-
-test('records from an earlier trip survive a later sync failure and retry', async () => {
-  const browser = client();
-  const a = trip(), b = trip();
-  const entry = expense(a.id);
-  browser.api.setState(state([a], [entry]));
-  const remote = await browser.api.encryptedBundle(a);
-  browser.api.setState(state([a, b]));
-  browser.api.save();
-  browser.context.navigator.onLine = true;
-  let fail = true;
-  browser.context.fetch = async (_url, options) => {
-    const { tripId } = JSON.parse(options.body);
-    if (tripId === b.id && fail) throw new Error('network lost');
-    return { ok: true, json: async () => ({ snapshots: tripId === a.id ? [remote] : [] }) };
-  };
-  await browser.api.syncNow();
-  assert.deepEqual(browser.stored().events, [entry]);
-  assert.equal(browser.element('sync-badge').classList.waiting, true);
-  fail = false;
-  await browser.api.syncNow();
-  assert.equal(browser.stored().events.length, 1);
-});
-
-test('a failed trip does not stop a healthy trip from syncing', async () => {
-  const browser = client();
-  const a = trip(), b = trip();
-  const entry = expense(b.id);
-  browser.api.setState(state([b], [entry]));
-  const remote = await browser.api.encryptedBundle(b);
-  browser.api.setState(state([a, b]));
-  browser.context.navigator.onLine = true;
-  browser.context.fetch = async (_url, options) => {
-    const { tripId } = JSON.parse(options.body);
-    return tripId === a.id ? { ok: false, status: 403 } :
-      { ok: true, json: async () => ({ snapshots: [remote] }) };
-  };
-  await browser.api.syncNow();
-  assert.deepEqual(browser.stored().events, [entry]);
-  assert.equal(browser.element('sync-badge').classList.waiting, true);
-});
-
-test('failed storage write leaves imported records eligible for retry', async () => {
-  const browser = client();
-  const t = trip();
-  const entry = expense(t.id);
-  browser.api.setState(state([t], [entry]));
-  const remote = await browser.api.encryptedBundle(t);
-  browser.api.setState(state([t]));
-  browser.api.save();
-  browser.context.navigator.onLine = true;
-  browser.context.fetch = async () => ({ ok: true, json: async () => ({ snapshots: [remote] }) });
-  const write = browser.context.localStorage.setItem;
-  let fail = true;
-  browser.context.localStorage.setItem = (name, value) => {
-    if (fail) { fail = false; throw new DOMException('quota', 'QuotaExceededError'); }
-    write(name, value);
-  };
-  await browser.api.syncNow();
-  assert.equal(browser.api.getState().events.length, 0);
-  assert.equal(browser.stored().events.length, 0);
-  await browser.api.syncNow();
-  assert.deepEqual(browser.stored().events, [entry]);
-});
-
-test('invite defaults to the other person and allows my second device', () => {
-  const browser = client();
-  const created = trip('a');
-  const code = browser.api.inviteCode(created);
-  browser.run("openDialog('join')");
-  const input = browser.element('join-code');
-  input.value = code;
-  input.listeners.input({ target: input });
-  const chooser = browser.element('join-select');
-  assert.equal(chooser.value, 'b');
-  assert.match(browser.element('join-preview').textContent, /阿杰/);
-  chooser.value = 'a';
-  chooser.listeners.change({ target: chooser });
-  assert.match(browser.element('join-preview').textContent, /以“小明”加入/);
-  const form = browser.element('join-form');
-  form.listeners.submit({ preventDefault() {}, currentTarget: form });
-  assert.equal(browser.api.getState().trips[0].localPerson, 'a');
-});
-
 test('trip delete buttons appear only after entering delete mode and require confirmation', () => {
-  const a = trip(), b = trip();
+  const a = { ...trip(), members: ['甲', '乙'], localPerson: 'm1' };
+  const b = { ...trip(), members: ['甲', '丙'], localPerson: 'm1' };
   const browser = client(state([a, b], [expense(a.id), expense(b.id)]));
   browser.run("currentView = 'trips'; render()");
   const main = browser.element('main');
@@ -175,7 +139,7 @@ test('trip delete buttons appear only after entering delete mode and require con
 test('imported currency text is escaped in settlement HTML', () => {
   const browser = client();
   browser.context.unsafe = new Map([['CNY<svg onload="x">', 500n]]);
-  const html = browser.run("debtText({personA:'甲', personB:'乙'}, unsafe)");
+  const html = browser.run("teamDebtText({members:['甲', '乙']}, new Map([['m1', unsafe], ['m2', new Map([...unsafe].map(([code, amount]) => [code, -amount]))]]))");
   assert.match(html, /&lt;svg/);
   assert.doesNotMatch(html, /<svg/);
 });

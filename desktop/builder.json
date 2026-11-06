@@ -1,13 +1,13 @@
 {
   "appId": "com.rideledger.desktop",
-  "productName": "双人旅行账本",
+  "productName": "旅行账本",
   "asar": true,
   "electronVersion": "45.2.2",
   "electronDist": "node_modules/electron/dist",
   "directories": { "output": "build/desktop-release" },
   "files": [
     "desktop/main.cjs", "desktop/preload.cjs", "desktop/phone-tunnel.mjs",
-    "desktop/lan-sync.mjs", "desktop/peer-protocol.mjs", "desktop/assets/**", "web/**", "sync-server/*.mjs", "package.json"
+    "desktop/lan-sync.mjs", "desktop/peer-protocol.mjs", "desktop/team*.mjs", "desktop/assets/**", "web/**", "sync-server/*.mjs", "package.json"
   ],
   "win": { "target": ["portable"], "signExecutable": false, "icon": "desktop/assets/icon.ico" },
   "nsis": { "packElevateHelper": false },

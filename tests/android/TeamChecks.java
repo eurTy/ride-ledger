@@ -49,6 +49,18 @@ final class TeamChecks {
     };
 
     static void run(Context base, JSONObject fixture, PeerProtocolChecks.Sink sink) {
+        sink.check("team Windows: first enrollment, bidirectional TCP and repeat sync", () -> {
+            try (Device phone = new Device(base)) {
+                phone.trip = phone.store.joinTrip(fixture.getString("desktopTeamInvite"), "m2");
+                int port = fixture.getInt("desktopTeamPort");
+                windowsExchange(phone, port);
+                require(phone.store.teamReady(phone.trip) && phone.count() == 1, "Windows did not register Android and send its opening balance");
+                record(phone, "USD", 271, "android offline expense");
+                windowsExchange(phone, port);
+                windowsExchange(phone, port);
+                require(phone.count() == 2, "reconnect duplicated a Windows or Android record");
+            }
+        });
         sink.check("team HTTPS: saved QR, two concurrent claims for one name, issuer restart and local admission", () -> {
             SSLSocketFactory original = HttpsURLConnection.getDefaultSSLSocketFactory();
             KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
@@ -290,6 +302,16 @@ final class TeamChecks {
             clock.addAndGet(5001);
             require(only(routes.readyForRevision(2, ""), "wifi"), "restored Wi-Fi did not regain priority");
         });
+    }
+
+    private static void windowsExchange(Device phone, int port) throws Exception {
+        try (Socket socket = new Socket("10.0.2.2", port)) {
+            socket.setSoTimeout(10000);
+            TeamProtocol protocol = new TeamProtocol(phone.store, phone.trip, phone.id, QUIET, () -> {});
+            PeerWire wire = new PeerWire(socket.getInputStream(), socket.getOutputStream(), () -> {});
+            require(protocol.exchange(wire, TeamProtocol.routeId(phone.trip.team, phone.trip.team.issuer)).complete,
+                    "Windows did not confirm durable team sync");
+        }
     }
 
     private static boolean accepted(TeamEnrollment enrollment) throws Exception {

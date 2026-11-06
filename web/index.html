@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#144937">
-  <title>双人旅行账本 · 网页试用</title>
+  <title>旅行账本 · 网页试用</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><span class="brand-mark">↗</span><div><strong>双人旅行账本</strong><small>网页试用版</small></div></div>
+    <div class="brand"><span class="brand-mark">↗</span><div><strong>旅行账本</strong><small>网页试用版</small></div></div>
     <span id="sync-badge" class="badge">本机记录</span>
   </header>
   <main id="main" class="main"></main>
@@ -20,9 +20,43 @@
     <button type="button" data-view="review">复盘</button>
     <button type="button" data-view="trips">旅行</button>
   </nav>
-  <dialog id="trip-dialog"><form id="trip-form" class="dialog-form"><div class="dialog-title"><span class="eyebrow">NEW TRIP</span><h2>新建旅行</h2></div><p class="muted">只需一人新建旅行，填好两人的名字；另一人凭邀请码加入，无需再新建同名旅行。</p><label>旅行名称<input name="name" required placeholder="例如：东南亚骑行"></label><div class="two"><label>你的名字<input name="personA" required placeholder="例如：小明"></label><label>同伴名字<input name="personB" required placeholder="例如：阿杰"></label></div><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">创建旅行</button></div></form></dialog>
+  <dialog id="trip-dialog"><form id="trip-form" class="dialog-form">
+    <div class="dialog-title"><span class="eyebrow">NEW TRIP</span><h2 id="trip-dialog-title">新建小队旅行</h2></div>
+    <p class="muted" id="trip-form-hint">一个人也能开始记账。有同伴时，保存前点「＋」添加，最多五人。</p>
+    <label>旅行名称<input name="name" required placeholder="例如：东南亚骑行"></label>
+    <label>我的名字<input name="personA" required maxlength="30" placeholder="输入你的名字"></label>
+    <div id="trip-extra-members" class="trip-extra-members"></div>
+    <div class="trip-member-controls"><button type="button" class="button ghost" id="add-trip-member">＋ 添加同伴</button>
+      <span id="trip-member-count" class="muted" aria-live="polite">1 / 5 人</span></div>
+    <div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">创建旅行</button></div>
+  </form></dialog>
 
-  <dialog id="join-dialog"><form id="join-form" class="dialog-form"><div class="dialog-title"><span class="eyebrow">JOIN TRIP</span><h2>加入旅行</h2></div><p class="muted">粘贴邀请码后确认这台设备由谁使用。和同伴各用一台设备时选同伴的名字；自己的另一台设备选自己的名字。邀请码含旅行密钥，请仅在同行者之间分享。</p><label>旅行邀请码<textarea name="code" rows="5" required placeholder="在这里粘贴邀请码"></textarea></label><label id="join-identity" hidden>这台设备由谁使用<select name="localPerson" required><option value="a"></option><option value="b"></option></select></label><p id="join-preview" class="join-preview" aria-live="polite"></p><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">加入旅行</button></div></form></dialog>
+  <dialog id="join-team-dialog" aria-labelledby="join-team-title">
+    <div class="dialog-form">
+      <div class="dialog-title"><h2 id="join-team-title">加入小队旅行</h2></div>
+      <p>请在安卓应用里打开「旅行 → 加入小队旅行」。可扫码或从相册选二维码，也可输入邀请码。选名并完成首次登记后，后续会自动同步。</p>
+      <div class="dialog-actions"><button type="button" class="button primary cancel">知道了</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="join-method-dialog"><div class="dialog-form">
+    <div class="dialog-title"><h2>加入小队旅行</h2></div>
+    <p class="muted">先选择同伴的二维码图片，再选自己的名字。</p>
+    <button type="button" class="button primary" id="pick-team-image">从图片选二维码</button>
+    <details><summary>输入邀请码（备用）</summary><form id="manual-team-invite">
+      <label>邀请码<textarea id="team-invite-input" rows="4" required placeholder="粘贴同伴的邀请码"></textarea></label>
+      <button class="button">读取邀请</button>
+    </form></details>
+    <div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button></div>
+  </div></dialog>
+
+  <dialog id="team-identity-dialog"><form id="team-identity-form" class="dialog-form">
+    <div class="dialog-title"><h2>确认小队身份</h2></div>
+    <p id="team-join-trip"></p>
+    <label>这台设备由谁使用<select id="team-join-member" required></select></label>
+    <p class="muted">请让建队设备打开这趟旅行。附近可通过 Wi-Fi 或热点登记，异地可用已配置的 HTTPS 中转。</p>
+    <div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">加入小队</button></div>
+  </form></dialog>
 
   <dialog id="delete-trip-dialog"><div class="dialog-form"><div class="dialog-title"><span class="eyebrow">DELETE TRIP</span><h2>删除旅行？</h2></div><p>将从这台设备删除“<strong id="delete-trip-name"></strong>”和它的全部本地记录。此操作无法撤销；同伴设备和同步服务中的副本不会删除，重新加入可能恢复记录。</p><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button type="button" class="button danger" id="confirm-delete-trip">删除旅行</button></div></div></dialog>
 
@@ -30,7 +64,7 @@
 
   <dialog id="topup-dialog"><form id="topup-form" class="dialog-form"><div class="dialog-title"><span class="eyebrow">ADD CASH</span><h2>补充现金</h2></div><label>持有人<select name="person" class="person-select"></select></label><div class="two"><label>金额<input name="amount" required inputmode="decimal" placeholder="500"></label><label>货币代码<input name="currency" required maxlength="3" value="CNY" placeholder="CNY"></label></div><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">保存</button></div></form></dialog>
 
-  <dialog id="transfer-dialog"><form id="transfer-form" class="dialog-form"><div class="dialog-title"><span class="eyebrow">SETTLE UP</span><h2>两人还款</h2></div><label>付款人<select name="from" class="person-select"></select></label><div class="two"><label>还款金额<input name="amount" required inputmode="decimal" placeholder="50"></label><label>货币代码<input name="currency" required maxlength="3" value="CNY" placeholder="CNY"></label></div><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">保存</button></div></form></dialog>
+  <dialog id="transfer-dialog"><form id="transfer-form" class="dialog-form"><div class="dialog-title"><span class="eyebrow">SETTLE UP</span><h2 id="transfer-title">成员还款</h2></div><label>付款人<select name="from" class="person-select"></select></label><label id="transfer-to-field">收款人<select name="to" class="person-select"></select></label><div class="two"><label>还款金额<input name="amount" required inputmode="decimal" placeholder="50"></label><label>货币代码<input name="currency" required maxlength="3" value="CNY" placeholder="CNY"></label></div><div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">保存</button></div></form></dialog>
 
   <dialog id="exchange-dialog"><form id="exchange-form" class="dialog-form">
     <div class="dialog-title"><span class="eyebrow">CURRENCY EXCHANGE</span><h2>记录换汇</h2></div>
@@ -48,20 +82,18 @@
     <div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">保存</button></div>
   </form></dialog>
 
-  <dialog id="invite-dialog"><div class="dialog-form"><div class="dialog-title"><span class="eyebrow">INVITE</span><h2>邀请同伴加入</h2></div><p class="muted">邀请码包含旅行密钥。对方可在安卓应用或网页试用版中加入同一旅行。</p><p id="invite-role-note" class="muted"></p><textarea id="invite-code" rows="5" readonly></textarea><div class="dialog-actions"><button type="button" class="button ghost cancel">关闭</button><button type="button" class="button primary" id="copy-invite">复制邀请码</button></div></div></dialog>
+  <dialog id="invite-dialog"><div class="dialog-form"><div class="dialog-title"><h2>小队邀请二维码</h2></div>
+    <p id="invite-role-note" class="muted"></p><img id="team-invite-image" class="team-invite-image" width="280" height="280" alt="小队邀请二维码">
+    <details><summary>邀请码（备用）</summary><textarea id="invite-code" rows="4" readonly aria-label="邀请码"></textarea>
+      <button type="button" class="button" id="copy-invite">复制邀请码</button></details>
+    <div class="dialog-actions"><button type="button" class="button ghost cancel">关闭</button></div></div></dialog>
   <div id="toast" role="status" aria-live="polite"></div>
   <dialog id="connection-dialog"><form id="connection-form" class="dialog-form">
-    <div class="dialog-title"><h2>当前旅行连接</h2></div>
-    <p class="muted">新版邀请码会自动带入连接信息。需要时可在这里修改；其他旅行不受影响。</p>
-    <label>同步连接地址<input id="connection-url" name="syncUrl" type="url" placeholder="https://…"></label>
-    <button type="button" id="host-on-this-computer" class="button" hidden>使用这台电脑连接手机</button>
+    <div class="dialog-title"><h2>跨 Wi-Fi 登记设置</h2></div>
+    <p class="muted">二维码会带上中转地址。中转只负责首次登记，账目通过附近连接补传。</p>
+    <label>HTTPS 中转地址<input id="connection-url" name="syncUrl" type="url" placeholder="https://…"></label>
+    <button type="button" id="host-on-this-computer" class="button">用这台电脑提供临时登记</button>
     <div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">保存</button></div>
-  </form></dialog>
-  <dialog id="lan-dialog"><form id="lan-form" class="dialog-form">
-    <div class="dialog-title"><h2>同热点地址直连</h2></div>
-    <p class="muted">电脑和手机连接同一热点时，可填入手机“旅行”页显示的地址。</p>
-    <label>同伴地址<input id="lan-address" required placeholder="192.168.43.1:12345" autocomplete="off"></label>
-    <div class="dialog-actions"><button type="button" class="button ghost cancel">取消</button><button class="button primary">连接</button></div>
   </form></dialog>
 </body>
 </html>
