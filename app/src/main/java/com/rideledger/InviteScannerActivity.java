@@ -27,7 +27,6 @@ import java.util.concurrent.Executors;
 @SuppressWarnings("deprecation")
 public final class InviteScannerActivity extends Activity implements SurfaceHolder.Callback {
     static final String EXTRA_INVITE = "com.rideledger.QR_INVITE";
-    private static final int REQUEST_CAMERA = 1;
     private static final String AIM = "将队友手机上的小队二维码放入画面";
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService decoder = Executors.newSingleThreadExecutor();
@@ -68,7 +67,7 @@ public final class InviteScannerActivity extends Activity implements SurfaceHold
         root.addView(back, new LinearLayout.LayoutParams(-1, -2));
         setContentView(root);
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
-            requestPermissions(new String[]{Manifest.permission.CAMERA}, REQUEST_CAMERA);
+            hint.setText("请返回加入页授权相机，或从相册选择二维码。");
     }
 
     @Override protected void onResume() {
@@ -86,13 +85,6 @@ public final class InviteScannerActivity extends Activity implements SurfaceHold
     @Override protected void onDestroy() {
         decoder.shutdownNow();
         super.onDestroy();
-    }
-
-    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] grants) {
-        super.onRequestPermissionsResult(request, permissions, grants);
-        if (request != REQUEST_CAMERA) return;
-        if (grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED) openPreview();
-        else hint.setText("允许相机权限后可以扫码，也可返回粘贴邀请码。");
     }
 
     @Override public void surfaceCreated(SurfaceHolder holder) {

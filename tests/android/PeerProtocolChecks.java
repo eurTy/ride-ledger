@@ -164,6 +164,20 @@ final class PeerProtocolChecks {
             require(policy.ready(true).get(0).channel==PeerRoutePolicy.Channel.WIFI,"Wi-Fi did not recover");
             policy.success(wifi.key);
         });
+        sink.check("routes: enrollment opens Wi-Fi, then hotspot, then Bluetooth", () -> {
+            AtomicLong clock = new AtomicLong(1000);
+            PeerRoutePolicy policy = new PeerRoutePolicy(clock::get);
+            String issuer = UUID.randomUUID().toString();
+            policy.offer(endpoint("bluetooth:issuer", PeerRoutePolicy.Channel.BLUETOOTH, issuer));
+            policy.offer(endpoint("hotspot:issuer", PeerRoutePolicy.Channel.HOTSPOT, issuer));
+            require(policy.readyForEnrollment(1, issuer, 0).isEmpty(), "a lower priority route dialed during Wi-Fi discovery");
+            policy.offer(endpoint("wifi:issuer", PeerRoutePolicy.Channel.WIFI, issuer));
+            require(policy.readyForEnrollment(1, issuer, 0).get(0).channel == PeerRoutePolicy.Channel.WIFI, "Wi-Fi was not first");
+            policy.failure("wifi:issuer");
+            require(policy.readyForEnrollment(1, issuer, 1).get(0).channel == PeerRoutePolicy.Channel.HOTSPOT, "hotspot was not second");
+            policy.failure("hotspot:issuer");
+            require(policy.readyForEnrollment(1, issuer, 2).get(0).channel == PeerRoutePolicy.Channel.BLUETOOTH, "Bluetooth was not third");
+        });
         sink.check("routes: failure backoff survives repeated discovery and a changed hotspot address retries", () -> {
             AtomicLong clock=new AtomicLong(1000); PeerRoutePolicy policy=new PeerRoutePolicy(clock::get);
             String peer=UUID.randomUUID().toString(); PeerRoutePolicy.Endpoint wifi=endpoint("wifi:old",PeerRoutePolicy.Channel.WIFI,peer);
@@ -392,6 +406,6 @@ final class PeerProtocolChecks {
         @Override public File getDatabasePath(String name){return super.getDatabasePath(prefix+name);}
         @Override public SQLiteDatabase openOrCreateDatabase(String name,int mode,SQLiteDatabase.CursorFactory factory){return super.openOrCreateDatabase(prefix+name,mode,factory);}
         @Override public SQLiteDatabase openOrCreateDatabase(String name,int mode,SQLiteDatabase.CursorFactory factory,DatabaseErrorHandler handler){return super.openOrCreateDatabase(prefix+name,mode,factory,handler);}
-        void cleanup(){super.deleteDatabase(prefix+"ride_ledger.db");for(String name:new String[]{"cloud","nearby"})super.getSharedPreferences(prefix+name,0).edit().clear().commit();}
+        void cleanup(){super.deleteDatabase(prefix+"ride_ledger.db");for(String name:new String[]{"cloud","nearby","peer_checkpoints"})super.getSharedPreferences(prefix+name,0).edit().clear().commit();}
     }
 }

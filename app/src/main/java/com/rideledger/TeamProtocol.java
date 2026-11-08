@@ -25,14 +25,21 @@ final class TeamProtocol {
     private final Team.Identity local;
     private final PeerProtocol.Listener listener;
     private final Runnable enrolled;
+    private final int listenerPort;
 
     TeamProtocol(LedgerStore store, LedgerStore.Trip trip, Team.Identity local, PeerProtocol.Listener listener,
                  Runnable enrolled) {
+        this(store, trip, local, listener, enrolled, 0);
+    }
+
+    TeamProtocol(LedgerStore store, LedgerStore.Trip trip, Team.Identity local, PeerProtocol.Listener listener,
+                 Runnable enrolled, int listenerPort) {
         this.store = store;
         this.trip = trip;
         this.local = local;
         this.listener = listener;
         this.enrolled = enrolled;
+        this.listenerPort = listenerPort;
     }
 
     // The discovery hint is scoped to one trip. It is used for routing, never as proof of identity.
@@ -47,6 +54,17 @@ final class TeamProtocol {
 
     static String fromHint(String hint) {
         return UUID.nameUUIDFromBytes(hint.getBytes(StandardCharsets.US_ASCII)).toString();
+    }
+
+    /** The gateway may be any registered peer. Its route is learned before choosing a ledger link. */
+    static String probe(PeerWire wire, LedgerStore.Trip trip) throws Exception {
+        String nonce = UUID.randomUUID().toString();
+        write(wire, trip, new JSONObject().put("kind", "discover").put("nonce", nonce));
+        JSONObject reply = read(wire, trip, "discovered");
+        String route = reply.getString("route");
+        if (!nonce.equals(reply.getString("nonce")) || !PeerIdentity.valid(route))
+            throw new IllegalArgumentException("网关发现应答无效");
+        return route;
     }
 
     PeerProtocol.Result exchange(PeerWire wire, String expectedRoute) throws Exception {
@@ -65,15 +83,27 @@ final class TeamProtocol {
         JSONObject decision = read(wire, session, "admission");
         if (decision.has("reason")) throw new Admission(decision.getString("reason"));
         if (!store.teamReady(trip)) {
-            store.acceptSeat(trip, decision.getJSONObject("grant"), local.deviceId, local.key, trip.localPerson);
+            JSONObject grant = decision.getJSONObject("grant");
+            store.acceptSeat(trip, grant, local.deviceId, local.key, grant.getString("member"));
             enrolled.run();
         }
+        if (store.acceptRoster(trip, decision.optJSONArray("roster"))) enrolled.run();
         store.acceptSeat(trip, remote.grant, remote.device, remote.key, remote.member);
-        return new PeerProtocol(store, local.deviceId, listener, trip, remote.device, session.secret).exchange(wire, true);
+        PeerProtocol.Result result = new PeerProtocol(store, local.deviceId, listener, trip, remote.device, session.secret).exchange(wire, true);
+        result.callbackPort = remote.callbackPort;
+        return result;
     }
 
     PeerProtocol.Result accept(PeerWire wire) throws Exception {
-        JSONObject offer = read(wire, trip, "offer");
+        JSONObject offer = read(wire, trip);
+        if ("discover".equals(offer.optString("kind"))) {
+            String nonce = offer.optString("nonce");
+            if (!PeerIdentity.valid(nonce) || !store.teamReady(trip))
+                throw new IllegalArgumentException("网关发现请求无效");
+            write(wire, trip, new JSONObject().put("kind", "discovered").put("nonce", nonce)
+                    .put("route", routeId(trip.team, local.deviceId)));
+            return null; // A discovery request carries no ledger traffic.
+        }
         Remote remote = inspect(offer, "offer", "");
         if (!store.teamReady(trip)) throw new Admission("正在等待首次登记");
         KeyPair keys = ephemeral();
@@ -90,48 +120,65 @@ final class TeamProtocol {
         try {
             if (grant == null) {
                 if (!trip.team.issuer.equals(local.deviceId)) throw new Admission("首次登记需与建队设备连通");
-                grant = store.enroll(trip, local, remote.device, remote.key, remote.member);
+                grant = store.enroll(trip, local, remote.device, remote.key, remote.member, remote.name);
                 decision.put("grant", grant);
             }
-            store.acceptSeat(trip, grant, remote.device, remote.key, remote.member);
+            store.acceptSeat(trip, grant, remote.device, remote.key, grant.getString("member"));
+            if (store.acceptRoster(trip, offer.optJSONArray("roster"))) enrolled.run();
         } catch (Admission denied) {
             write(wire, session, decision.put("reason", denied.getMessage()));
             throw denied;
         }
+        if (trip.team.openSeats) decision.put("roster", store.teamSeats(trip.id));
         write(wire, session, decision);
-        return new PeerProtocol(store, local.deviceId, listener, trip, remote.device, session.secret).accept(wire);
+        PeerProtocol.Result result = new PeerProtocol(store, local.deviceId, listener, trip, remote.device, session.secret).accept(wire);
+        result.callbackPort = remote.callbackPort;
+        return result;
     }
 
     private JSONObject hello(String kind, KeyPair keys) throws Exception {
-        return new JSONObject().put("kind", kind).put("team", trip.team.fingerprint)
+        JSONObject grant = store.seat(trip.id, local.deviceId);
+        String member = grant == null ? trip.localPerson : grant.getString("member");
+        JSONObject hello = new JSONObject().put("kind", kind).put("team", trip.team.fingerprint)
                 .put("nonce", UUID.randomUUID().toString()).put("device", local.deviceId)
-                .put("key", local.key).put("member", trip.localPerson)
+                .put("key", local.key).put("member", member)
                 .put("ephemeral", Team.encode(keys.getPublic().getEncoded()))
-                .put("grant", store.seat(trip.id, local.deviceId));
+                .put("grant", grant);
+        if (listenerPort > 0) hello.put("callbackPort", listenerPort);
+        if (trip.team.openSeats) {
+            if (grant == null) hello.put("name", trip.joinName);
+            else if ("offer".equals(kind)) hello.put("roster", store.teamSeats(trip.id));
+        }
+        return hello;
     }
 
     private Remote inspect(JSONObject message, String kind, String expectedRoute) throws Exception {
         Remote peer = new Remote(message);
+        boolean pending = trip.team.openSeats && peer.grant == null && peer.member.isEmpty() && "offer".equals(kind);
         if (!kind.equals(message.getString("kind")) || !trip.team.fingerprint.equals(message.getString("team")) ||
                 !PeerIdentity.valid(message.getString("nonce")) || !PeerIdentity.valid(peer.device) ||
-                local.deviceId.equals(peer.device) || trip.indexOf(peer.member) < 0 ||
+                local.deviceId.equals(peer.device) || (!pending && trip.indexOf(peer.member) < 0) ||
                 (!expectedRoute.isEmpty() && !routeId(trip.team, peer.device).equals(expectedRoute)))
             throw new IllegalArgumentException("小队设备资料无效");
         Team.publicKey(peer.key);
         Team.publicKey(peer.ephemeral);
+        if (pending) Team.displayName(peer.name);
         if (peer.grant != null) trip.team.verifyGrant(peer.grant, peer.device, peer.key, peer.member);
         return peer;
     }
 
     private static final class Remote {
-        final String device, key, member, ephemeral;
+        final String device, key, member, ephemeral, name;
         final JSONObject grant;
+        final int callbackPort;
         Remote(JSONObject message) throws Exception {
             device = message.getString("device");
             key = message.getString("key");
             member = message.getString("member");
+            name = message.optString("name");
             ephemeral = message.getString("ephemeral");
             grant = message.optJSONObject("grant");
+            callbackPort = message.optInt("callbackPort");
         }
     }
 
@@ -167,8 +214,14 @@ final class TeamProtocol {
     }
 
     private static JSONObject read(PeerWire wire, LedgerStore.Trip key, String kind) throws Exception {
+        JSONObject payload = read(wire, key);
+        if (!kind.equals(payload.getString("kind"))) throw new IllegalArgumentException("小队协议顺序无效");
+        return payload;
+    }
+
+    private static JSONObject read(PeerWire wire, LedgerStore.Trip key) throws Exception {
         JSONObject payload = SyncCodec.openPeer(key, wire.read(MAX_HANDSHAKE));
-        if (!DOMAIN.equals(payload.getString("domain")) || !kind.equals(payload.getString("kind")))
+        if (!DOMAIN.equals(payload.getString("domain")))
             throw new IllegalArgumentException("小队协议顺序无效");
         return payload;
     }

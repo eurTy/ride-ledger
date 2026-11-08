@@ -20,9 +20,10 @@ final class PeerProtocol {
     }
     static final class Result {
         String remoteId = "";
-        int added, sent;
+        int added, sent, callbackPort;
         boolean complete, authenticated, durable, modern;
         long bytesRead, bytesWritten;
+        LedgerStore.SyncPoint syncPoint;
     }
     private static final int VERSION = 2, MAX_EVENTS = 10000, BATCH_BYTES = 48000;
     private final LedgerStore store;
@@ -70,6 +71,7 @@ final class PeerProtocol {
                 if (teamTrip == null ? trip.team != null : trip.team == null || !trip.id.equals(teamTrip.id) ||
                         !trip.team.fingerprint.equals(teamTrip.team.fingerprint) || !trip.secret.equals(teamTrip.secret)) continue;
                 Snapshot snapshot = new Snapshot(trip);
+                if (teamTrip != null) result.syncPoint = store.syncPoint(trip.id);
                 for (LedgerStore.Event entry : store.events(trip.id)) {
                     JSONObject event = entry.json(), data = event.getJSONObject("data");
                     for (String field : new String[]{"currency", "fromCurrency", "toCurrency"})

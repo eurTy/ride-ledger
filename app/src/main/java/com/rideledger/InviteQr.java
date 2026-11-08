@@ -31,7 +31,7 @@ final class InviteQr {
     private InviteQr() { }
 
     static boolean isTeamCode(String value) {
-        return value != null && value.length() <= 4096 && value.startsWith(Team.INVITE_PREFIX);
+        return value != null && value.length() <= 4096 && !Team.invitePrefix(value).isEmpty();
     }
 
     static Bitmap image(String invite, int size) throws WriterException {

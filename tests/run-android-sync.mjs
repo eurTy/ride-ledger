@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, unlink, rmdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import http from 'node:http';
-import https from 'node:https';
 import net from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -36,6 +35,7 @@ const { t, events } = fixture();
 const webBundle = codec.encryptedBundle(t, events);
 const receivedFrames = [];
 const servers = [];
+const reversedPorts = [];
 let desktopTeam;
 
 try {
@@ -55,43 +55,6 @@ try {
   await desktopTeam.start();
   desktopTeam.updateTeam(directory.snapshot(team, [...ledger.values()]));
   await mkdir(output, { recursive: true });
-  const tlsDir = await mkdtemp(path.join(output, 'tls-'));
-  const p12 = path.join(tlsDir, 'relay.p12'), cer = path.join(tlsDir, 'relay.cer');
-  const passphrase = 'isolated-android-test';
-  const keytool = (...args) => run(path.join(javaHome, 'bin', 'keytool.exe'), args, { windowsHide: true });
-  let pfx, certificate;
-  try {
-    await keytool('-genkeypair', '-alias', 'relay', '-keyalg', 'RSA', '-keysize', '2048', '-dname', 'CN=10.0.2.2',
-      '-ext', 'SAN=IP:10.0.2.2', '-validity', '2', '-storetype', 'PKCS12', '-keystore', p12, '-storepass', passphrase);
-    await keytool('-exportcert', '-alias', 'relay', '-keystore', p12, '-storepass', passphrase, '-file', cer);
-    [pfx, certificate] = await Promise.all([readFile(p12), readFile(cer)]);
-  } finally {
-    await Promise.all([unlink(p12).catch(() => {}), unlink(cer).catch(() => {})]);
-    await rmdir(tlsDir);
-  }
-  let dropFirstAnswer = true;
-  const enrollment = https.createServer({ pfx, passphrase }, async (req, res) => {
-    try {
-      assert.equal(req.url, '/team-enrollment');
-      const parts = [];
-      for await (const part of req) parts.push(part);
-      const input = Buffer.concat(parts);
-      if (dropFirstAnswer && JSON.parse(input).answers?.length) {
-        dropFirstAnswer = false;
-        res.writeHead(503).end('{}');
-        return;
-      }
-      const response = await fetch(relay.origin + req.url, {
-        method: 'POST', body: input,
-        headers: { 'Content-Type': 'application/json', 'X-Trip-Token': req.headers['x-trip-token'] }
-      });
-      res.writeHead(response.status, { 'Content-Type': 'application/json' });
-      res.end(await response.text());
-    } catch { res.writeHead(500).end('{}'); }
-  });
-  servers.push(enrollment);
-  enrollment.listen(0, '127.0.0.1'); await once(enrollment, 'listening');
-
   const proxy = http.createServer(async (req, res) => {
     try {
       const parts = [];
@@ -144,17 +107,25 @@ try {
   const valid = JSON.parse(Buffer.from(inviteA, 'base64url').toString('utf8'));
   const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');
   const legacy = { ...valid }; delete legacy.inviterRole;
+  const testHost = process.env.ANDROID_TEST_ADB_REVERSE === '1' ? '127.0.0.1' : '10.0.2.2';
+  const lanPort = await tcp('normal'), lanDropPort = await tcp('drop'), lanCorruptPort = await tcp('corrupt');
+  const proxyPort = proxy.address().port;
+  if (testHost === '127.0.0.1') {
+    for (const port of [proxyPort, desktopTeam.port, lanPort, lanDropPort, lanCorruptPort]) {
+      const endpoint = 'tcp:' + port;
+      await adbRun('reverse', '--no-rebind', endpoint, endpoint);
+      reversedPorts.push(endpoint);
+    }
+  }
   const data = {
     trip: t, events, expectedSummary, webBundle, inviteA,
     inviteB: codec.inviteCode({ ...t, localPerson: 'b' }),
     legacyInvite: encode(legacy), wrappedInvite: inviteA.match(/.{1,39}/g).join('\r\n'),
     wrongKeyInvite: encode({ ...valid, secret: Buffer.alloc(32, 19).toString('base64url') }),
     invalidInvites: invalidInvites(valid),
-    endpoint: 'http://10.0.2.2:' + proxy.address().port,
-    enrollmentEndpoint: 'https://10.0.2.2:' + enrollment.address().port,
-    enrollmentCertificate: certificate.toString('base64url'),
+    testHost, endpoint: 'http://' + testHost + ':' + proxyPort,
     desktopTeamInvite: encodeInvite(team), desktopTeamPort: desktopTeam.port,
-    lanPort: await tcp('normal'), lanDropPort: await tcp('drop'), lanCorruptPort: await tcp('corrupt')
+    lanPort, lanDropPort, lanCorruptPort
   };
   await adbRun('install', '-r', path.join(output, 'ride-ledger-sync-tests.apk'));
   const { stdout } = await adbRun('shell', 'am', 'instrument', '-w', '-e', 'fixture', encode(data),
@@ -208,6 +179,7 @@ try {
   console.log('ANDROID_SYNC_OK checks=' + report.passed.length + ' tcp_frames=' + receivedFrames.length);
 } finally {
   await adbRun('uninstall', 'com.rideledger.synctest').catch(() => {});
+  for (const port of reversedPorts) await adbRun('reverse', '--remove', port).catch(() => {});
   for (const server of servers) await new Promise(resolve => server.close(resolve));
   await desktopTeam?.close();
   await relay.cleanup();

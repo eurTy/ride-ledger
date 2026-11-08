@@ -28,6 +28,8 @@ final class LedgerStore extends SQLiteOpenHelper {
     static final class Trip {
         final String id, name, personA, personB, secret, localPerson, syncUrl;
         final Team team;
+        final String joinName;
+        final Map<String, String> seatNames;
 
         Trip(String id, String name, String personA, String personB, String secret, String localPerson) {
             this(id, name, personA, personB, secret, localPerson, "");
@@ -38,6 +40,11 @@ final class LedgerStore extends SQLiteOpenHelper {
         }
 
         Trip(String id, String name, String personA, String personB, String secret, String localPerson, String syncUrl, Team team) {
+            this(id, name, personA, personB, secret, localPerson, syncUrl, team, "", Collections.emptyMap());
+        }
+
+        Trip(String id, String name, String personA, String personB, String secret, String localPerson, String syncUrl,
+             Team team, String joinName, Map<String, String> seatNames) {
             this.id = id;
             this.name = name;
             this.personA = personA;
@@ -46,16 +53,18 @@ final class LedgerStore extends SQLiteOpenHelper {
             this.localPerson = localPerson;
             this.syncUrl = syncUrl;
             this.team = team;
+            this.joinName = joinName;
+            this.seatNames = seatNames;
         }
 
         int people() { return team == null ? 2 : team.size(); }
-        Trip withKey(String key) { return new Trip(id, name, personA, personB, key, localPerson, syncUrl, team); }
+        Trip withKey(String key) { return new Trip(id, name, personA, personB, key, localPerson, syncUrl, team, joinName, seatNames); }
         String member(int index) { return team == null ? (index == 0 ? "a" : "b") : team.member(index); }
         int indexOf(String person) { return team == null ? ("a".equals(person) ? 0 : "b".equals(person) ? 1 : -1) : team.index(person); }
         String nameOf(String person) {
             int index = indexOf(person);
-            if (index < 0) return "未知成员";
-            return team == null ? (index == 0 ? personA : personB) : team.names.get(index);
+            if (index < 0) return "".equals(person) && !joinName.isEmpty() ? joinName : "未知成员";
+            return team == null ? (index == 0 ? personA : personB) : seatNames.getOrDefault(person, team.names.get(index));
         }
     }
 
@@ -94,18 +103,18 @@ final class LedgerStore extends SQLiteOpenHelper {
         final List<Event> visible = new ArrayList<>();
     }
 
-    private static final String TRIP_COLUMNS = "id,name,person_a,person_b,secret,local_person,sync_url,team";
+    private static final String TRIP_COLUMNS = "id,name,person_a,person_b,secret,local_person,sync_url,team,join_name";
     private final Context context;
 
     LedgerStore(Context context) {
-        super(context, "ride_ledger.db", null, 4);
+        super(context, "ride_ledger.db", null, 5);
         this.context = context;
     }
 
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE trips (id TEXT PRIMARY KEY, name TEXT NOT NULL, person_a TEXT NOT NULL, " +
                 "person_b TEXT NOT NULL, secret TEXT NOT NULL, local_person TEXT NOT NULL, created_at INTEGER NOT NULL, " +
-                "sync_url TEXT NOT NULL DEFAULT '', team TEXT NOT NULL DEFAULT '')");
+                "sync_url TEXT NOT NULL DEFAULT '', team TEXT NOT NULL DEFAULT '', join_name TEXT NOT NULL DEFAULT '')");
         db.execSQL("CREATE TABLE events (id TEXT PRIMARY KEY, trip_id TEXT NOT NULL, kind TEXT NOT NULL, " +
                 "at INTEGER NOT NULL, data TEXT NOT NULL)");
         db.execSQL("CREATE INDEX events_trip ON events(trip_id, at, id)");
@@ -122,6 +131,13 @@ final class LedgerStore extends SQLiteOpenHelper {
             db.execSQL("DELETE FROM events WHERE trip_id IN (SELECT id FROM trips WHERE team = '')");
             db.execSQL("DELETE FROM trips WHERE team = ''");
         }
+        if (oldVersion < 5) {
+            boolean present = false;
+            try (Cursor columns = db.rawQuery("PRAGMA table_info(trips)", null)) {
+                while (columns.moveToNext()) present |= "join_name".equals(columns.getString(1));
+            }
+            if (!present) db.execSQL("ALTER TABLE trips ADD COLUMN join_name TEXT NOT NULL DEFAULT ''");
+        }
     }
 
     // Keep consumed seats even if this device removes the trip locally.
@@ -131,15 +147,24 @@ final class LedgerStore extends SQLiteOpenHelper {
     }
 
     synchronized Trip createTeam(String rawName, List<String> members) throws Exception {
+        return createTeam(rawName, members, 0);
+    }
+
+    synchronized Trip createOpenTeam(String rawName, String organizer, int capacity) throws Exception {
+        return createTeam(rawName, Collections.singletonList(organizer), capacity);
+    }
+
+    private Trip createTeam(String rawName, List<String> members, int capacity) throws Exception {
         String name = rawName.trim();
         if (name.isEmpty() || name.length() > 80) throw new IllegalArgumentException("请填写旅行名称（最多 80 字）");
         Team.Identity identity = Team.Identity.load(context);
         String id = UUID.randomUUID().toString();
-        Team team = new Team(id, identity.deviceId, identity.key, members);
+        Team team = capacity == 0 ? new Team(id, identity.deviceId, identity.key, members) :
+                Team.open(id, identity.deviceId, identity.key, members.get(0), capacity);
         byte[] key = new byte[32];
         new SecureRandom().nextBytes(key);
         Trip trip = new Trip(id, name, "", "", Team.encode(key), team.member(0), "", team);
-        JSONObject grant = team.grant(identity, identity.deviceId, identity.key, trip.localPerson, 0);
+        JSONObject grant = team.grant(identity, identity.deviceId, identity.key, trip.localPerson, 0, team.names.get(0));
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
@@ -161,8 +186,9 @@ final class LedgerStore extends SQLiteOpenHelper {
         if (trip.team == null) return true;
         try {
             JSONObject grant = seat(trip.id, PeerIdentity.deviceId(context));
-            return grant != null && trip.localPerson.equals(grant.getString("member")) &&
-                    trip.team.fingerprint.equals(grant.getString("team"));
+            return grant != null && trip.team.fingerprint.equals(grant.getString("team")) &&
+                    (trip.localPerson.equals(grant.getString("member")) || (trip.team.openSeats &&
+                            trip.localPerson.isEmpty() && trip.joinName.equals(grant.getString("name"))));
         } catch (JSONException e) { return false; }
     }
 
@@ -172,13 +198,71 @@ final class LedgerStore extends SQLiteOpenHelper {
         }
     }
 
+    /** Local progress marker only. Peers reconcile by event ID and hash, never by SQLite row ID. */
+    static final class SyncPoint {
+        final long row;
+        final String event;
+        SyncPoint(long row, String event) { this.row = row; this.event = event; }
+    }
+
+    synchronized SyncPoint syncPoint(String tripId) {
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT rowid,id FROM events WHERE trip_id=? ORDER BY rowid DESC LIMIT 1", new String[]{tripId})) {
+            return c.moveToFirst() ? new SyncPoint(c.getLong(0), c.getString(1)) : new SyncPoint(0, "");
+        }
+    }
+
+    synchronized long confirmedRow(String tripId, long row, String event) {
+        if (row == 0 || event == null) return 0;
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT 1 FROM events WHERE rowid=? AND id=? AND trip_id=?",
+                new String[]{Long.toString(row), event, tripId})) {
+            return c.moveToFirst() ? row : 0;
+        }
+    }
+
+    synchronized int countAfter(String tripId, long row) {
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM events WHERE trip_id=? AND rowid>?",
+                new String[]{tripId, Long.toString(row)})) {
+            return c.moveToFirst() ? c.getInt(0) : 0;
+        }
+    }
+
+    synchronized List<String> teammateDevices(Trip trip, String self) {
+        List<String> devices = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT device_id,grant_json FROM team_seats WHERE trip_id=? AND device_id<>?",
+                new String[]{trip.id, self})) {
+            while (c.moveToNext()) {
+                try {
+                    if (trip.team.fingerprint.equals(new JSONObject(c.getString(1)).getString("team")))
+                        devices.add(c.getString(0));
+                } catch (JSONException ignored) { }
+            }
+        }
+        return devices;
+    }
+
+    synchronized JSONArray teamSeats(String tripId) throws JSONException {
+        JSONArray seats = new JSONArray();
+        try (Cursor rows = getReadableDatabase().rawQuery("SELECT grant_json FROM team_seats WHERE trip_id=? ORDER BY seat",
+                new String[]{tripId})) {
+            while (rows.moveToNext()) seats.put(new JSONObject(rows.getString(0)));
+        }
+        return seats;
+    }
+
     synchronized JSONObject enroll(Trip trip, Team.Identity issuer, String device, String key, String member) throws Exception {
+        return enroll(trip, issuer, device, key, member, "");
+    }
+
+    synchronized JSONObject enroll(Trip trip, Team.Identity issuer, String device, String key, String member, String requestedName) throws Exception {
         if (!trip.team.issuer.equals(issuer.deviceId) || !trip.team.issuerKey.equals(issuer.key))
             throw new IllegalStateException("首次登记需与建队设备连通");
         Trip current = getTrip(trip.id);
         if (current == null || current.team == null || !trip.team.fingerprint.equals(current.team.fingerprint))
             throw new IllegalStateException("小队已从本机移除");
         JSONObject existing = seat(trip.id, device);
+        if (trip.team.openSeats) return enrollOpen(trip, issuer, device, key, requestedName, existing);
         if (existing != null) {
             trip.team.verifyGrant(existing, device, key, member);
             return existing;
@@ -194,12 +278,40 @@ final class LedgerStore extends SQLiteOpenHelper {
         return grant;
     }
 
+    private JSONObject enrollOpen(Trip trip, Team.Identity issuer, String device, String key,
+                                  String requestedName, JSONObject existing) throws Exception {
+        String name = Team.displayName(requestedName);
+        if (existing != null) {
+            trip.team.verifyGrant(existing, device, key, existing.getString("member"));
+            if (!name.equals(existing.getString("name"))) throw new TeamProtocol.Admission("本机已登记为「" + existing.getString("name") + "」");
+            return existing;
+        }
+        boolean[] occupied = new boolean[trip.people()];
+        JSONArray seats = teamSeats(trip.id);
+        for (int i = 0; i < seats.length(); i++) {
+            JSONObject seat = seats.getJSONObject(i);
+            if (name.equalsIgnoreCase(seat.getString("name"))) throw new TeamProtocol.Admission("这个名字已登记在另一台设备");
+            occupied[seat.getInt("seat")] = true;
+        }
+        for (int slot = 1; slot < occupied.length; slot++) {
+            if (occupied[slot]) continue;
+            JSONObject grant = trip.team.grant(issuer, device, key, trip.member(slot), slot, name);
+            saveSeat(getWritableDatabase(), trip, grant);
+            return grant;
+        }
+        throw new TeamProtocol.Admission("小队设备名额已满");
+    }
+
     synchronized void acceptSeat(Trip trip, JSONObject grant, String device, String key, String member) throws Exception {
         Trip current = getTrip(trip.id);
         if (current == null || current.team == null || !trip.team.fingerprint.equals(current.team.fingerprint))
             throw new IllegalStateException("小队已从本机移除");
         trip.team.verifyGrant(grant, device, key, member);
-        if (device.equals(PeerIdentity.deviceId(context)) && !current.localPerson.equals(member))
+        boolean local = device.equals(PeerIdentity.deviceId(context));
+        boolean assigning = local && current.team.openSeats && current.localPerson.isEmpty();
+        if (assigning && !current.joinName.equals(grant.getString("name")))
+            throw new TeamProtocol.Admission("登记名称与本机输入不一致");
+        if (local && !assigning && !current.localPerson.equals(member))
             throw new IllegalArgumentException("本机登记姓名已更改");
         JSONObject existing = seat(trip.id, device);
         if (existing != null) {
@@ -207,7 +319,34 @@ final class LedgerStore extends SQLiteOpenHelper {
             if (existing.getInt("seat") != grant.getInt("seat")) throw new IllegalArgumentException("设备席位冲突");
             return;
         }
-        saveSeat(getWritableDatabase(), trip, grant);
+        SQLiteDatabase db = getWritableDatabase();
+        if (!assigning) {
+            saveSeat(db, trip, grant);
+            return;
+        }
+        db.beginTransaction();
+        try {
+            saveSeat(db, trip, grant);
+            ContentValues values = new ContentValues();
+            values.put("local_person", member);
+            db.update("trips", values, "id=?", new String[]{trip.id});
+            db.setTransactionSuccessful();
+        } finally { db.endTransaction(); }
+    }
+
+    synchronized boolean acceptRoster(Trip trip, JSONArray roster) throws Exception {
+        if (!trip.team.openSeats || roster == null) return false;
+        if (roster.length() > trip.people()) throw new IllegalArgumentException("小队人数超出预期");
+        boolean changed = false;
+        for (int i = 0; i < roster.length(); i++) {
+            JSONObject grant = roster.getJSONObject(i);
+            String device = grant.getString("device");
+            if (device.equals(PeerIdentity.deviceId(context))) continue;
+            boolean known = seat(trip.id, device) != null;
+            acceptSeat(trip, grant, device, grant.getString("key"), grant.getString("member"));
+            changed |= !known;
+        }
+        return changed;
     }
 
     private void saveSeat(SQLiteDatabase db, Trip trip, JSONObject grant) throws JSONException {
@@ -232,6 +371,7 @@ final class LedgerStore extends SQLiteOpenHelper {
 
     synchronized Trip joinTrip(String invite, String localPerson) throws JSONException {
         Trip candidate = previewInvite(invite);
+        if (candidate.team != null && candidate.team.openSeats) return joinOpenTeam(candidate, localPerson);
         if (candidate.indexOf(localPerson) < 0)
             throw new IllegalArgumentException("请选择这台设备的使用者");
         Trip trip = new Trip(candidate.id, candidate.name, candidate.personA, candidate.personB,
@@ -248,12 +388,6 @@ final class LedgerStore extends SQLiteOpenHelper {
         }
         Trip existing = getTrip(trip.id);
         if (existing != null) {
-            if (existing.team != null && trip.team != null && !teamReady(existing) && !trip.syncUrl.isEmpty() &&
-                    !trip.syncUrl.equals(existing.syncUrl) && trip.secret.equals(existing.secret) &&
-                    trip.team.fingerprint.equals(existing.team.fingerprint) && trip.localPerson.equals(existing.localPerson)) {
-                setTripSyncUrl(trip.id, trip.syncUrl);
-                return getTrip(trip.id);
-            }
             if (candidate.team != null || existing.team != null) throw new IllegalArgumentException("这个小队已在本机");
             if (candidate.syncUrl.isEmpty()) throw new IllegalArgumentException("这个旅行已加入");
             if (!java.util.Arrays.equals(Base64.decode(existing.secret, Base64.URL_SAFE | Base64.NO_WRAP),
@@ -266,19 +400,50 @@ final class LedgerStore extends SQLiteOpenHelper {
         return trip;
     }
 
+    private Trip joinOpenTeam(Trip candidate, String requestedName) throws JSONException {
+        String name = Team.displayName(requestedName);
+        String device = PeerIdentity.deviceId(context);
+        if (candidate.team.issuer.equals(device)) throw new IllegalArgumentException("本机是这趟旅行的组织者");
+        if (name.equalsIgnoreCase(candidate.team.names.get(0))) throw new IllegalArgumentException("请使用与组织者不同的名字");
+        Trip existing = getTrip(candidate.id);
+        if (existing != null) {
+            if (existing.team == null || !existing.team.fingerprint.equals(candidate.team.fingerprint) ||
+                    !existing.secret.equals(candidate.secret)) throw new IllegalArgumentException("邀请与已有小队不一致");
+            if (teamReady(existing)) {
+                if (!existing.joinName.equals(name)) throw new IllegalArgumentException("本机已登记为「" + existing.joinName + "」");
+                return existing;
+            }
+            ContentValues values = new ContentValues();
+            values.put("join_name", name);
+            getWritableDatabase().update("trips", values, "id=?", new String[]{candidate.id});
+            return getTrip(candidate.id);
+        }
+        JSONObject previous = seat(candidate.id, device);
+        String member = "";
+        if (previous != null) {
+            if (!candidate.team.fingerprint.equals(previous.getString("team")) || !name.equals(previous.getString("name")))
+                throw new IllegalArgumentException("本机已有这个小队的登记凭证，请使用原姓名");
+            member = previous.getString("member");
+        }
+        saveTrip(new Trip(candidate.id, candidate.name, "", "", candidate.secret, member, "",
+                candidate.team, name, Collections.emptyMap()));
+        return getTrip(candidate.id);
+    }
+
     synchronized Trip previewInvite(String invite) throws JSONException {
         String clean = invite.trim();
-        if (clean.startsWith(Team.INVITE_PREFIX)) {
+        String prefix = Team.invitePrefix(clean);
+        if (!prefix.isEmpty()) {
             if (android.os.Build.VERSION.SDK_INT < 29) throw new IllegalArgumentException("多人小队需要 Android 10 或更高版本");
             if (clean.length() > 4096) throw new IllegalArgumentException("小队邀请码过长");
-            JSONObject value = new JSONObject(new String(Team.decode(clean.substring(Team.INVITE_PREFIX.length())), StandardCharsets.UTF_8));
+            JSONObject value = new JSONObject(new String(Team.decode(clean.substring(prefix.length())), StandardCharsets.UTF_8));
             Team team = Team.parse(value.getJSONObject("team"));
+            if (team.openSeats != prefix.equals(Team.OPEN_INVITE_PREFIX)) throw new IllegalArgumentException("小队邀请码版本无效");
             if (team.size() < 2) throw new IllegalArgumentException("单人旅行无需邀请码");
             String name = value.getString("name").trim(), secret = value.getString("secret");
             if (name.isEmpty() || name.length() > 80 || Team.decode(secret).length != 32)
                 throw new IllegalArgumentException("小队邀请码无效");
-            String syncUrl = teamEndpoint(value.has("syncUrl") ? value.getString("syncUrl") : "");
-            return new Trip(team.tripId, name, "", "", secret, team.member(1), syncUrl, team);
+            return new Trip(team.tripId, name, "", "", secret, team.member(1), "", team);
         }
         byte[] bytes = Base64.decode(clean, Base64.URL_SAFE | Base64.NO_WRAP);
         JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
@@ -306,22 +471,17 @@ final class LedgerStore extends SQLiteOpenHelper {
     }
 
     synchronized String inviteCode(Trip trip) throws JSONException {
-        return inviteCode(trip, trip.syncUrl);
-    }
-
-    synchronized String inviteCode(Trip trip, String syncUrl) throws JSONException {
         if (trip.team != null) {
             if (trip.people() < 2) throw new IllegalArgumentException("单人旅行无需邀请码");
             JSONObject value = new JSONObject().put("team", trip.team.json()).put("name", trip.name).put("secret", trip.secret);
-            String endpoint = teamEndpoint(syncUrl);
-            if (!endpoint.isEmpty()) value.put("syncUrl", endpoint);
-            return Team.INVITE_PREFIX + Team.encode(value.toString().getBytes(StandardCharsets.UTF_8));
+            String prefix = trip.team.openSeats ? Team.OPEN_INVITE_PREFIX : Team.INVITE_PREFIX;
+            return prefix + Team.encode(value.toString().getBytes(StandardCharsets.UTF_8));
         }
         JSONObject json = new JSONObject().put("id", trip.id).put("name", trip.name)
                 .put("personA", trip.personA).put("personB", trip.personB)
                 .put("secret", trip.secret).put("inviterRole", trip.localPerson);
-        if (syncUrl != null && syncUrl.startsWith("https://"))
-            json.put("syncUrl", SyncEndpoint.normalize(syncUrl, false));
+        if (trip.syncUrl != null && trip.syncUrl.startsWith("https://"))
+            json.put("syncUrl", SyncEndpoint.normalize(trip.syncUrl, false));
         return Base64.encodeToString(json.toString().getBytes(StandardCharsets.UTF_8),
                 Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
     }
@@ -334,6 +494,7 @@ final class LedgerStore extends SQLiteOpenHelper {
         values.put("person_b", trip.personB);
         values.put("secret", trip.secret);
         values.put("local_person", trip.localPerson);
+        values.put("join_name", trip.joinName);
         values.put("sync_url", trip.syncUrl);
         values.put("created_at", System.currentTimeMillis());
         try { if (trip.team != null) values.put("team", trip.team.json().toString()); }
@@ -371,24 +532,29 @@ final class LedgerStore extends SQLiteOpenHelper {
     synchronized void setTripSyncUrl(String id, String raw) {
         Trip trip = getTrip(id);
         if (trip == null) throw new IllegalArgumentException("旅行不存在");
-        String syncUrl = trip.team == null ? SyncEndpoint.normalize(raw, true) : teamEndpoint(raw);
+        if (trip.team != null) throw new IllegalArgumentException("小队旅行通过附近连接同步");
+        String syncUrl = SyncEndpoint.normalize(raw, true);
         ContentValues values = new ContentValues();
         values.put("sync_url", syncUrl);
         if (getWritableDatabase().update("trips", values, "id=?", new String[]{id}) == 0)
             throw new IllegalArgumentException("旅行不存在");
     }
 
-    private static String teamEndpoint(String raw) {
-        String endpoint = SyncEndpoint.normalize(raw, false);
-        if (endpoint.length() > 250) throw new IllegalArgumentException("HTTPS 中转地址过长");
-        return endpoint;
-    }
-
     private Trip readTrip(Cursor c) {
         try {
             Team team = c.getString(7).isEmpty() ? null : Team.parse(new JSONObject(c.getString(7)));
-            return new Trip(c.getString(0), c.getString(1), c.getString(2), c.getString(3),
-                    c.getString(4), c.getString(5), c.getString(6), team);
+            Map<String, String> names = new HashMap<>();
+            if (team != null) {
+                JSONArray seats = teamSeats(team.tripId);
+                for (int i = 0; i < seats.length(); i++) {
+                    JSONObject seat = seats.getJSONObject(i);
+                    String member = seat.getString("member");
+                    int index = team.index(member);
+                    if (index >= 0) names.put(member, team.openSeats ? seat.getString("name") : team.names.get(index));
+                }
+            }
+            return new Trip(c.getString(0), c.getString(1), c.getString(2), c.getString(3), c.getString(4), c.getString(5),
+                    team == null ? c.getString(6) : "", team, c.getString(8), names);
         } catch (JSONException e) { throw new IllegalStateException("本机小队资料损坏", e); }
     }
 

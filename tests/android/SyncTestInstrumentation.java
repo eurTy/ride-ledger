@@ -300,21 +300,21 @@ public final class SyncTestInstrumentation extends Instrumentation {
 
         check("fragmented LAN TCP frames and duplicate replay", () -> {
             LedgerStore local = store(context()); local.joinTrip(invite, "a");
-            SyncResult sync = lan(local, fixture.getInt("lanPort"));
+            SyncResult sync = lan(local, fixture, "lanPort");
             require(!sync.failed && local.events(tripId).size() == expectedCount, "fragmented frame did not merge");
-            require(lan(local, fixture.getInt("lanPort")).added == 0, "TCP replay duplicated records");
+            require(lan(local, fixture, "lanPort").added == 0, "TCP replay duplicated records");
             verifySummary(local.summary(tripId), fixture.getJSONObject("expectedSummary"));
         });
         check("truncated LAN frame retains local data and retries", () -> {
             LedgerStore local = store(context()); local.joinTrip(invite, "a"); local.merge(tripId, left);
-            require(lan(local, fixture.getInt("lanDropPort")).failed, "truncated frame reported success");
+            require(lan(local, fixture, "lanDropPort").failed, "truncated frame reported success");
             require(local.events(tripId).size() == left.length(), "partial frame changed records");
-            lan(local, fixture.getInt("lanPort"));
+            lan(local, fixture, "lanPort");
             require(local.events(tripId).size() == expectedCount, "TCP retry did not converge");
         });
         check("corrupt LAN bundle does not block healthy records or hide partial progress", () -> {
             LedgerStore local = store(context()); local.joinTrip(invite, "a");
-            SyncResult sync = lan(local, fixture.getInt("lanCorruptPort"));
+            SyncResult sync = lan(local, fixture, "lanCorruptPort");
             require(sync.failed && local.events(tripId).size() == expectedCount && sync.added == expectedCount,
                     "corrupt LAN bundle blocked healthy records or partial progress");
         });
@@ -338,6 +338,8 @@ public final class SyncTestInstrumentation extends Instrumentation {
             });
             TeamChecks.run(getTargetContext(), fixture, (name, action) -> check(name, action::run));
             check("two-person team UI: quick entry, review and sync use the same team flow", () -> PeerUiChecks.runTeam(this));
+            check("open team UI: organizer roster and validation are inline", () -> PeerUiChecks.runTeamSetup(this));
+            check("open team UI: join details, connecting and delayed success are inline", () -> PeerUiChecks.runTeamJoin(this));
         }
     }
 
@@ -370,7 +372,7 @@ public final class SyncTestInstrumentation extends Instrumentation {
             return new SyncResult(status.get().startsWith("云同步待重试"), added.get());
         } finally { sync.close(); }
     }
-    private SyncResult lan(LedgerStore store, int port) throws Exception {
+    private SyncResult lan(LedgerStore store, JSONObject fixture, String portKey) throws Exception {
         CountDownLatch completed = new CountDownLatch(1);
         AtomicReference<String> status = new AtomicReference<>("");
         AtomicInteger added = new AtomicInteger();
@@ -380,7 +382,8 @@ public final class SyncTestInstrumentation extends Instrumentation {
         // Exercise real framing and merge code without broadcasting test trips over the user's Wi-Fi.
         Field running = LanSync.class.getDeclaredField("running"); running.setAccessible(true); running.set(sync, true);
         Method exchange = LanSync.class.getDeclaredMethod("exchange", InetSocketAddress.class);
-        exchange.setAccessible(true); exchange.invoke(sync, new InetSocketAddress("10.0.2.2", port));
+        exchange.setAccessible(true);
+        exchange.invoke(sync, new InetSocketAddress(fixture.optString("testHost", "10.0.2.2"), fixture.getInt(portKey)));
         require(completed.await(15, TimeUnit.SECONDS), "native TCP request did not finish");
         running.set(sync, false);
         return new SyncResult(!status.get().startsWith("局域网同步完成"), added.get());

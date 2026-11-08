@@ -1,9 +1,7 @@
 package com.rideledger;
 
 import android.content.Context;
-import android.net.DhcpInfo;
 import android.net.Network;
-import android.net.wifi.WifiManager;
 import org.json.JSONObject;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -17,6 +15,7 @@ import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 /** Small discovery beacons for hotspots whose mDNS service does not expose the tethering interface.
@@ -34,6 +33,7 @@ final class HotspotDiscovery {
     private final String scope;
     private volatile DatagramSocket socket;
     private ScheduledExecutorService timer;
+    private ScheduledFuture<?> announcement;
 
     HotspotDiscovery(Context context, String deviceId, int tcpPort, Listener listener) {
         this(context, deviceId, tcpPort, DISCOVERY_PORT, false, listener);
@@ -55,7 +55,14 @@ final class HotspotDiscovery {
             Thread receiver = new Thread(() -> receive(current), "RideLedger-hotspot-discovery");
             receiver.setDaemon(true); receiver.start();
             timer = Executors.newSingleThreadScheduledExecutor();
-            if (!allowLoopback) timer.scheduleWithFixedDelay(this::beacon, 0, scope.isEmpty() ? 12 : 4, TimeUnit.SECONDS);
+            if (!allowLoopback) {
+                if (scope.isEmpty()) timer.scheduleWithFixedDelay(this::beacon, 0, 12, TimeUnit.SECONDS);
+                else {
+                    timer.execute(this::beacon);
+                    // A second startup probe covers peers whose sockets are still binding.
+                    announcement = timer.schedule(this::beacon, 1500, TimeUnit.MILLISECONDS);
+                }
+            }
         } catch (Exception ignored) {
             if (listening != null) listening.close(); socket = null;
         }
@@ -83,13 +90,16 @@ final class HotspotDiscovery {
             } catch (Exception ignored) { if (listening.isClosed()) return; }
         }
     }
-    void networkChanged() {
+    synchronized void networkChanged() {
         ScheduledExecutorService worker = timer;
-        if (worker != null && !worker.isShutdown()) try { worker.execute(this::beacon); } catch (Exception ignored) {}
+        if (worker == null || worker.isShutdown() || announcement != null && !announcement.isDone()) return;
+        announcement = worker.schedule(this::beacon, 400, TimeUnit.MILLISECONDS);
     }
     private void beacon() {
         if (socket == null) return;
         Set<InetAddress> targets = new LinkedHashSet<>();
+        // Probe the current Wi-Fi gateway directly. The reply supplies the team's TCP listener.
+        if (context != null) targets.addAll(LanSync.wifiGateways(context));
         try { targets.add(InetAddress.getByName("255.255.255.255")); } catch (Exception ignored) {}
         try {
             Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
@@ -99,12 +109,6 @@ final class HotspotDiscovery {
                 for (java.net.InterfaceAddress address : network.getInterfaceAddresses())
                     if (address.getBroadcast() instanceof Inet4Address) targets.add(address.getBroadcast());
             }
-        } catch (Exception ignored) {}
-        if (context != null) try {
-            WifiManager wifi = (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-            DhcpInfo info = wifi == null ? null : wifi.getDhcpInfo();
-            if (info != null && info.gateway != 0) targets.add(InetAddress.getByAddress(new byte[]{
-                    (byte) info.gateway, (byte) (info.gateway >> 8), (byte) (info.gateway >> 16), (byte) (info.gateway >> 24)}));
         } catch (Exception ignored) {}
         for (InetAddress target : targets) send(new InetSocketAddress(target, listenPort), true);
     }

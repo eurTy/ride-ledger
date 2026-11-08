@@ -1,6 +1,7 @@
 package com.rideledger;
 
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -12,20 +13,21 @@ import android.os.SystemClock;
 
 import org.json.JSONObject;
 
-import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.security.KeyPairGenerator;
 import java.security.KeyStore;
-import java.security.cert.CertificateFactory;
 import java.security.spec.ECGenParameterSpec;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.time.LocalDate;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -35,10 +37,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 
-import javax.net.ssl.HttpsURLConnection;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLSocketFactory;
-import javax.net.ssl.TrustManagerFactory;
 
 /** Real SQLite and encrypted streams, with a simulated proximity graph for the radio routes. */
 final class TeamChecks {
@@ -49,41 +47,56 @@ final class TeamChecks {
     };
 
     static void run(Context base, JSONObject fixture, PeerProtocolChecks.Sink sink) {
+        sink.check("open team: named seats, duplicate rejection, durable role and propagated roster", () -> {
+            try (Device root = new Device(base); Device first = new Device(base); Device second = new Device(base);
+                 Device extra = new Device(base)) {
+                root.trip = new TeamCreator(root.store).create("北线骑行", "组织者甲", 3);
+                String code = root.store.inviteCode(root.trip);
+                require(code.startsWith(Team.OPEN_INVITE_PREFIX) && InviteQr.isTeamCode(code), "new invite is not a team QR payload");
+                first.trip = new TeamJoiner(first.store).join(code, "星河");
+                second.trip = second.store.joinTrip(code, "星河");
+                require(first.trip.localPerson.isEmpty() && !first.store.teamReady(first.trip), "an unregistered name occupied a seat");
+                require(exchange(first, root).complete(), "first named enrollment failed");
+                require(exchange(second, root).clientError instanceof TeamProtocol.Admission, "duplicate name was admitted");
+                second.trip = second.store.joinTrip(code, "山谷");
+                require(exchange(second, root).complete(), "correcting an unregistered name failed");
+                first.reopen(); second.reopen(); root.reopen();
+                require(first.store.teamReady(first.trip) && first.trip.localPerson.equals("m2") &&
+                        first.trip.nameOf("m2").equals("星河"), "name or seat was lost after reopening");
+                require(exchange(first, second).complete(), "registered phones could not exchange without issuer");
+                first.reopen();
+                require(first.trip.nameOf("m3").equals("山谷"), "authenticated roster did not propagate");
+                extra.trip = extra.store.joinTrip(code, "高原");
+                require(exchange(extra, root).clientError instanceof TeamProtocol.Admission && root.store.teamSeatCount(root.trip.id) == 3,
+                        "more than the expected number enrolled");
+                record(first, "CNY", 130, "after open team");
+                require(exchange(first, root).complete() && root.count() == 1, "new identity broke normal ledger sync");
+            }
+        });
         sink.check("team Windows: first enrollment, bidirectional TCP and repeat sync", () -> {
             try (Device phone = new Device(base)) {
                 phone.trip = phone.store.joinTrip(fixture.getString("desktopTeamInvite"), "m2");
                 int port = fixture.getInt("desktopTeamPort");
-                windowsExchange(phone, port);
+                String host = fixture.optString("testHost", "10.0.2.2");
+                windowsExchange(phone, host, port);
                 require(phone.store.teamReady(phone.trip) && phone.count() == 1, "Windows did not register Android and send its opening balance");
                 record(phone, "USD", 271, "android offline expense");
-                windowsExchange(phone, port);
-                windowsExchange(phone, port);
+                windowsExchange(phone, host, port);
+                windowsExchange(phone, host, port);
                 require(phone.count() == 2, "reconnect duplicated a Windows or Android record");
             }
         });
-        sink.check("team HTTPS: saved QR, two concurrent claims for one name, issuer restart and local admission", () -> {
-            SSLSocketFactory original = HttpsURLConnection.getDefaultSSLSocketFactory();
-            KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
-            trust.load(null);
-            byte[] certificate = Team.decode(fixture.getString("enrollmentCertificate"));
-            trust.setCertificateEntry("fixture", CertificateFactory.getInstance("X.509")
-                    .generateCertificate(new ByteArrayInputStream(certificate)));
-            TrustManagerFactory managers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-            managers.init(trust);
-            SSLContext tls = SSLContext.getInstance("TLS");
-            tls.init(null, managers.getTrustManagers(), null);
-            HttpsURLConnection.setDefaultSSLSocketFactory(tls.getSocketFactory());
-            try (Device root = new Device(base); Device guest = new Device(base); Device other = new Device(base)) {
-                root.trip = root.store.createTeam("跨网登记", MEMBERS.subList(0, 2));
-                other.trip = other.store.joinTrip(root.store.inviteCode(root.trip), "m2");
-                require(other.trip.syncUrl.isEmpty(), "the original offline QR unexpectedly had a relay");
-                String endpoint = fixture.getString("enrollmentEndpoint");
-                root.store.setTripSyncUrl(root.trip.id, endpoint);
-                root.reopen();
-                record(root, "USD", 501, "private ledger record");
+        sink.check("team: saved old QR ignores the relay and joins nearby", () -> {
+            try (Device root = new Device(base); Device guest = new Device(base)) {
+                root.trip = root.store.createOpenTeam("相册加入", "组织者甲", 2);
                 String invite = root.store.inviteCode(root.trip);
+                String prefix = Team.OPEN_INVITE_PREFIX;
+                JSONObject payload = new JSONObject(new String(Team.decode(invite.substring(prefix.length())), StandardCharsets.UTF_8));
+                require(!payload.has("syncUrl"), "a new invite carried a relay address");
+                payload.put("syncUrl", "https://relay.example.invalid");
+                String legacyInvite = prefix + Team.encode(payload.toString().getBytes(StandardCharsets.UTF_8));
                 File file = File.createTempFile("team-qr-", ".png", base.getCacheDir());
-                Bitmap qr = InviteQr.image(invite, 760);
+                Bitmap qr = InviteQr.image(legacyInvite, 760);
                 Bitmap screenshot = Bitmap.createBitmap(1280, 2560, Bitmap.Config.ARGB_8888);
                 try {
                     Canvas canvas = new Canvas(screenshot);
@@ -93,41 +106,18 @@ final class TeamChecks {
                         require(screenshot.compress(Bitmap.CompressFormat.PNG, 100, out), "could not save QR fixture");
                     }
                     String selected = InviteQr.readImage(base.getContentResolver(), Uri.fromFile(file));
-                    require(invite.equals(selected), "saved screenshot did not decode to the original invite");
-                    guest.trip = guest.store.joinTrip(selected, "m2");
-                    other.trip = other.store.joinTrip(selected, "m2");
-                    require(endpoint.equals(guest.trip.syncUrl) && endpoint.equals(other.trip.syncUrl),
-                            "the new QR did not provision or refresh the HTTPS endpoint");
+                    require(legacyInvite.equals(selected), "saved screenshot did not decode to the original invite");
+                    guest.trip = new TeamJoiner(guest.store).join(selected, "队友乙");
+                    require(guest.trip.syncUrl.isEmpty() && !guest.store.teamReady(guest.trip),
+                            "a legacy relay address was persisted or bypassed enrollment");
+                    require(exchange(guest, root).complete() && guest.store.teamReady(guest.trip),
+                            "an old invite did not enroll over a nearby connection");
                 } finally {
                     screenshot.recycle();
                     qr.recycle();
                     file.delete();
                 }
-                TeamEnrollment first = new TeamEnrollment(guest.store, guest.trip, guest.id);
-                TeamEnrollment second = new TeamEnrollment(other.store, other.trip, other.id);
-                ExecutorService callers = Executors.newFixedThreadPool(2);
-                try {
-                    Future<String> a = callers.submit(first::step), b = callers.submit(second::step);
-                    require(a.get(10, TimeUnit.SECONDS).contains("等待") && b.get(10, TimeUnit.SECONDS).contains("等待"),
-                            "the relay enrolled a device without the creator");
-                } finally { callers.shutdownNow(); }
-                try {
-                    new TeamEnrollment(root.store, root.trip, root.id).step();
-                    throw new AssertionError("simulated HTTPS reply loss did not happen");
-                } catch (IllegalStateException expected) {
-                    require(root.store.teamSeatCount(root.trip.id) == 2, "two claims occupied the only open seat");
-                }
-                root.reopen();
-                new TeamEnrollment(root.store, root.trip, root.id).step();
-                boolean a = accepted(first), b = accepted(second);
-                require(a != b, "exactly one phone must win the selected name");
-                Device winner = a ? guest : other, loser = a ? other : guest;
-                require(winner.count() == 0 && loser.count() == 0, "the admission relay forwarded a ledger record");
-                require(exchange(winner, root).complete() && winner.count() == 1,
-                        "the HTTPS grant did not work for local sync");
-                require(exchange(loser, root).clientError instanceof TeamProtocol.Admission &&
-                        root.store.teamSeatCount(root.trip.id) == 2, "local admission bypassed the HTTPS seat limit");
-            } finally { HttpsURLConnection.setDefaultSSLSocketFactory(original); }
+            }
         });
         sink.check("team: offline QR decodes the invite and enrolls the selected member", () -> {
             try (Device root = new Device(base); Device guest = new Device(base)) {
@@ -226,13 +216,13 @@ final class TeamChecks {
                 onMain(() -> {
                     b.link(c, PeerRoutePolicy.Channel.WIFI, wifi, true);
                     b.link(c, PeerRoutePolicy.Channel.BLUETOOTH, ble, false);
-                    b.link(c, PeerRoutePolicy.Channel.HOTSPOT, unused, false);
+                    b.link(c, PeerRoutePolicy.Channel.HOTSPOT, unused, true);
                     c.link(d, PeerRoutePolicy.Channel.HOTSPOT, new AtomicInteger(), false);
                 });
                 await(() -> b.count() == 2 && c.count() == 2 && d.count() == 2, 19000,
                         () -> "relay did not converge: counts " + b.count() + "/" + c.count() + "/" + d.count() +
                                 ", dials " + wifi.get() + "/" + ble.get() + "/" + unused.get());
-                require(wifi.get() > 0 && ble.get() > 0 && unused.get() == 0, "hotel link did not prefer Wi-Fi then BLE");
+                require(wifi.get() > 0 && ble.get() > 0 && unused.get() > 0, "both LAN routes must fail before BLE");
                 require(a.count() == 0 && e.count() == 0, "disconnected device changed");
                 e.reopen();
                 e.openCoordinator();
@@ -242,7 +232,7 @@ final class TeamChecks {
                     d.link(e, PeerRoutePolicy.Channel.HOTSPOT, hotspot, false);
                 });
                 await(() -> e.count() == 2, 12000, "late device did not receive historical records");
-                require(deadBle.get() > 0 && hotspot.get() > 0, "outdoor fallback did not use hotspot after BLE failed");
+                require(deadBle.get() == 0 && hotspot.get() > 0, "reachable hotspot must take precedence over BLE");
                 a.openCoordinator();
                 onMain(() -> e.link(a, PeerRoutePolicy.Channel.WIFI, new AtomicInteger(), false));
                 await(() -> a.count() == 2, 12000, "returning creator did not catch up as a normal peer");
@@ -289,23 +279,129 @@ final class TeamChecks {
             routes.offer(new PeerRoutePolicy.Endpoint("other", PeerRoutePolicy.Channel.BLUETOOTH, two, true, null));
             List<PeerRoutePolicy.Endpoint> first = routes.readyForRevision(1, "");
             require(first.size() == 2 && first.stream().anyMatch(endpoint -> "wifi".equals(endpoint.key)), "initial preference wrong");
-            routes.failure("wifi");
+            routes.syncFailure(first.stream().filter(endpoint -> "wifi".equals(endpoint.key)).findFirst().get());
             routes.success("other", 1);
-            require(only(routes.readyForRevision(1, one), "ble"), "failed Wi-Fi did not switch to BLE for enrollment");
-            routes.failure("ble");
-            require(only(routes.readyForRevision(1, ""), "hotspot"), "failed BLE did not switch to hotspot");
-            routes.success("hotspot", 1);
-            require(routes.readyForRevision(1, "").isEmpty(), "already committed peers retried immediately");
+            List<PeerRoutePolicy.Endpoint> alternateLan = routes.readyForRevision(1, one);
+            require(only(alternateLan, "hotspot"), "hotspot should be attempted before BLE");
+            routes.syncFailure(alternateLan.get(0));
+            require(only(routes.readyForRevision(1, ""), "ble"), "both failed LAN routes should fall back to BLE");
+            routes.success("ble", 1);
+            require(routes.readyForRevision(1, "").isEmpty(), "backoff was bypassed");
+            clock.addAndGet(2000);
+            require(only(routes.readyForRevision(1, ""), "wifi"), "restored Wi-Fi did not regain priority");
+            routes.success("wifi", 1);
+            clock.addAndGet(60000);
+            require(routes.readyForRevision(1, "").isEmpty() && routes.nextSyncRetry(1) == Long.MAX_VALUE,
+                    "settled peers must not be polled");
             require(routes.readyForRevision(2, "").size() == 2, "new revision was not sent to every peer");
-            routes.success("hotspot", 2);
-            routes.success("other", 2);
-            clock.addAndGet(5001);
-            require(only(routes.readyForRevision(2, ""), "wifi"), "restored Wi-Fi did not regain priority");
+        });
+
+        sink.check("team routes: three retries then idle until a new request", () -> {
+            AtomicLong clock = new AtomicLong(100);
+            PeerRoutePolicy routes = new PeerRoutePolicy(clock::get);
+            String peer = java.util.UUID.randomUUID().toString();
+            PeerRoutePolicy.Endpoint endpoint = new PeerRoutePolicy.Endpoint("wifi", PeerRoutePolicy.Channel.WIFI, peer, true, null);
+            routes.offer(endpoint);
+            for (long delay : new long[]{2000, 4000, 8000}) {
+                require(only(routes.readyForRevision(1, ""), "wifi"), "attempt did not run");
+                routes.syncFailure(endpoint);
+                require(routes.readyForRevision(1, "").isEmpty() && routes.nextSyncRetry(1) == clock.get() + delay,
+                        "unexpected retry deadline");
+                clock.addAndGet(delay);
+            }
+            require(only(routes.readyForRevision(1, ""), "wifi"), "last retry did not run");
+            routes.syncFailure(endpoint);
+            clock.addAndGet(60000);
+            require(routes.readyForRevision(1, "").isEmpty() && routes.nextSyncRetry(1) == Long.MAX_VALUE,
+                    "retry budget did not stop the engine");
+            routes.newSyncRequest();
+            require(only(routes.readyForRevision(2, ""), "wifi"), "new work should reactivate the route");
+        });
+
+        sink.check("team sync engine: offline queue and authenticated checkpoint survive a reopen", () -> {
+            try (Device a = new Device(base); Device b = new Device(base)) {
+                a.trip = a.store.createTeam("补传测试", MEMBERS.subList(0, 2));
+                b.enroll(a, 1);
+                record(a, "USD", 600, "offline");
+                a.reopen();
+                a.openCoordinator();
+                b.openCoordinator();
+                await(() -> a.sync.status().equals("待同步 1 条"), 3000, "offline operation was not recovered");
+                onMain(() -> a.link(b, PeerRoutePolicy.Channel.WIFI, new AtomicInteger(), false));
+                await(() -> b.count() == 1 && a.sync.status().equals("已同步"), 10000, "durable receipt was not tracked");
+                onMain(a.sync::stop);
+                a.reopen();
+                record(a, "USD", 700, "after confirmation");
+                a.openCoordinator();
+                await(() -> a.sync.status().equals("待同步 1 条"), 3000, "checkpoint did not survive coordinator and database reopen");
+            }
+        });
+
+        sink.check("hotspot: fixed TCP gateway accepts organizer and participant hosts with bidirectional sync", () -> {
+            try (Device organizer = new Device(base); Device participant = new Device(base)) {
+                organizer.trip = organizer.store.createTeam("热点同行", MEMBERS.subList(0, 2));
+                participant.enroll(organizer, 1);
+                gatewayExchange(organizer, participant);
+                gatewayExchange(participant, organizer);
+            }
+        });
+
+        sink.check("sync log: seven local days, private file and error type without sensitive message", () -> {
+            File files = new File(base.getCacheDir(), "nearby-log-test-" + java.util.UUID.randomUUID());
+            File directory = new File(files, "nearby-sync");
+            require(directory.mkdirs(), "log test directory could not be created");
+            Context context = new ContextWrapper(base) {
+                @Override public File getFilesDir() { return files; }
+            };
+            LocalDate today = LocalDate.now();
+            File expired = new File(directory, today.minusDays(7) + ".log");
+            File retained = new File(directory, today.minusDays(6) + ".log");
+            File current = new File(directory, today + ".log");
+            try {
+                require(expired.createNewFile() && retained.createNewFile(), "log fixtures could not be created");
+                SyncLog.write(context, "WIFI", new IOException("测试成员 512.00 CNY"));
+                String logged = new String(Files.readAllBytes(current.toPath()), StandardCharsets.UTF_8);
+                require(!expired.exists() && retained.exists(), "daily retention did not preserve only the latest seven days");
+                require(logged.contains("WIFI IOException") && !logged.contains("测试成员") && !logged.contains("512.00"),
+                        "sync log leaked exception details");
+            } finally {
+                expired.delete();
+                retained.delete();
+                current.delete();
+                directory.delete();
+                files.delete();
+            }
         });
     }
 
-    private static void windowsExchange(Device phone, int port) throws Exception {
-        try (Socket socket = new Socket("10.0.2.2", port)) {
+    private static void gatewayExchange(Device host, Device client) throws Exception {
+        record(host, "CNY", 234, "host offline");
+        record(client, "USD", 123, "client offline");
+        int expected = host.count() + 1;
+        PeerSync listening = new PeerSync(host.context, host.store, added -> { }, true, host.trip);
+        onMain(listening::start);
+        try {
+            SystemClock.sleep(1000);
+            java.net.InetSocketAddress endpoint = LanSync.gatewayAddress(InetAddress.getByName("127.0.0.1"));
+            String route;
+            try (Socket socket = new Socket()) {
+                socket.connect(endpoint, 3000);
+                socket.setSoTimeout(5000);
+                route = TeamProtocol.probe(new PeerWire(socket.getInputStream(), socket.getOutputStream(), () -> { }), client.trip);
+            }
+            require(TeamProtocol.routeId(host.trip.team, host.id.deviceId).equals(route), "gateway probe did not identify the actual host");
+            try (Socket socket = new Socket()) {
+                socket.connect(endpoint, 3000);
+                socket.setSoTimeout(5000);
+                require(client.protocol().exchange(new PeerWire(socket.getInputStream(), socket.getOutputStream(), () -> { }), route).complete,
+                        "fixed-port authenticated exchange failed");
+            }
+            require(host.count() == expected && client.count() == expected, "hotspot exchange was not bidirectional");
+        } finally { onMain(listening::stop); }
+    }
+
+    private static void windowsExchange(Device phone, String host, int port) throws Exception {
+        try (Socket socket = new Socket(host, port)) {
             socket.setSoTimeout(10000);
             TeamProtocol protocol = new TeamProtocol(phone.store, phone.trip, phone.id, QUIET, () -> {});
             PeerWire wire = new PeerWire(socket.getInputStream(), socket.getOutputStream(), () -> {});
@@ -314,16 +410,6 @@ final class TeamChecks {
         }
     }
 
-    private static boolean accepted(TeamEnrollment enrollment) throws Exception {
-        try {
-            require("首次登记完成".equals(enrollment.step()), "still waiting after the issuer answered");
-            return true;
-        } catch (TeamProtocol.Admission denied) {
-            require(denied.getMessage().contains("名额已满") || denied.getMessage().contains("另一台设备"),
-                    "wrong denial for the second claim: " + denied.getMessage());
-            return false;
-        }
-    }
 
     private static boolean only(List<PeerRoutePolicy.Endpoint> ready, String key) {
         return ready.size() == 1 && key.equals(ready.get(0).key);
@@ -388,7 +474,7 @@ final class TeamChecks {
             id = Team.Identity.load(context);
         }
         void create() throws Exception { trip = store.createTeam("五人骑行", MEMBERS); }
-        void join(Device root, int seat) throws Exception { trip = store.joinTrip(root.store.inviteCode(root.trip, ""), "m" + (seat + 1)); }
+        void join(Device root, int seat) throws Exception { trip = store.joinTrip(root.store.inviteCode(root.trip), "m" + (seat + 1)); }
         void enroll(Device root, int seat) throws Exception {
             join(root, seat);
             Pair pair = exchange(this, root);
@@ -402,21 +488,26 @@ final class TeamChecks {
             onMain(sync::start);
         }
         void link(Device other, PeerRoutePolicy.Channel channel, AtomicInteger dials, boolean unreachable) {
-            String route = TeamProtocol.routeId(other.trip.team, other.id.deviceId);
-            sync.offer(new PeerRoutePolicy.Endpoint(channel.name().toLowerCase(java.util.Locale.ROOT) + ":" + route,
-                    channel, route, true, () -> {
-                dials.incrementAndGet();
-                if (unreachable) throw new IOException("simulated radio link unavailable");
-                try (ServerSocket listener = loopback()) {
-                    Socket client = new Socket("127.0.0.1", listener.getLocalPort());
-                    Socket server = listener.accept();
-                    other.sync.accept(connection(server), channel, "");
-                    return connection(client);
-                }
-            }));
+            sync.offer(endpoint(other, channel, dials, unreachable));
         }
-        private PeerConnection connection(Socket socket) throws Exception {
-            return new PeerConnection(socket.getInputStream(), socket.getOutputStream(), socket, null);
+        private PeerRoutePolicy.Endpoint endpoint(Device other, PeerRoutePolicy.Channel channel,
+                                                  AtomicInteger dials, boolean unreachable) {
+            String route = TeamProtocol.routeId(other.trip.team, other.id.deviceId);
+            return new PeerRoutePolicy.Endpoint(channel.name().toLowerCase(java.util.Locale.ROOT) + ":" + route,
+                    channel, route, true, () -> {
+                        if (dials != null) dials.incrementAndGet();
+                        if (unreachable) throw new IOException("simulated radio link unavailable");
+                        try (ServerSocket listener = loopback()) {
+                            Socket client = new Socket("127.0.0.1", listener.getLocalPort());
+                            Socket server = listener.accept();
+                            other.sync.accept(other.connection(server, this, channel), channel, "");
+                            return connection(client, other, channel);
+                        }
+                    });
+        }
+        private PeerConnection connection(Socket socket, Device other, PeerRoutePolicy.Channel channel) throws Exception {
+            return new PeerConnection(socket.getInputStream(), socket.getOutputStream(), socket, null,
+                    12345, (peer, callback) -> endpoint(other, channel, null, false));
         }
         @Override public void close() throws Exception {
             if (sync != null) onMain(sync::stop);

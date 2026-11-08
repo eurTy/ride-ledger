@@ -1,16 +1,14 @@
 package com.rideledger;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.ActivityNotFoundException;
-import android.content.ClipData;
-import android.content.ClipboardManager;
-import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
-import android.net.Uri;
 import android.os.Bundle;
 import android.os.Build;
 import android.text.Editable;
@@ -21,15 +19,12 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
-import android.widget.HorizontalScrollView;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.PopupWindow;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.ArrayAdapter;
-import android.widget.AdapterView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -44,19 +39,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.function.Consumer;
 
 public final class MainActivity extends Activity {
     private static final int QUICK = 0, REVIEW = 1, TRIPS = 2;
     private LedgerStore store;
-    private PeerSync teamPeers;
-    private String teamPeerTrip;
-    private ScheduledExecutorService enrollmentRelay;
-    private String enrollmentRoute = "", enrollmentStatus = "";
-    private int enrollmentGeneration;
+    private TeamTransportAdapter teamTransport;
+    private Map<String, String> renderedSeatNames = Collections.emptyMap();
     private boolean started, awaitingEnrollment;
     private SharedPreferences uiPrefs;
     private String currentTripId;
@@ -64,16 +52,16 @@ public final class MainActivity extends Activity {
     private boolean deletingTrips;
     private int screen = TRIPS;
     private TextView syncView;
-    private static final int REQUEST_TEAM_BLUETOOTH = 74;
-    private static final int REQUEST_INVITE_SCAN = 75;
-    private static final int REQUEST_INVITE_IMAGE = 76;
-    private final ExecutorService imageDecoder = Executors.newSingleThreadExecutor();
+    private static final int REQUEST_TEAM = 74;
+    private static final int REQUEST_STARTUP_PERMISSIONS = 75;
+    static final String STARTUP_PERMISSIONS_REQUESTED = "startup_permissions_requested";
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().setStatusBarColor(Color.rgb(248, 249, 247));
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         store = new LedgerStore(this);
+        teamTransport = new TeamTransportAdapter(this, store, this::onSyncChanged);
         uiPrefs = getSharedPreferences("ui", MODE_PRIVATE);
         currentTripId = uiPrefs.getString("last_trip", null);
         if (currentTripId == null || store.getTrip(currentTripId) == null) {
@@ -86,6 +74,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onStart() {
         super.onStart();
+        SyncBackground.foregroundEntered(this);
         if (currentTripId != null && screen != QUICK) {
             deletingTrips = false;
             screen = QUICK;
@@ -97,49 +86,65 @@ public final class MainActivity extends Activity {
     }
     @Override public void onStop() {
         started = false;
-        if (teamPeers != null) teamPeers.stop();
-        stopEnrollmentRelay();
+        teamTransport.stop();
+        SyncBackground.foregroundLeft();
         super.onStop();
     }
+
+    @Override protected void onResume() {
+        super.onResume();
+        teamTransport.permissionsChanged();
+        if (uiPrefs.getBoolean(STARTUP_PERMISSIONS_REQUESTED, false)) return;
+
+        List<String> missing = new ArrayList<>();
+        if (Build.VERSION.SDK_INT >= 29) {
+            for (String permission : TeamBle.permissions()) {
+                if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) missing.add(permission);
+            }
+        }
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
+            missing.add(Manifest.permission.CAMERA);
+
+        uiPrefs.edit().putBoolean(STARTUP_PERMISSIONS_REQUESTED, true).apply();
+        if (!missing.isEmpty()) requestPermissions(missing.toArray(new String[0]), REQUEST_STARTUP_PERMISSIONS);
+    }
+
+    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        if (request == REQUEST_STARTUP_PERMISSIONS) teamTransport.permissionsChanged();
+    }
+
     @Override public void onBackPressed() {
         if (currentTripId != null && screen != QUICK) {
             deletingTrips = false;
             screen = QUICK;
             render();
+            teamTransport.recordsChanged();
         }
         else super.onBackPressed();
     }
 
     private void onSyncChanged(int count) {
         LedgerStore.Trip trip = currentTripId == null ? null : store.getTrip(currentTripId);
-        if ((awaitingEnrollment && trip != null && store.teamReady(trip)) || (count > 0 && screen == REVIEW)) render();
+        boolean rosterChanged = trip != null && !trip.seatNames.equals(renderedSeatNames);
+        if ((awaitingEnrollment && trip != null && store.teamReady(trip)) ||
+                (screen == REVIEW && (count > 0 || rosterChanged)) || (screen == TRIPS && rosterChanged)) render();
         else updateSync();
     }
 
     private void updateSync() {
-        if (syncView != null) {
-            LedgerStore.Trip trip = currentTripId == null ? null : store.getTrip(currentTripId);
-            if (trip != null && trip.team != null) {
-                if (trip.people() == 1) {
-                    syncView.setText("单人旅行 · 账目保存在本机");
-                } else if (!store.teamReady(trip)) {
-                    String state = teamPeers == null ? "" : teamPeers.status();
-                    syncView.setText(state.contains("已满") || state.contains("已登记在") ? state :
-                            !enrollmentStatus.isEmpty() ? enrollmentStatus :
-                            trip.syncUrl.isEmpty() ? "请和建队手机打开同一旅行，通过 Wi-Fi、热点或蓝牙完成登记。" :
-                                    "正在查找附近的建队手机，异地时会尝试 HTTPS 中转。请两台手机都打开这趟旅行。");
-                } else {
-                    String permissions = TeamBle.hasPermissions(this) ? "" : "\n在系统应用权限中允许附近设备（安卓 10/11 为位置），即可使用蓝牙。";
-                    String relay = trip.localPerson.equals(trip.member(0)) && !enrollmentStatus.isEmpty() ?
-                            "\n" + enrollmentStatus : "";
-                    syncView.setText((teamPeers == null ? "本机账目已保存" : teamPeers.details()) + relay + permissions);
-                }
-            }
-        }
+        if (syncView == null || currentTripId == null) return;
+        LedgerStore.Trip trip = store.getTrip(currentTripId);
+        if (trip == null || trip.team == null) return;
+        if (!store.teamReady(trip)) {
+            String denied = teamTransport.error();
+            syncView.setText(denied.isEmpty() ? "请打开登记进度继续首次登记。" : denied);
+        } else syncView.setText(teamTransport.syncState().label());
     }
 
     private void render() {
         LedgerStore.Trip trip = currentTripId == null ? null : store.getTrip(currentTripId);
+        renderedSeatNames = trip == null ? Collections.emptyMap() : trip.seatNames;
         if (trip == null) { currentTripId = null; screen = TRIPS; renderTrips(); }
         else if (screen == TRIPS) renderTrips();
         else if (screen == REVIEW) renderReview(trip);
@@ -187,8 +192,10 @@ public final class MainActivity extends Activity {
         item.setBackground(background);
         item.setOnClickListener(v -> {
             if (target != TRIPS) deletingTrips = false;
+            boolean enteringLedger = target == QUICK && screen != QUICK;
             screen = target;
             render();
+            if (enteringLedger) teamTransport.recordsChanged();
         });
         item.setFocusable(true);
         bar.addView(item, new LinearLayout.LayoutParams(0, dp(52), 1));
@@ -202,57 +209,19 @@ public final class MainActivity extends Activity {
         screen = QUICK;
         render();
         startSelectedSync();
+        teamTransport.recordsChanged();
         updateSync();
     }
 
     private void startSelectedSync() {
-        if (!started) return;
-        LedgerStore.Trip trip = currentTripId == null ? null : store.getTrip(currentTripId);
-        if (trip == null || trip.team == null || trip.people() == 1 || Build.VERSION.SDK_INT < 29) {
-            if (teamPeers != null) teamPeers.stop();
-            teamPeers = null;
-            teamPeerTrip = null;
-            stopEnrollmentRelay();
-            return;
-        }
-        if (!trip.id.equals(teamPeerTrip)) {
-            if (teamPeers != null) teamPeers.stop();
-            teamPeers = new PeerSync(this, store, this::onSyncChanged, true, trip);
-            teamPeerTrip = trip.id;
-        }
-        teamPeers.start();
-        startEnrollmentRelay(trip);
-        if (!TeamBle.hasPermissions(this) && !uiPrefs.getBoolean("team_ble_prompted", false)) {
-            getWindow().getDecorView().post(() -> {
-                if (!started || teamPeers == null || uiPrefs.getBoolean("team_ble_prompted", false)) return;
-                uiPrefs.edit().putBoolean("team_ble_prompted", true).apply();
-                requestPermissions(TeamBle.permissions(), REQUEST_TEAM_BLUETOOTH);
-            });
-        }
+        if (started && Build.VERSION.SDK_INT >= 29)
+            teamTransport.select(currentTripId == null ? null : store.getTrip(currentTripId));
     }
 
-    private void startEnrollmentRelay(LedgerStore.Trip trip) {
-        String route = trip.syncUrl.isEmpty() ? "" : trip.id + "\n" + trip.syncUrl;
-        if (route.equals(enrollmentRoute)) return;
-        stopEnrollmentRelay();
-        if (route.isEmpty() || (!trip.localPerson.equals(trip.member(0)) && store.teamReady(trip))) return;
-        enrollmentRoute = route;
-        int generation = enrollmentGeneration;
-        enrollmentRelay = TeamEnrollment.start(getApplicationContext(), store, trip, status -> runOnUiThread(() -> {
-            if (!started || generation != enrollmentGeneration) return;
-            enrollmentStatus = status;
-            if (teamPeers != null && !trip.localPerson.equals(trip.member(0)) && store.teamReady(trip))
-                teamPeers.syncNow();
-            onSyncChanged(0);
-        }));
-    }
-
-    private void stopEnrollmentRelay() {
-        enrollmentGeneration++;
-        if (enrollmentRelay != null) enrollmentRelay.shutdownNow();
-        enrollmentRelay = null;
-        enrollmentRoute = "";
-        enrollmentStatus = "";
+    private void openTeam(String mode, String tripId) {
+        teamTransport.stop();
+        startActivityForResult(new Intent(this, TeamSetupActivity.class)
+                .putExtra(TeamSetupActivity.MODE, mode).putExtra(TeamSetupActivity.TRIP, tripId), REQUEST_TEAM);
     }
 
     private void renderTrips() {
@@ -260,7 +229,7 @@ public final class MainActivity extends Activity {
         heading(body, "我的旅行");
         text(body, "选择旅行后，之后每次打开都会直接进入快速记账。", 14, Color.GRAY);
         List<LedgerStore.Trip> trips = store.trips();
-        Button createTrip = button("新建小队旅行", this::newTeam);
+        Button createTrip = button("新建小队旅行", () -> openTeam(TeamSetupActivity.CREATE, null));
         createTrip.setEnabled(Build.VERSION.SDK_INT >= 29);
         createTrip.setTextColor(Color.WHITE);
         createTrip.setBackground(chip(Color.rgb(33, 132, 91), Color.rgb(33, 132, 91), false));
@@ -312,13 +281,13 @@ public final class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 29) {
             section(body, "同行与同步");
             LedgerStore.Trip current = currentTripId == null ? null : store.getTrip(currentTripId);
-            Button join = button("加入小队旅行", this::joinTrip);
+            Button join = button("加入小队旅行", () -> openTeam(TeamSetupActivity.JOIN, null));
             if (current == null || current.team == null || current.people() == 1 || !store.teamReady(current)) body.addView(join, fullMargin());
-            else row(body, join, button("邀请同伴", () -> share(current)));
+            else row(body, join, button("邀请同伴", () -> openTeam(TeamSetupActivity.INVITE, current.id)));
             if (current != null && current.team != null) {
-                text(body, String.join("、", current.team.names), 14, Color.GRAY);
-                if (current.people() > 1 && current.localPerson.equals(current.member(0)))
-                    body.addView(button("跨 Wi-Fi 登记设置", () -> configureEnrollment(current)), fullMargin());
+                List<String> names = new ArrayList<>();
+                for (int i = 0; i < current.people(); i++) names.add(current.nameOf(current.member(i)));
+                text(body, String.join("、", names), 14, Color.GRAY);
                 syncView = text(body, "", 13, Color.GRAY);
                 updateSync();
             }
@@ -356,9 +325,17 @@ public final class MainActivity extends Activity {
 
     private void renderQuick(LedgerStore.Trip trip) {
         LinearLayout body = page();
-        text(body, "当前旅行", 13, Color.rgb(104, 146, 115));
-        heading(body, trip.name);
-        text(body, "快速记账", 19, Color.rgb(28, 89, 56));
+        body.setPadding(dp(14), dp(8), dp(14), dp(8));
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        body.addView(header, fullMargin());
+        TextView tripTitle = text(header, trip.name, 21, 0xff154b3c);
+        tripTitle.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
+        tripTitle.setSingleLine(true);
+        tripTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        TextView quickLabel = text(header, "快速记账", 14, 0xff1c5938);
+        quickLabel.setLayoutParams(new LinearLayout.LayoutParams(-2, -2));
+        quickLabel.setPadding(dp(8), dp(6), 0, dp(6));
         if (!store.teamReady(trip)) {
             waitingForTeam(body);
             return;
@@ -366,23 +343,23 @@ public final class MainActivity extends Activity {
 
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(18), dp(18), dp(18), dp(20));
+        card.setPadding(dp(14), dp(8), dp(14), dp(10));
         GradientDrawable cardBackground = new GradientDrawable();
         cardBackground.setColor(Color.WHITE);
         cardBackground.setCornerRadius(dp(18));
         cardBackground.setStroke(dp(1), Color.rgb(222, 233, 224));
         card.setBackground(cardBackground);
-        body.addView(card, fullMargin());
+        body.addView(card, new LinearLayout.LayoutParams(-1, -2, 1));
 
         LinearLayout amountRow = new LinearLayout(this);
         amountRow.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout amountBox = new LinearLayout(this);
         amountBox.setOrientation(LinearLayout.VERTICAL);
-        EditText amount = field(amountBox, "支付金额", "0.00", true);
-        amount.setTextSize(30);
+        EditText amount = quickField(amountBox, "支付金额", "0.00", true);
+        amount.setTextSize(26);
         LinearLayout currencyBox = new LinearLayout(this);
         currencyBox.setOrientation(LinearLayout.VERTICAL);
-        text(currencyBox, "货币", 14, Color.DKGRAY);
+        text(currencyBox, "货币", 14, Color.DKGRAY).setPadding(0, dp(3), 0, 0);
         LinearLayout currencyRow = new LinearLayout(this);
         currencyRow.setOrientation(LinearLayout.HORIZONTAL);
         currencyRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -420,10 +397,11 @@ public final class MainActivity extends Activity {
         currencyParams.leftMargin = dp(10);
         amountRow.addView(currencyBox, currencyParams);
         card.addView(amountRow, fullMargin());
+        card.addView(new View(this), new LinearLayout.LayoutParams(-1, 0, 1));
 
         LinearLayout routing = new LinearLayout(this);
         routing.setOrientation(LinearLayout.VERTICAL);
-        routing.setPadding(dp(14), dp(7), dp(14), dp(7));
+        routing.setPadding(dp(12), dp(2), dp(12), dp(2));
         GradientDrawable routingBackground = new GradientDrawable();
         routingBackground.setColor(Color.rgb(249, 251, 249));
         routingBackground.setCornerRadius(dp(15));
@@ -440,7 +418,7 @@ public final class MainActivity extends Activity {
         payerRow.addView(payerLabel, new LinearLayout.LayoutParams(0, -2, 1));
         String savedPayer = uiPrefs.getString("payer:" + trip.id, trip.localPerson);
         Spinner payer = personSpinner(trip, savedPayer);
-        payerRow.addView(payer, new LinearLayout.LayoutParams(0, dp(50), 3));
+        payerRow.addView(payer, new LinearLayout.LayoutParams(0, dp(48), 3));
         routing.addView(payerRow, fullMargin());
 
         View divider = new View(this);
@@ -449,7 +427,7 @@ public final class MainActivity extends Activity {
 
         LinearLayout modeRow = new LinearLayout(this);
         modeRow.setGravity(Gravity.CENTER_VERTICAL);
-        modeRow.setMinimumHeight(dp(56));
+        modeRow.setMinimumHeight(dp(48));
         TextView modeLabel = new TextView(this);
         modeLabel.setText("怎么分摊");
         modeLabel.setTextSize(14);
@@ -486,7 +464,9 @@ public final class MainActivity extends Activity {
             });
             menu.show();
         });
-        EditText note = field(card, "备注（可选）", "例如：房费、饭费", false);
+        card.addView(new View(this), new LinearLayout.LayoutParams(-1, 0, 1));
+        EditText note = quickField(card, "备注（可选）", "例如：房费、饭费", false);
+        card.addView(new View(this), new LinearLayout.LayoutParams(-1, 0, 1));
 
         Button save = button("保存这笔支出", () -> {
             try {
@@ -507,18 +487,25 @@ public final class MainActivity extends Activity {
         });
         save.setTextSize(17);
         save.setTextColor(Color.WHITE);
-        save.setMinHeight(dp(56));
+        save.setMinHeight(dp(48));
         GradientDrawable saveBackground = new GradientDrawable();
         saveBackground.setColor(Color.rgb(236, 107, 83));
         saveBackground.setCornerRadius(dp(12));
         save.setBackground(saveBackground);
         card.addView(save, fullMargin());
-        text(body, trip.people() == 1 ? "账目保存在本机。" : "无网时先保存在本机，连接后自动同步。", 12, Color.GRAY);
+    }
+
+    private EditText quickField(LinearLayout form, String label, String hint, boolean decimal) {
+        int labelIndex = form.getChildCount();
+        EditText input = field(form, label, hint, decimal);
+        form.getChildAt(labelIndex).setPadding(0, dp(3), 0, 0);
+        return input;
     }
 
     private void waitingForTeam(LinearLayout body) {
         awaitingEnrollment = true;
         syncView = text(body, "等待首次登记", 15, Color.GRAY);
+        body.addView(button("查看登记进度", () -> openTeam(TeamSetupActivity.JOIN, currentTripId)), fullMargin());
         updateSync();
     }
 
@@ -531,45 +518,52 @@ public final class MainActivity extends Activity {
             waitingForTeam(body);
             return;
         }
-        section(body, "总支出");
-        text(body, sum.spent.isEmpty() ? "暂无支出" : formatBalances(sum.spent), 18, Color.BLACK);
-        section(body, "现金余额");
+        LinearLayout spending = reviewCard(body, "总支出");
+        text(spending, sum.spent.isEmpty() ? "暂无支出" : formatBalances(sum.spent),
+                sum.spent.isEmpty() ? 15 : 20, sum.spent.isEmpty() ? Color.GRAY : Color.BLACK);
+        LinearLayout balances = reviewCard(body, "现金余额");
         for (int i = 0; i < trip.people(); i++) {
             String member = trip.member(i);
-            text(body, personChoiceLabel(trip, member) + "：" +
+            if (trip.team != null && !trip.seatNames.containsKey(member)) continue;
+            text(balances, personChoiceLabel(trip, member) + "：" +
                     formatBalances(sum.teamCash.getOrDefault(member, Collections.emptyMap())), 16, Color.BLACK);
         }
-        section(body, "小队结算");
-        text(body, formatTeamDebts(trip, sum.teamNet), 17, Color.rgb(25, 82, 64));
-        section(body, "现金与结算");
-        row(body, button("原始资金", () -> moneyIn(trip, true)), button("补充现金", () -> moneyIn(trip, false)));
-        if (trip.people() > 1) row(body, button("成员还款", () -> transfer(trip)), button("换汇", () -> exchange(trip)));
-        else buttonInto(body, "换汇", () -> exchange(trip));
-        section(body, "旅行记录");
-        TextView count = text(body, "", 13, Color.GRAY);
-        HorizontalScrollView filterScroll = new HorizontalScrollView(this);
-        filterScroll.setHorizontalScrollBarEnabled(false);
-        LinearLayout filterRow = new LinearLayout(this);
-        filterRow.setOrientation(LinearLayout.HORIZONTAL);
-        filterRow.setPadding(0, dp(10), 0, dp(12));
-        filterScroll.addView(filterRow);
-        body.addView(filterScroll, fullMargin());
+        LinearLayout settlement = reviewCard(body, "小队结算");
+        text(settlement, formatTeamDebts(trip, sum.teamNet), 17, Color.rgb(25, 82, 64));
+        LinearLayout actions = reviewCard(body, "现金与结算");
+        row(actions, button("原始资金", () -> moneyIn(trip, true)), button("补充现金", () -> moneyIn(trip, false)));
+        if (trip.people() > 1) row(actions, button("成员还款", () -> transfer(trip)), button("换汇", () -> exchange(trip)));
+        else buttonInto(actions, "换汇", () -> exchange(trip));
+        LinearLayout history = reviewCard(body, "旅行记录");
+        TextView count = text(history, "", 13, Color.GRAY);
+        LinearLayout filterRows = new LinearLayout(this);
+        filterRows.setOrientation(LinearLayout.VERTICAL);
+        filterRows.setPadding(0, dp(8), 0, dp(6));
+        history.addView(filterRows, fullMargin());
         LinearLayout records = new LinearLayout(this);
         records.setOrientation(LinearLayout.VERTICAL);
-        body.addView(records, fullMargin());
+        history.addView(records, fullMargin());
         String[] filterKeys = {"all", "shared", "opening", "exchange"};
         String[] filterLabels = {"全部", "共同支出", "原始资金", "换汇记录"};
         List<TextView> chips = new ArrayList<>();
+        android.content.res.Configuration configuration = getResources().getConfiguration();
+        int perRow = configuration.screenWidthDp >= 360 && configuration.fontScale <= 1.15f ? 4 : 2;
+        LinearLayout filterRow = null;
         for (int i = 0; i < filterKeys.length; i++) {
+            if (i % perRow == 0) {
+                filterRow = new LinearLayout(this);
+                filterRows.addView(filterRow, fullMargin());
+            }
             String key = filterKeys[i];
             TextView chip = new TextView(this);
             chip.setText(filterLabels[i]);
             chip.setTextSize(14);
             chip.setGravity(Gravity.CENTER);
-            chip.setPadding(dp(15), dp(9), dp(15), dp(9));
+            chip.setPadding(dp(2), dp(8), dp(2), dp(8));
+            chip.setMinHeight(dp(44));
             styleRecordFilter(chip, key.equals(recordFilter));
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2);
-            params.rightMargin = dp(8);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+            if (i % perRow != perRow - 1) params.setMarginEnd(dp(5));
             filterRow.addView(chip, params);
             chips.add(chip);
             chip.setOnClickListener(v -> {
@@ -582,6 +576,26 @@ public final class MainActivity extends Activity {
         renderRecordItems(trip, sum, count, records);
         syncView = text(body, "", 13, Color.GRAY);
         updateSync();
+    }
+
+    private LinearLayout reviewCard(LinearLayout body, String title) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(10), dp(16), dp(8));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(Color.WHITE);
+        background.setCornerRadius(dp(16));
+        background.setStroke(dp(1), 0xffdce6df);
+        card.setBackground(background);
+        LinearLayout.LayoutParams size = fullMargin();
+        size.bottomMargin = dp(14);
+        body.addView(card, size);
+        TextView label = text(card, title, 18, 0xff154b3c);
+        label.setTypeface(label.getTypeface(), Typeface.BOLD);
+        View divider = new View(this);
+        divider.setBackgroundColor(0xffe6eee8);
+        card.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
+        return card;
     }
 
     private void styleRecordFilter(TextView chip, boolean selected) {
@@ -610,7 +624,10 @@ public final class MainActivity extends Activity {
             visibleCount++;
             TextView item = text(records, describe(trip, event), 15, Color.BLACK);
             item.setPadding(dp(12), dp(10), dp(12), dp(10));
-            item.setBackgroundColor(Color.WHITE);
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(0xfff4f8f5);
+            background.setCornerRadius(dp(8));
+            item.setBackground(background);
             LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) item.getLayoutParams();
             params.bottomMargin = dp(6);
             item.setLayoutParams(params);
@@ -696,158 +713,6 @@ public final class MainActivity extends Activity {
         return time + "  " + title + (note.isEmpty() ? "" : "\n" + note);
     }
 
-    private void newTeam() {
-        LinearLayout form = form();
-        text(form, "一个人也能开始记账。有同伴时，保存前点「＋」添加，最多五人。", 14, Color.GRAY);
-        EditText name = field(form, "旅行名称", "例如：荒原骑行", false);
-        EditText mine = field(form, "我的名字", "输入你的名字", false);
-        LinearLayout companions = new LinearLayout(this);
-        companions.setOrientation(LinearLayout.VERTICAL);
-        form.addView(companions);
-        List<EditText> inputs = new ArrayList<>();
-        Button plus = new Button(this);
-        plus.setText("＋ 添加同伴");
-        plus.setAllCaps(false);
-        plus.setOnClickListener(view -> {
-            if (inputs.size() >= Team.MAX_DEVICES - 1) return;
-            LinearLayout entry = new LinearLayout(this);
-            entry.setGravity(Gravity.CENTER_VERTICAL);
-            EditText companion = new EditText(this);
-            companion.setSingleLine(true);
-            companion.setHint("同伴名字");
-            entry.addView(companion, new LinearLayout.LayoutParams(0, -2, 1));
-            Button remove = button("×", () -> {
-                inputs.remove(companion);
-                companions.removeView(entry);
-                plus.setEnabled(true);
-            });
-            remove.setContentDescription("移除同伴");
-            entry.addView(remove, new LinearLayout.LayoutParams(dp(48), dp(48)));
-            inputs.add(companion);
-            companions.addView(entry, fullMargin());
-            plus.setEnabled(inputs.size() < Team.MAX_DEVICES - 1);
-            companion.requestFocus();
-        });
-        form.addView(plus, fullMargin());
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(form);
-        showForm("新建小队旅行", scroll, () -> {
-            List<String> members = new ArrayList<>();
-            members.add(mine.getText().toString());
-            for (EditText input : inputs) members.add(input.getText().toString());
-            selectTrip(store.createTeam(name.getText().toString(), members));
-        });
-    }
-
-    private void joinTrip() {
-        LinearLayout form = form();
-        text(form, "扫描同伴的邀请二维码，再选择自己的名字。", 14, Color.GRAY);
-        Button scan = new Button(this);
-        scan.setText("扫码加入");
-        scan.setTextColor(Color.WHITE);
-        scan.setBackground(chip(Color.rgb(33, 132, 91), Color.rgb(33, 132, 91), false));
-        form.addView(scan, fullMargin());
-        Button gallery = new Button(this);
-        gallery.setText("从相册选二维码");
-        form.addView(gallery, fullMargin());
-        text(form, "附近可用同一 Wi-Fi、热点或蓝牙。异地可用二维码里的 HTTPS 中转。", 13, Color.GRAY);
-        Button manual = new Button(this);
-        manual.setText("输入邀请码（备用）");
-        form.addView(manual, fullMargin());
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("加入小队旅行").setView(form)
-                .setNegativeButton("取消", null).show();
-        scan.setOnClickListener(view -> {
-            dialog.dismiss();
-            startActivityForResult(new Intent(this, InviteScannerActivity.class), REQUEST_INVITE_SCAN);
-        });
-        gallery.setOnClickListener(view -> {
-            Intent pick = new Intent(Intent.ACTION_GET_CONTENT).setType("image/*")
-                    .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_LOCAL_ONLY, true);
-            try {
-                startActivityForResult(pick, REQUEST_INVITE_IMAGE);
-                dialog.dismiss();
-            } catch (ActivityNotFoundException unavailable) {
-                toast("此设备没有可用的图片选择器");
-            }
-        });
-        manual.setOnClickListener(view -> {
-            dialog.dismiss();
-            confirmInvite(null);
-        });
-    }
-
-    private void confirmInvite(String scanned) {
-        LinearLayout form = form();
-        EditText code = scanned == null ? field(form, "邀请码", "粘贴同伴分享的完整邀请码", false) : null;
-        LinearLayout identityBox = new LinearLayout(this);
-        identityBox.setOrientation(LinearLayout.VERTICAL);
-        form.addView(identityBox);
-        Spinner identity = choice(identityBox, "这台设备由谁使用", new String[]{});
-        identityBox.setVisibility(View.GONE);
-        TextView preview = text(form, "", 14, Color.rgb(44, 118, 80));
-        LedgerStore.Trip[] candidate = new LedgerStore.Trip[1];
-        identity.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                LedgerStore.Trip trip = candidate[0];
-                if (trip == null) return;
-                if (position > 0 && position < trip.people())
-                    preview.setText(joinPerspective(trip, trip.member(position)));
-                else preview.setText("已读取「" + trip.name + "」，请选择你的名字。");
-            }
-            @Override public void onNothingSelected(AdapterView<?> parent) { }
-        });
-        Consumer<String> read = value -> {
-            try {
-                LedgerStore.Trip trip = store.previewInvite(value);
-                if (trip.team == null) {
-                    candidate[0] = null;
-                    identityBox.setVisibility(View.GONE);
-                    preview.setText("这是旧旅行邀请码，请向同伴索取小队邀请码。");
-                    return;
-                }
-                String[] labels = new String[trip.people()];
-                labels[0] = "请选择你的名字";
-                for (int i = 1; i < trip.people(); i++) labels[i] = trip.nameOf(trip.member(i));
-                candidate[0] = trip;
-                identity.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, labels));
-                identity.setSelection(0);
-                identityBox.setVisibility(View.VISIBLE);
-                preview.setText("已读取「" + trip.name + "」，请选择你的名字。");
-            } catch (Exception ignored) {
-                candidate[0] = null;
-                identityBox.setVisibility(View.GONE);
-                preview.setText(value.trim().isEmpty() ? "" : "未能读取有效的小队邀请。");
-            }
-        };
-        if (code == null) read.accept(scanned);
-        else {
-            code.setSingleLine(false);
-            code.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
-            code.setMinLines(3);
-            code.setMaxLines(5);
-            code.addTextChangedListener(new TextWatcher() {
-                @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
-                @Override public void onTextChanged(CharSequence s, int start, int before, int count) { }
-                @Override public void afterTextChanged(Editable value) { read.accept(value.toString()); }
-            });
-        }
-        AlertDialog dialog = showForm(code == null ? "确认小队身份" : "输入邀请码", form, () -> {
-            if (candidate[0] == null || identity.getSelectedItemPosition() <= 0)
-                throw new IllegalArgumentException("请读入有效的小队邀请并选择你的名字");
-            LedgerStore.Trip trip = store.joinTrip(code == null ? scanned : code.getText().toString(),
-                    candidate[0].member(identity.getSelectedItemPosition()));
-            selectTrip(trip);
-            syncAfterSave(trip);
-        });
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setText("加入小队");
-    }
-
-    private String joinPerspective(LedgerStore.Trip trip, String localPerson) {
-        String connection = trip.syncUrl.isEmpty() ? "请与建队手机通过同一 Wi-Fi、热点或蓝牙连通。" :
-                "请让建队手机打开这趟旅行。两台手机在异地时都需联网。";
-        return "你将以“" + trip.nameOf(localPerson) + "”加入。" + connection;
-    }
-
     private void moneyIn(LedgerStore.Trip trip, boolean opening) {
         LinearLayout form = form();
         Spinner person = personChoice(form, trip, "现金持有人");
@@ -925,92 +790,15 @@ public final class MainActivity extends Activity {
     }
 
     private void syncAfterSave(LedgerStore.Trip trip) {
-        if (teamPeers != null && trip.id.equals(teamPeerTrip)) teamPeers.syncNow();
-    }
-
-    private void share(LedgerStore.Trip trip) {
-        try {
-            String code = store.inviteCode(trip);
-            LinearLayout content = form();
-            text(content, "队友可以扫码或从相册选这张二维码，然后选择自己的名字。", 14, Color.GRAY);
-            text(content, trip.syncUrl.isEmpty() ? "同一 Wi-Fi、热点或蓝牙均可登记。异地加入前，请先设置 HTTPS 中转。" :
-                    "支持附近和异地登记。异地时请保持建队手机联网并打开本旅行。", 14, Color.GRAY);
-            ImageView qr = new ImageView(this);
-            qr.setContentDescription("小队邀请二维码");
-            qr.setImageBitmap(InviteQr.image(code, dp(280)));
-            content.addView(qr, new LinearLayout.LayoutParams(-1, dp(280)));
-            ScrollView invite = new ScrollView(this);
-            invite.addView(content);
-            new AlertDialog.Builder(this).setTitle("小队邀请二维码").setView(invite)
-                    .setNegativeButton("关闭", null)
-                    .setNeutralButton("复制邀请码", (d, w) -> {
-                        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                        clipboard.setPrimaryClip(ClipData.newPlainText("旅行邀请码", code));
-                        toast("邀请码已复制");
-                    })
-                    .setPositiveButton("分享邀请码", (d, w) -> {
-                        Intent intent = new Intent(Intent.ACTION_SEND);
-                        intent.setType("text/plain");
-                        intent.putExtra(Intent.EXTRA_TEXT, code);
-                        startActivity(Intent.createChooser(intent, "分享旅行邀请码"));
-                    }).show();
-        } catch (Exception e) { error(e); }
-    }
-
-    private void configureEnrollment(LedgerStore.Trip trip) {
-        LinearLayout content = form();
-        text(content, "填一次中转地址，之后分享的二维码会自动带上它。留空时可通过附近连接登记。", 14, Color.GRAY);
-        EditText address = field(content, "HTTPS 中转地址", "https://…", false);
-        address.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        address.setSingleLine(true);
-        address.setText(trip.syncUrl);
-        showForm("跨 Wi-Fi 登记设置", content, () -> {
-            store.setTripSyncUrl(trip.id, address.getText().toString());
-            startSelectedSync();
-            render();
-        });
+        if (trip.id.equals(currentTripId)) teamTransport.recordsChanged();
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request == REQUEST_INVITE_SCAN) {
-            String code = result == RESULT_OK && data != null ? data.getStringExtra(InviteScannerActivity.EXTRA_INVITE) : null;
-            if (code == null) joinTrip();
-            else confirmInvite(code);
-        }
-        if (request == REQUEST_INVITE_IMAGE) {
-            Uri image = result == RESULT_OK && data != null ? data.getData() : null;
-            if (image == null) joinTrip();
-            else readInviteImage(image);
-        }
-    }
-
-    private void readInviteImage(Uri image) {
-        AlertDialog reading = new AlertDialog.Builder(this).setMessage("正在识别图片…").show();
-        imageDecoder.execute(() -> {
-            String code;
-            try { code = InviteQr.readImage(getContentResolver(), image); }
-            catch (Exception ignored) { code = null; }
-            String invite = InviteQr.isTeamCode(code) ? code : null;
-            runOnUiThread(() -> {
-                if (isDestroyed() || isFinishing() || !reading.isShowing()) return;
-                reading.dismiss();
-                if (invite == null) {
-                    toast("图片里没有读到小队二维码");
-                    joinTrip();
-                } else confirmInvite(invite);
-            });
-        });
-    }
-
-    @Override protected void onDestroy() {
-        imageDecoder.shutdownNow();
-        super.onDestroy();
-    }
-
-    @Override public void onRequestPermissionsResult(int code, String[] permissions, int[] grants) {
-        super.onRequestPermissionsResult(code, permissions, grants);
-        if (code == REQUEST_TEAM_BLUETOOTH) updateSync();
+        if (request != REQUEST_TEAM) return;
+        LedgerStore.Trip trip = result == RESULT_OK && data != null ? store.getTrip(data.getStringExtra(TeamSetupActivity.TRIP)) : null;
+        if (trip != null) selectTrip(trip);
+        else render();
     }
 
     private interface SaveAction { void run() throws Exception; }
