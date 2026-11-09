@@ -26,7 +26,7 @@ final class SyncBackground {
             JobScheduler scheduler = app.getSystemService(JobScheduler.class);
             if (scheduler != null && scheduler.getPendingJob(PERIODIC) == null)
                 schedule(app, scheduler, builder(app, PERIODIC).setPeriodic(PERIOD).setPersisted(true).build());
-        } catch (RuntimeException error) { SyncLog.write(app, "PERIODIC_JOB", error); }
+        } catch (RuntimeException error) { SyncLog.write(app, SyncLog.Event.PERIODIC_JOB, error); }
     }
 
     static void foregroundLeft() { foreground = Math.max(0, foreground - 1); }
@@ -40,7 +40,7 @@ final class SyncBackground {
             if (scheduler == null || scheduler.getPendingJob(RADIO_EVENT) != null) return;
             lastEvent = now;
             schedule(app, scheduler, builder(app, RADIO_EVENT).setMinimumLatency(3000).build());
-        } catch (RuntimeException error) { SyncLog.write(app, "RADIO_JOB", error); }
+        } catch (RuntimeException error) { SyncLog.write(app, SyncLog.Event.RADIO_JOB, error); }
     }
 
     private static JobInfo.Builder builder(Context context, int id) {
@@ -48,7 +48,7 @@ final class SyncBackground {
     }
 
     private static void schedule(Context context, JobScheduler scheduler, JobInfo info) {
-        if (scheduler.schedule(info) != JobScheduler.RESULT_SUCCESS) SyncLog.write(context, "JOB_SCHEDULE", "Rejected");
+        if (scheduler.schedule(info) != JobScheduler.RESULT_SUCCESS) SyncLog.write(context, SyncLog.Event.JOB_SCHEDULE, "Rejected");
     }
 
     static boolean acquire(SyncJobService service) {

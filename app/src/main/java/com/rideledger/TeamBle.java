@@ -115,7 +115,14 @@ final class TeamBle {
             if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(radio, filter, Context.RECEIVER_EXPORTED);
             else context.registerReceiver(radio, filter);
             receiverRegistered = true;
-        } catch (RuntimeException error) { SyncLog.write(context, "BLE_RECEIVER", error); }
+        } catch (RuntimeException error) { SyncLog.write(context, SyncLog.Event.BLE_RECEIVER, error); }
+        refresh();
+    }
+
+    void rediscover() {
+        retryScan = retryAdvertise = 0;
+        scanFailures = advertiseFailures = 0;
+        main.removeCallbacks(retryRadio);
         refresh();
     }
 
@@ -314,7 +321,7 @@ final class TeamBle {
     private void radioFailed(boolean scanning, String code) {
         if (scanning) stopScan(); else stopAdvertising();
         int failures = scanning ? ++scanFailures : ++advertiseFailures;
-        SyncLog.write(context, scanning ? "BLE_SCAN" : "BLE_ADVERTISE", code);
+        SyncLog.write(context, scanning ? SyncLog.Event.BLE_SCAN : SyncLog.Event.BLE_ADVERTISE, code);
         long retryAt = failures <= 3 ? SystemClock.elapsedRealtime() + (5000L << (failures - 1)) : Long.MAX_VALUE;
         if (scanning) retryScan = retryAt; else retryAdvertise = retryAt;
         main.removeCallbacks(retryRadio);

@@ -41,7 +41,6 @@ public final class SyncTestInstrumentation extends Instrumentation {
         Bundle result = new Bundle();
         try {
             if (arguments.containsKey("desktopPeerInvite")) runDesktopPeer(result);
-            else if (arguments.containsKey("desktopInvite")) runDesktopConnection(result);
             else {
                 JSONObject fixture = new JSONObject(new String(Base64.decode(arguments.getString("fixture"),
                         Base64.URL_SAFE | Base64.NO_WRAP), StandardCharsets.UTF_8));
@@ -72,36 +71,6 @@ public final class SyncTestInstrumentation extends Instrumentation {
     }
     private LedgerStore store(TestContext context) {
         LedgerStore store = new LedgerStore(context); stores.add(store); return store;
-    }
-
-    private void runDesktopConnection(Bundle result) throws Exception {
-        TestContext context = context();
-        LedgerStore phone = store(context);
-        LedgerStore.Trip travel = phone.joinTrip(arguments.getString("desktopInvite"), "b");
-        int expected = Integer.parseInt(arguments.getString("expectedEvents"));
-        check("desktop public invitation automatically configures Android connection", () -> {
-            require(travel.syncUrl.startsWith("https://") && travel.localPerson.equals("b"), "connection or role missing");
-            SyncResult sync = cloud(context, phone, "");
-            require(!sync.failed && phone.events(travel.id).size() == expected,
-                    "Android could not receive desktop records using only the invitation");
-        });
-        check("Android offline entry uploads to desktop through public HTTPS", () -> {
-            phone.add(travel.id, "expense", new JSONObject().put("payer", "b").put("currency", "CNY")
-                    .put("amount", 700).put("shareA", 5000).put("mode", "shared")
-                    .put("note", "Android offline entry via public invitation"));
-            require(phone.events(travel.id).size() == expected + 1, "offline entry was not stored");
-            SyncResult sync = cloud(context, phone, "");
-            require(!sync.failed, "Android entry could not upload to desktop");
-        });
-        check("Android connection and ledger survive reopening without manual server configuration", () -> {
-            phone.close();
-            LedgerStore reopened = store(context);
-            require(reopened.getTrip(travel.id).syncUrl.equals(travel.syncUrl), "connection was lost");
-            require(reopened.events(travel.id).size() == expected + 1, "ledger was lost");
-            SyncResult sync = cloud(context, reopened, "");
-            require(!sync.failed && reopened.events(travel.id).size() == expected + 1, "repeated sync duplicated records");
-            result.putString("phoneBundle", SyncCodec.bundle(reopened, reopened.getTrip(travel.id)).toString());
-        });
     }
 
     private void runDesktopPeer(Bundle result) throws Exception {
@@ -203,20 +172,6 @@ public final class SyncTestInstrumentation extends Instrumentation {
             verifySummary(first.summary(tripId), fixture.getJSONObject("expectedSummary"));
         });
         result.putString("androidBundle", SyncCodec.bundle(first, joined).toString());
-        check("invitation carries per-travel connection and updates retain records and identity", () -> {
-            String connected = new JSONObject(meta.toString()).put("inviterRole", "b")
-                    .put("syncUrl", "https://relay.example.test/").toString();
-            String code = Base64.encodeToString(connected.getBytes(StandardCharsets.UTF_8),
-                    Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
-            LedgerStore.Trip updated = first.joinTrip(code, "a");
-            require(updated.localPerson.equals("b") && updated.syncUrl.equals("https://relay.example.test"),
-                    "updating connection changed the identity");
-            require(first.events(tripId).size() == expectedCount, "updating connection changed records");
-            CloudSync cloud = new CloudSync(firstContext, first, (message, count) -> { });
-            try { require(cloud.effectiveEndpoint(updated).equals(updated.syncUrl), "invite connection was not selected"); }
-            finally { cloud.close(); }
-            result.putString("connectedInvite", first.inviteCode(updated));
-        });
         check("version one database upgrade removes old dual trips and their records", () -> {
             TestContext oldContext = context();
             SQLiteDatabase old = oldContext.openOrCreateDatabase("ride_ledger.db", Context.MODE_PRIVATE, null);
@@ -242,62 +197,6 @@ public final class SyncTestInstrumentation extends Instrumentation {
             require(rejected && other.events(tripId).isEmpty(), "wrong key imported records");
         });
 
-        TestContext aContext = context(), bContext = context();
-        LedgerStore a = store(aContext), b = store(bContext);
-        LedgerStore.Trip aTrip = a.joinTrip(invite, "a");
-        b.joinTrip(invite, "b");
-        JSONArray all = fixture.getJSONArray("events"), left = new JSONArray(), right = new JSONArray();
-        for (int i = 0; i < all.length(); i++) (i % 2 == 0 ? left : right).put(all.getJSONObject(i));
-        a.merge(tripId, left); b.merge(tripId, right);
-        String endpoint = fixture.getString("endpoint");
-        check("Android devices synchronize through separate HTTP paths", () -> {
-            cloud(aContext, a, endpoint + "/normal");
-            cloud(bContext, b, endpoint + "/normal");
-            cloud(aContext, a, endpoint + "/normal");
-            require(a.events(tripId).size() == expectedCount && b.events(tripId).size() == expectedCount,
-                    "native peers failed to converge");
-            verifySummary(a.summary(tripId), fixture.getJSONObject("expectedSummary"));
-            verifySummary(b.summary(tripId), fixture.getJSONObject("expectedSummary"));
-            require(a.getTrip(tripId).localPerson.equals("a") && b.getTrip(tripId).localPerson.equals("b"),
-                    "sync changed device identities");
-        });
-        check("lost HTTP acknowledgement retries without duplicating new records", () -> {
-            a.add(tripId, "expense", new JSONObject().put("payer", "a").put("currency", "CNY")
-                    .put("amount", 100).put("shareA", 5000).put("mode", "shared").put("note", "native lost ack"));
-            require(cloud(aContext, a, endpoint + "/lost-ack").failed, "lost response reported success");
-            cloud(bContext, b, endpoint + "/normal");
-            cloud(aContext, a, endpoint + "/normal");
-            require(a.events(tripId).size() == expectedCount + 1 && b.events(tripId).size() == expectedCount + 1,
-                    "retry lost or duplicated the new record");
-        });
-        check("503, refused connection and invalid response preserve offline records", () -> {
-            a.add(tripId, "expense", new JSONObject().put("payer", "a").put("currency", "USD")
-                    .put("amount", 200).put("shareA", 5000).put("mode", "shared").put("note", "native offline"));
-            for (String path : new String[]{"/503", "/truncated"})
-                require(cloud(aContext, a, endpoint + path).failed, "failed request reported success");
-            require(cloud(aContext, a, "http://127.0.0.1:1").failed, "refused connection reported success");
-            require(a.events(tripId).size() == expectedCount + 2, "offline record lost");
-            cloud(aContext, a, endpoint + "/normal"); cloud(bContext, b, endpoint + "/normal");
-            require(b.events(tripId).size() == expectedCount + 2, "offline record did not upload later");
-        });
-        check("corrupt cloud snapshot does not block healthy devices or hide partial progress", () -> {
-            TestContext cContext = context(); LedgerStore c = store(cContext);
-            c.joinTrip(invite, "b");
-            SyncResult sync = cloud(cContext, c, endpoint + "/corrupt");
-            require(sync.failed, "corrupt snapshot reported complete success");
-            require(c.events(tripId).size() == expectedCount + 2 && sync.added == expectedCount + 2,
-                    "corrupt snapshot blocked valid records or progress reporting");
-        });
-        check("per-travel connection takes precedence over an unrelated global endpoint", () -> {
-            TestContext connectedContext = context(); LedgerStore connected = store(connectedContext);
-            connected.joinTrip(invite, "b");
-            connected.setTripSyncUrl(tripId, endpoint + "/normal");
-            SyncResult sync = cloud(connectedContext, connected, "http://127.0.0.1:1");
-            require(!sync.failed && connected.events(tripId).size() == expectedCount + 2,
-                    "global endpoint overrode the travel's connection");
-        });
-        result.putString("androidCloudBundle", SyncCodec.bundle(a, aTrip).toString());
-
         check("fragmented LAN TCP frames and duplicate replay", () -> {
             LedgerStore local = store(context()); local.joinTrip(invite, "a");
             SyncResult sync = lan(local, fixture, "lanPort");
@@ -306,6 +205,9 @@ public final class SyncTestInstrumentation extends Instrumentation {
             verifySummary(local.summary(tripId), fixture.getJSONObject("expectedSummary"));
         });
         check("truncated LAN frame retains local data and retries", () -> {
+            JSONArray left = new JSONArray();
+            JSONArray all = fixture.getJSONArray("events");
+            for (int i = 0; i < all.length(); i += 2) left.put(all.getJSONObject(i));
             LedgerStore local = store(context()); local.joinTrip(invite, "a"); local.merge(tripId, left);
             require(lan(local, fixture, "lanDropPort").failed, "truncated frame reported success");
             require(local.events(tripId).size() == left.length(), "partial frame changed records");
@@ -319,8 +221,21 @@ public final class SyncTestInstrumentation extends Instrumentation {
                     "corrupt LAN bundle blocked healthy records or partial progress");
         });
         PeerProtocolChecks.run(getTargetContext(), fixture, (name, action) -> check(name, action::run));
+        check("ledger totals reject an overflowing event without applying a partial debit", () -> {
+            LedgerStore.Event cashA = new LedgerStore.Event("a", "trip", "opening", 1,
+                    new JSONObject().put("person", "a").put("currency", "CNY").put("amount", 10L));
+            LedgerStore.Event cashB = new LedgerStore.Event("b", "trip", "opening", 2,
+                    new JSONObject().put("person", "b").put("currency", "CNY").put("amount", Long.MAX_VALUE));
+            LedgerStore.Event transfer = new LedgerStore.Event("c", "trip", "transfer", 3,
+                    new JSONObject().put("from", "a").put("currency", "CNY").put("amount", 1L));
+            LedgerStore.Summary totals = LedgerTotals.calculate(false, java.util.Arrays.asList(cashA, cashB, transfer));
+            require(totals.incomplete && totals.cashA.get("CNY") == 10L &&
+                    totals.cashB.get("CNY") == Long.MAX_VALUE && totals.visible.contains(transfer),
+                    "overflowing event partly changed the balances or disappeared");
+        });
         check("UI: one team creation entry and no sync coordinator on an empty ledger", () -> PeerUiChecks.run(this));
         if (android.os.Build.VERSION.SDK_INT >= 29) {
+            LedgerArchitectureChecks.run(store(context()), (name, action) -> check(name, action::run));
             check("mixed version three database upgrade keeps team records and enrollment", () -> {
                 TestContext mixed = context();
                 LedgerStore before = store(mixed);
@@ -328,16 +243,60 @@ public final class SyncTestInstrumentation extends Instrumentation {
                 before.add(oldTrip.id, "opening", new JSONObject().put("person", "a").put("currency", "CNY").put("amount", 123));
                 LedgerStore.Trip team = before.createTeam("Team", java.util.Arrays.asList("A", "B"));
                 before.add(team.id, "opening", new JSONObject().put("person", "m1").put("currency", "CNY").put("amount", 456));
+                before.getWritableDatabase().execSQL("UPDATE trips SET secret=? WHERE id=?", new Object[]{team.secret, team.id});
                 before.getWritableDatabase().setVersion(3);
                 before.close();
                 LedgerStore after = store(mixed);
                 require(after.getTrip(oldTrip.id) == null && after.events(oldTrip.id).isEmpty(), "old trip was not removed");
                 LedgerStore.Trip retained = after.getTrip(team.id);
-                require(retained != null && after.teamReady(retained) &&
+                require(retained != null && retained.secret.equals(team.secret) && after.teamReady(retained) &&
                         after.summary(team.id).teamCash.get("m1").get("CNY") == 456L, "team cash or enrollment was lost");
+                try (android.database.Cursor row = after.getReadableDatabase().rawQuery(
+                        "SELECT secret FROM trips WHERE id=?", new String[]{team.id})) {
+                    require(row.moveToFirst() && row.getString(0).startsWith("keystore:v1:") &&
+                            !row.getString(0).contains(team.secret), "legacy team secret remained in cleartext");
+                }
+            });
+            check("background trip rotation survives removed and reordered trips", () -> {
+                LedgerStore.Trip rotationA = new LedgerStore.Trip("a", "", "", "", "", "");
+                LedgerStore.Trip rotationB = new LedgerStore.Trip("b", "", "", "", "", "");
+                LedgerStore.Trip rotationC = new LedgerStore.Trip("c", "", "", "", "", "");
+                java.util.List<LedgerStore.Trip> trips = java.util.Arrays.asList(rotationC, rotationA, rotationB);
+                require(SyncJobService.nextTrip(trips, "") == rotationA, "initial position incorrect");
+                require(SyncJobService.nextTrip(trips, rotationA.id) == rotationB, "first attempt starved next trip");
+                require(SyncJobService.nextTrip(java.util.Arrays.asList(rotationC, rotationA), rotationB.id) == rotationC,
+                        "removed cursor skipped next trip");
+                require(SyncJobService.nextTrip(trips, rotationC.id) == rotationA, "queue did not wrap");
             });
             TeamChecks.run(getTargetContext(), fixture, (name, action) -> check(name, action::run));
+            check("review groups currencies by payment direction", () -> {
+                LedgerStore.Trip trip = store(context()).createTeam("结算检查",
+                        java.util.Arrays.asList("甲", "乙", "丙"));
+                LedgerStore.Summary summary = new LedgerStore.Summary();
+                for (int i = 0; i < trip.people(); i++) {
+                    Map<String, Long> balance = new java.util.HashMap<>();
+                    balance.put("TJS", i == 0 ? 61200L : -30600L);
+                    balance.put("USD", i == 0 ? 5732L : -2866L);
+                    summary.teamNet.put(trip.member(i), balance);
+                }
+                // A payment in the opposite direction belongs to a separate group.
+                summary.teamNet.get(trip.member(0)).put("EUR", -200L);
+                summary.teamNet.get(trip.member(1)).put("EUR", 200L);
+                List<LedgerReview.Debt> debts = new LedgerReview(trip, summary).settlement;
+                require(debts.size() == 3 && debts.get(0).payer.equals("甲") && debts.get(0).recipient.equals("乙")
+                        && debts.get(0).amounts.equals(java.util.Collections.singletonList("2.00 EUR")),
+                        "opposite directions were combined");
+                for (int i = 1; i < 3; i++) {
+                    LedgerReview.Debt debt = debts.get(i);
+                    require(debt.payer.equals(trip.nameOf(trip.member(i))) && debt.recipient.equals("甲")
+                            && debt.amounts.equals(java.util.Arrays.asList("306.00 TJS", "28.66 USD")),
+                            "currencies or members were lost during grouping");
+                }
+            });
             check("two-person team UI: quick entry, review and sync use the same team flow", () -> PeerUiChecks.runTeam(this));
+            check("custom split UI: payer, individual shares and settlement agree", () -> PeerUiChecks.runCustomSplit(this));
+            check("record deletion: full-list checkboxes, confirmation, offline propagation and replay", () -> PeerUiChecks.runRecordDeletion(this));
+            check("review badge: verified channels, Wi-Fi failure falls back to Bluetooth on tap, and recent contact expires", () -> PeerUiChecks.runRosterRefresh(this));
             check("open team UI: organizer roster and validation are inline", () -> PeerUiChecks.runTeamSetup(this));
             check("open team UI: join details, connecting and delayed success are inline", () -> PeerUiChecks.runTeamJoin(this));
         }
@@ -356,21 +315,6 @@ public final class SyncTestInstrumentation extends Instrumentation {
     private static final class SyncResult {
         final boolean failed; final int added;
         SyncResult(boolean failed, int added) { this.failed = failed; this.added = added; }
-    }
-    private SyncResult cloud(TestContext context, LedgerStore store, String endpoint) throws Exception {
-        CountDownLatch completed = new CountDownLatch(1);
-        AtomicReference<String> status = new AtomicReference<>("");
-        AtomicInteger added = new AtomicInteger();
-        CloudSync sync = new CloudSync(context, store, (message, count) -> {
-            if (message.startsWith("云同步完成") || message.startsWith("云同步待重试")) {
-                status.set(message); added.set(count); completed.countDown();
-            }
-        });
-        try {
-            sync.setEndpoint(endpoint); sync.start();
-            require(completed.await(20, TimeUnit.SECONDS), "native cloud request did not finish");
-            return new SyncResult(status.get().startsWith("云同步待重试"), added.get());
-        } finally { sync.close(); }
     }
     private SyncResult lan(LedgerStore store, JSONObject fixture, String portKey) throws Exception {
         CountDownLatch completed = new CountDownLatch(1);

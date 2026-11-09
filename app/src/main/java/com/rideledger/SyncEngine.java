@@ -6,6 +6,7 @@ import android.os.Handler;
 import android.os.SystemClock;
 
 import java.util.List;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -15,13 +16,23 @@ final class SyncEngine {
     enum Phase { SYNCING, COMPLETE, PENDING }
 
     static final class Status {
-        static final Status EMPTY = new Status(Phase.COMPLETE, 0);
+        static final Status EMPTY = new Status(Phase.COMPLETE, 0, -1);
         final Phase phase;
         final int pending;
+        final long confirmedThrough;
+        final List<PeerPresence.Link> links;
+        final boolean searching;
 
-        Status(Phase phase, int pending) {
+        Status(Phase phase, int pending, long confirmedThrough) {
+            this(phase, pending, confirmedThrough, Collections.emptyList(), false);
+        }
+
+        Status(Phase phase, int pending, long confirmedThrough, List<PeerPresence.Link> links, boolean searching) {
             this.phase = phase;
             this.pending = pending;
+            this.confirmedThrough = confirmedThrough;
+            this.links = Collections.unmodifiableList(links);
+            this.searching = searching;
         }
 
         String label() {
@@ -41,6 +52,8 @@ final class SyncEngine {
     private final Handler main;
     private final PeerRoutePolicy routes = new PeerRoutePolicy(SystemClock::elapsedRealtime);
     private final Map<String, PeerRoutePolicy.Channel> lastChannel = new HashMap<>();
+    private final PeerPresence presence = new PeerPresence();
+    private long searchUntil;
     private final Dial dial;
     private final Consumer<Status> listener;
     private final Runnable dispatch = this::dispatch;
@@ -50,7 +63,7 @@ final class SyncEngine {
     private int incoming;
     private boolean scheduled;
     private boolean pendingDirty = true;
-    private volatile Status status = new Status(Phase.PENDING, 0);
+    private volatile Status status = new Status(Phase.PENDING, 0, -1);
 
     SyncEngine(Context context, LedgerStore store, LedgerStore.Trip trip, String device,
                Handler main, Dial dial, Consumer<Status> listener) {
@@ -62,7 +75,7 @@ final class SyncEngine {
         this.dial = dial;
         this.listener = listener;
         checkpoints = context.getSharedPreferences("peer_checkpoints", Context.MODE_PRIVATE);
-        prefix = trip.id + "/" + trip.team.fingerprint + "/" + device + "/";
+        prefix = checkpointPrefix(trip, device);
     }
 
     void start() {
@@ -83,11 +96,13 @@ final class SyncEngine {
 
     void lost(String key) {
         routes.remove(key);
+        presence.lost(key);
         schedule();
     }
 
     void lost(PeerRoutePolicy.Channel channel) {
         routes.removeChannel(channel);
+        presence.lost(channel);
         schedule();
     }
 
@@ -102,27 +117,55 @@ final class SyncEngine {
         schedule();
     }
 
+    void reconnect() {
+        searchUntil = SystemClock.elapsedRealtime() + 5000;
+        request();
+    }
+
+    void authenticated(PeerConnection session, String peer, PeerRoutePolicy.Channel channel, String route) {
+        try {
+            org.json.JSONObject seat = store.seat(trip.id, peer);
+            if (seat == null || !trip.team.fingerprint.equals(seat.optString("team"))) return;
+            String member = seat.optString("member");
+            if (trip.indexOf(member) < 0 || device.equals(peer)) return;
+            presence.authenticated(session, member, channel, route);
+            searchUntil = 0;
+            schedule();
+        } catch (org.json.JSONException | RuntimeException error) {
+            SyncLog.write(context, SyncLog.Event.QUEUE_READ, error);
+        }
+    }
+
+    /** Null means a failed session. An empty route denotes a verified inbound-only peer. */
+    void sessionFinished(PeerConnection session, String verifiedRoute) {
+        presence.finished(session, verifiedRoute, SystemClock.elapsedRealtime());
+        schedule();
+    }
+
     void complete(PeerRoutePolicy.Endpoint endpoint, PeerRoutePolicy.Channel channel,
                   PeerProtocol.Result result, long captured) {
         if (endpoint != null) routes.syncSuccess(endpoint, captured);
         String peer = TeamProtocol.routeId(trip.team, result.remoteId);
         routes.received(peer, channel, captured);
         PeerRoutePolicy.Channel previous = lastChannel.put(peer, channel);
-        if (previous != null && previous != channel) SyncLog.write(context, "CHANNEL_SWITCH", previous.name() + ">" + channel.name());
+        if (previous != null && previous != channel) SyncLog.write(context, SyncLog.Event.CHANNEL_SWITCH, previous.name() + ">" + channel.name());
         LedgerStore.SyncPoint point = result.syncPoint;
         if (result.complete && result.authenticated && result.durable && point != null) {
             String key = prefix + result.remoteId;
             try {
-                if (point.row > confirmedRow(key))
+                if (point.row > confirmedRow(store, checkpoints, trip.id, key))
                     checkpoints.edit().putLong(key, point.row).putString(key + "/event", point.event).apply();
-            } catch (RuntimeException error) { SyncLog.write(context, "CHECKPOINT_SAVE", error); }
+            } catch (RuntimeException error) { SyncLog.write(context, SyncLog.Event.CHECKPOINT_SAVE, error); }
             pendingDirty = true;
         }
         schedule();
     }
 
     void failed(PeerRoutePolicy.Endpoint endpoint) {
-        if (endpoint != null) routes.syncFailure(endpoint);
+        if (endpoint != null) {
+            routes.syncFailure(endpoint);
+            presence.lost(endpoint.key);
+        }
         schedule();
     }
 
@@ -139,35 +182,54 @@ final class SyncEngine {
         List<PeerRoutePolicy.Endpoint> ready = routes.readyForRevision(revision, "");
         for (PeerRoutePolicy.Endpoint endpoint : ready) dial.start(endpoint, revision);
         publish();
-        long next = routes.nextSyncRetry(revision);
+        long next = Math.min(routes.nextSyncRetry(revision), presence.nextExpiry());
+        if (status.searching) next = Math.min(next, searchUntil);
         if (!scheduled && next != Long.MAX_VALUE)
             main.postDelayed(retry, Math.max(1, next - SystemClock.elapsedRealtime()));
     }
 
     private void publish() {
         int count = status.pending;
+        long confirmed = status.confirmedThrough;
         if (pendingDirty) try {
-            count = pendingCount();
+            long through = confirmedThrough(store, checkpoints, trip, device);
+            count = store.countAfter(trip.id, through);
+            confirmed = through;
             pendingDirty = false;
-        } catch (RuntimeException error) { SyncLog.write(context, "QUEUE_READ", error); }
+        } catch (RuntimeException error) { SyncLog.write(context, SyncLog.Event.QUEUE_READ, error); }
         Phase phase = incoming + routes.syncing() > 0 ? Phase.SYNCING : count > 0 ? Phase.PENDING : Phase.COMPLETE;
-        if (status.phase == phase && status.pending == count) return;
-        status = new Status(phase, count);
+        long now = SystemClock.elapsedRealtime();
+        List<PeerPresence.Link> links = presence.links(now);
+        boolean searching = searchUntil > now;
+        if (status.phase == phase && status.pending == count && status.confirmedThrough == confirmed &&
+                status.searching == searching && status.links.equals(links)) return;
+        status = new Status(phase, count, confirmed, links, searching);
         listener.accept(status);
     }
 
-    private long confirmedRow(String key) {
-        return store.confirmedRow(trip.id, checkpoints.getLong(key, 0), checkpoints.getString(key + "/event", null));
+    private static String checkpointPrefix(LedgerStore.Trip trip, String device) {
+        return trip.id + "/" + trip.team.fingerprint + "/" + device + "/";
     }
 
-    private int pendingCount() {
+    private static long confirmedRow(LedgerStore store, SharedPreferences checkpoints, String tripId, String key) {
+        return store.confirmedRow(tripId, checkpoints.getLong(key, 0), checkpoints.getString(key + "/event", null));
+    }
+
+    static long confirmedThrough(Context context, LedgerStore store, LedgerStore.Trip trip) {
+        if (trip.team == null || trip.people() == 1) return Long.MAX_VALUE;
+        return confirmedThrough(store, context.getSharedPreferences("peer_checkpoints", Context.MODE_PRIVATE),
+                trip, PeerIdentity.deviceId(context));
+    }
+
+    private static long confirmedThrough(LedgerStore store, SharedPreferences checkpoints,
+                                         LedgerStore.Trip trip, String device) {
         List<String> peers = store.teammateDevices(trip, device);
         // Until the roster is complete, unseen teammates have not confirmed any local records.
-        if (peers.size() + 1 < trip.people()) return store.countAfter(trip.id, 0);
-        if (peers.isEmpty()) return 0;
+        if (peers.size() + 1 < trip.people()) return 0;
+        String prefix = checkpointPrefix(trip, device);
         long confirmed = Long.MAX_VALUE;
-        for (String peer : peers) confirmed = Math.min(confirmed, confirmedRow(prefix + peer));
-        return store.countAfter(trip.id, confirmed);
+        for (String peer : peers) confirmed = Math.min(confirmed, confirmedRow(store, checkpoints, trip.id, prefix + peer));
+        return confirmed;
     }
 
     void stop() {
@@ -177,6 +239,8 @@ final class SyncEngine {
         main.removeCallbacks(retry);
         routes.clear();
         lastChannel.clear();
+        presence.clear();
+        searchUntil = 0;
         incoming = 0;
     }
 }

@@ -49,6 +49,7 @@ final class PeerConnection implements Closeable {
             deadline = scheduler.schedule(() -> checkDeadline(scheduler, idleTimeout, totalDeadline, generation), delay, TimeUnit.MILLISECONDS);
     }
     PeerWire wire() { return new PeerWire(input, output, () -> movedAt = android.os.SystemClock.elapsedRealtime()); }
+    long lastProgress() { return movedAt; }
     @Override public synchronized void close() {
         if (closed) return; closed = true;
         if (deadline != null) deadline.cancel(false);

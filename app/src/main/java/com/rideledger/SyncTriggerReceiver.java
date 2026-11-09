@@ -27,7 +27,7 @@ final class SyncTriggerReceiver extends BroadcastReceiver {
             if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
             else context.registerReceiver(receiver, filter);
             installed = true;
-        } catch (RuntimeException error) { SyncLog.write(context, "RADIO_RECEIVER", error); }
+        } catch (RuntimeException error) { SyncLog.write(context, SyncLog.Event.RADIO_RECEIVER, error); }
     }
 
     static boolean hotspotEnabled() { return hotspot; }

@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -24,26 +25,22 @@ import java.util.UUID;
 
 final class LedgerStore extends SQLiteOpenHelper {
     // Leaves room for a full 10,000-entry travel to accumulate safely in minor units.
-    private static final long MAX_TEAM_AMOUNT = Long.MAX_VALUE / 10000;
+    static final long MAX_TEAM_AMOUNT = Long.MAX_VALUE / 10000;
     static final class Trip {
-        final String id, name, personA, personB, secret, localPerson, syncUrl;
+        final String id, name, personA, personB, secret, localPerson;
         final Team team;
         final String joinName;
         final Map<String, String> seatNames;
 
         Trip(String id, String name, String personA, String personB, String secret, String localPerson) {
-            this(id, name, personA, personB, secret, localPerson, "");
+            this(id, name, personA, personB, secret, localPerson, null);
         }
 
-        Trip(String id, String name, String personA, String personB, String secret, String localPerson, String syncUrl) {
-            this(id, name, personA, personB, secret, localPerson, syncUrl, null);
+        Trip(String id, String name, String personA, String personB, String secret, String localPerson, Team team) {
+            this(id, name, personA, personB, secret, localPerson, team, "", Collections.emptyMap());
         }
 
-        Trip(String id, String name, String personA, String personB, String secret, String localPerson, String syncUrl, Team team) {
-            this(id, name, personA, personB, secret, localPerson, syncUrl, team, "", Collections.emptyMap());
-        }
-
-        Trip(String id, String name, String personA, String personB, String secret, String localPerson, String syncUrl,
+        Trip(String id, String name, String personA, String personB, String secret, String localPerson,
              Team team, String joinName, Map<String, String> seatNames) {
             this.id = id;
             this.name = name;
@@ -51,14 +48,13 @@ final class LedgerStore extends SQLiteOpenHelper {
             this.personB = personB;
             this.secret = secret;
             this.localPerson = localPerson;
-            this.syncUrl = syncUrl;
             this.team = team;
             this.joinName = joinName;
             this.seatNames = seatNames;
         }
 
         int people() { return team == null ? 2 : team.size(); }
-        Trip withKey(String key) { return new Trip(id, name, personA, personB, key, localPerson, syncUrl, team, joinName, seatNames); }
+        Trip withKey(String key) { return new Trip(id, name, personA, personB, key, localPerson, team, joinName, seatNames); }
         String member(int index) { return team == null ? (index == 0 ? "a" : "b") : team.member(index); }
         int indexOf(String person) { return team == null ? ("a".equals(person) ? 0 : "b".equals(person) ? 1 : -1) : team.index(person); }
         String nameOf(String person) {
@@ -70,15 +66,20 @@ final class LedgerStore extends SQLiteOpenHelper {
 
     static final class Event {
         final String id, tripId, kind;
-        final long at;
+        final long at, localRow;
         final JSONObject data;
 
         Event(String id, String tripId, String kind, long at, JSONObject data) {
+            this(id, tripId, kind, at, data, 0);
+        }
+
+        private Event(String id, String tripId, String kind, long at, JSONObject data, long localRow) {
             this.id = id;
             this.tripId = tripId;
             this.kind = kind;
             this.at = at;
             this.data = data;
+            this.localRow = localRow;
         }
 
         JSONObject json() throws JSONException {
@@ -93,6 +94,7 @@ final class LedgerStore extends SQLiteOpenHelper {
     }
 
     static final class Summary {
+        boolean incomplete;
         final Map<String, Long> cashA = new HashMap<>();
         final Map<String, Long> cashB = new HashMap<>();
         final Map<String, Long> spent = new HashMap<>();
@@ -103,18 +105,24 @@ final class LedgerStore extends SQLiteOpenHelper {
         final List<Event> visible = new ArrayList<>();
     }
 
-    private static final String TRIP_COLUMNS = "id,name,person_a,person_b,secret,local_person,sync_url,team,join_name";
+    private static final String TRIP_COLUMNS = "id,name,person_a,person_b,secret,local_person,team,join_name";
+    private static LedgerStore applicationStore;
     private final Context context;
 
+    static synchronized LedgerStore application(Context context) {
+        if (applicationStore == null) applicationStore = new LedgerStore(context.getApplicationContext());
+        return applicationStore;
+    }
+
     LedgerStore(Context context) {
-        super(context, "ride_ledger.db", null, 5);
+        super(context, "ride_ledger.db", null, 6);
         this.context = context;
     }
 
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE trips (id TEXT PRIMARY KEY, name TEXT NOT NULL, person_a TEXT NOT NULL, " +
                 "person_b TEXT NOT NULL, secret TEXT NOT NULL, local_person TEXT NOT NULL, created_at INTEGER NOT NULL, " +
-                "sync_url TEXT NOT NULL DEFAULT '', team TEXT NOT NULL DEFAULT '', join_name TEXT NOT NULL DEFAULT '')");
+                "team TEXT NOT NULL DEFAULT '', join_name TEXT NOT NULL DEFAULT '')");
         db.execSQL("CREATE TABLE events (id TEXT PRIMARY KEY, trip_id TEXT NOT NULL, kind TEXT NOT NULL, " +
                 "at INTEGER NOT NULL, data TEXT NOT NULL)");
         db.execSQL("CREATE INDEX events_trip ON events(trip_id, at, id)");
@@ -122,7 +130,6 @@ final class LedgerStore extends SQLiteOpenHelper {
     }
 
     @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        if (oldVersion < 2) db.execSQL("ALTER TABLE trips ADD COLUMN sync_url TEXT NOT NULL DEFAULT ''");
         if (oldVersion < 3) {
             db.execSQL("ALTER TABLE trips ADD COLUMN team TEXT NOT NULL DEFAULT ''");
             createSeats(db);
@@ -137,6 +144,21 @@ final class LedgerStore extends SQLiteOpenHelper {
                 while (columns.moveToNext()) present |= "join_name".equals(columns.getString(1));
             }
             if (!present) db.execSQL("ALTER TABLE trips ADD COLUMN join_name TEXT NOT NULL DEFAULT ''");
+        }
+        if (oldVersion < 6) {
+            try (Cursor pragma = db.rawQuery("PRAGMA secure_delete=ON", null)) { pragma.moveToFirst(); }
+            Map<String, String> wrapped = new HashMap<>();
+            try (Cursor rows = db.rawQuery("SELECT id,secret FROM trips WHERE team<>''", null)) {
+                while (rows.moveToNext()) {
+                    String id = rows.getString(0);
+                    wrapped.put(id, TripSecrets.wrap(id, rows.getString(1)));
+                }
+            }
+            for (Map.Entry<String, String> entry : wrapped.entrySet()) {
+                ContentValues values = new ContentValues();
+                values.put("secret", entry.getValue());
+                db.update("trips", values, "id=?", new String[]{entry.getKey()});
+            }
         }
     }
 
@@ -163,7 +185,7 @@ final class LedgerStore extends SQLiteOpenHelper {
                 Team.open(id, identity.deviceId, identity.key, members.get(0), capacity);
         byte[] key = new byte[32];
         new SecureRandom().nextBytes(key);
-        Trip trip = new Trip(id, name, "", "", Team.encode(key), team.member(0), "", team);
+        Trip trip = new Trip(id, name, "", "", Team.encode(key), team.member(0), team);
         JSONObject grant = team.grant(identity, identity.deviceId, identity.key, trip.localPerson, 0, team.names.get(0));
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
@@ -203,13 +225,6 @@ final class LedgerStore extends SQLiteOpenHelper {
         final long row;
         final String event;
         SyncPoint(long row, String event) { this.row = row; this.event = event; }
-    }
-
-    synchronized SyncPoint syncPoint(String tripId) {
-        try (Cursor c = getReadableDatabase().rawQuery(
-                "SELECT rowid,id FROM events WHERE trip_id=? ORDER BY rowid DESC LIMIT 1", new String[]{tripId})) {
-            return c.moveToFirst() ? new SyncPoint(c.getLong(0), c.getString(1)) : new SyncPoint(0, "");
-        }
     }
 
     synchronized long confirmedRow(String tripId, long row, String event) {
@@ -375,7 +390,7 @@ final class LedgerStore extends SQLiteOpenHelper {
         if (candidate.indexOf(localPerson) < 0)
             throw new IllegalArgumentException("请选择这台设备的使用者");
         Trip trip = new Trip(candidate.id, candidate.name, candidate.personA, candidate.personB,
-                candidate.secret, localPerson, candidate.syncUrl, candidate.team);
+                candidate.secret, localPerson, candidate.team);
         if (trip.team != null) {
             String localDevice = PeerIdentity.deviceId(context);
             if (trip.team.member(0).equals(localPerson) && !trip.team.issuer.equals(localDevice))
@@ -386,16 +401,8 @@ final class LedgerStore extends SQLiteOpenHelper {
             if (previous != null && !trip.team.fingerprint.equals(previous.getString("team")))
                 throw new IllegalArgumentException("邀请码与本机的登记凭证不一致");
         }
-        Trip existing = getTrip(trip.id);
-        if (existing != null) {
-            if (candidate.team != null || existing.team != null) throw new IllegalArgumentException("这个小队已在本机");
-            if (candidate.syncUrl.isEmpty()) throw new IllegalArgumentException("这个旅行已加入");
-            if (!java.util.Arrays.equals(Base64.decode(existing.secret, Base64.URL_SAFE | Base64.NO_WRAP),
-                    Base64.decode(candidate.secret, Base64.URL_SAFE | Base64.NO_WRAP)))
-                throw new IllegalArgumentException("邀请码与已有旅行的密钥不一致");
-            setTripSyncUrl(trip.id, candidate.syncUrl);
-            return getTrip(trip.id);
-        }
+        if (getTrip(trip.id) != null)
+            throw new IllegalArgumentException(trip.team == null ? "这个旅行已加入" : "这个小队已在本机");
         saveTrip(trip);
         return trip;
     }
@@ -425,7 +432,7 @@ final class LedgerStore extends SQLiteOpenHelper {
                 throw new IllegalArgumentException("本机已有这个小队的登记凭证，请使用原姓名");
             member = previous.getString("member");
         }
-        saveTrip(new Trip(candidate.id, candidate.name, "", "", candidate.secret, member, "",
+        saveTrip(new Trip(candidate.id, candidate.name, "", "", candidate.secret, member,
                 candidate.team, name, Collections.emptyMap()));
         return getTrip(candidate.id);
     }
@@ -443,7 +450,7 @@ final class LedgerStore extends SQLiteOpenHelper {
             String name = value.getString("name").trim(), secret = value.getString("secret");
             if (name.isEmpty() || name.length() > 80 || Team.decode(secret).length != 32)
                 throw new IllegalArgumentException("小队邀请码无效");
-            return new Trip(team.tripId, name, "", "", secret, team.member(1), "", team);
+            return new Trip(team.tripId, name, "", "", secret, team.member(1), team);
         }
         byte[] bytes = Base64.decode(clean, Base64.URL_SAFE | Base64.NO_WRAP);
         JSONObject json = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
@@ -453,14 +460,9 @@ final class LedgerStore extends SQLiteOpenHelper {
         String inviterRole = json.optString("inviterRole", "a");
         if (!"a".equals(inviterRole) && !"b".equals(inviterRole))
             throw new IllegalArgumentException("邀请码身份无效");
-        String syncUrl = "";
-        if (json.has("syncUrl")) {
-            if (!(json.opt("syncUrl") instanceof String)) throw new IllegalArgumentException("邀请码连接地址无效");
-            syncUrl = SyncEndpoint.normalize(json.getString("syncUrl"), false);
-        }
         Trip trip = new Trip(json.getString("id"), json.getString("name"), json.getString("personA"),
                 json.getString("personB"), json.getString("secret"),
-                "a".equals(inviterRole) ? "b" : "a", syncUrl);
+                "a".equals(inviterRole) ? "b" : "a");
         if (!trip.id.matches("[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}") ||
                 trip.name.trim().isEmpty() ||
                 trip.personA.trim().isEmpty() || trip.personB.trim().isEmpty() ||
@@ -480,8 +482,6 @@ final class LedgerStore extends SQLiteOpenHelper {
         JSONObject json = new JSONObject().put("id", trip.id).put("name", trip.name)
                 .put("personA", trip.personA).put("personB", trip.personB)
                 .put("secret", trip.secret).put("inviterRole", trip.localPerson);
-        if (trip.syncUrl != null && trip.syncUrl.startsWith("https://"))
-            json.put("syncUrl", SyncEndpoint.normalize(trip.syncUrl, false));
         return Base64.encodeToString(json.toString().getBytes(StandardCharsets.UTF_8),
                 Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
     }
@@ -492,10 +492,9 @@ final class LedgerStore extends SQLiteOpenHelper {
         values.put("name", trip.name);
         values.put("person_a", trip.personA);
         values.put("person_b", trip.personB);
-        values.put("secret", trip.secret);
+        values.put("secret", trip.team == null ? trip.secret : TripSecrets.wrap(trip.id, trip.secret));
         values.put("local_person", trip.localPerson);
         values.put("join_name", trip.joinName);
-        values.put("sync_url", trip.syncUrl);
         values.put("created_at", System.currentTimeMillis());
         try { if (trip.team != null) values.put("team", trip.team.json().toString()); }
         catch (JSONException e) { throw new IllegalArgumentException("无法保存小队资料", e); }
@@ -529,20 +528,9 @@ final class LedgerStore extends SQLiteOpenHelper {
         } finally { db.endTransaction(); }
     }
 
-    synchronized void setTripSyncUrl(String id, String raw) {
-        Trip trip = getTrip(id);
-        if (trip == null) throw new IllegalArgumentException("旅行不存在");
-        if (trip.team != null) throw new IllegalArgumentException("小队旅行通过附近连接同步");
-        String syncUrl = SyncEndpoint.normalize(raw, true);
-        ContentValues values = new ContentValues();
-        values.put("sync_url", syncUrl);
-        if (getWritableDatabase().update("trips", values, "id=?", new String[]{id}) == 0)
-            throw new IllegalArgumentException("旅行不存在");
-    }
-
     private Trip readTrip(Cursor c) {
         try {
-            Team team = c.getString(7).isEmpty() ? null : Team.parse(new JSONObject(c.getString(7)));
+            Team team = c.getString(6).isEmpty() ? null : Team.parse(new JSONObject(c.getString(6)));
             Map<String, String> names = new HashMap<>();
             if (team != null) {
                 JSONArray seats = teamSeats(team.tripId);
@@ -553,8 +541,10 @@ final class LedgerStore extends SQLiteOpenHelper {
                     if (index >= 0) names.put(member, team.openSeats ? seat.getString("name") : team.names.get(index));
                 }
             }
-            return new Trip(c.getString(0), c.getString(1), c.getString(2), c.getString(3), c.getString(4), c.getString(5),
-                    team == null ? c.getString(6) : "", team, c.getString(8), names);
+            String id = c.getString(0);
+            String secret = team == null ? c.getString(4) : TripSecrets.unwrap(id, c.getString(4));
+            return new Trip(id, c.getString(1), c.getString(2), c.getString(3), secret, c.getString(5),
+                    team, c.getString(7), names);
         } catch (JSONException e) { throw new IllegalStateException("本机小队资料损坏", e); }
     }
 
@@ -562,9 +552,10 @@ final class LedgerStore extends SQLiteOpenHelper {
         Event event = new Event(UUID.randomUUID().toString(), tripId, kind, System.currentTimeMillis(), data);
         Trip trip = getTrip(tripId);
         if (trip == null) throw new IllegalArgumentException("旅行不存在");
-        if (trip.team != null && (!teamReady(trip) || !validEvent(trip, event)))
+        if (trip.team != null && (!teamReady(trip) || !LedgerRules.validEvent(trip, event)))
             throw new IllegalArgumentException("请完成首次设备登记并检查流水内容");
-        insertEvent(getWritableDatabase(), event);
+        if (insertEvent(getWritableDatabase(), event) == -1)
+            throw new IllegalStateException("流水未保存，请重试");
         return event;
     }
 
@@ -600,10 +591,8 @@ final class LedgerStore extends SQLiteOpenHelper {
                     if (strict) throw new JSONException("流水旅行不一致");
                     continue;
                 }
-                normalizeCurrency(event.data, "currency");
-                normalizeCurrency(event.data, "fromCurrency");
-                normalizeCurrency(event.data, "toCurrency");
-                if (!validEvent(trip, event) || (strict && !PeerIdentity.valid(event.id))) {
+                LedgerRules.normalizeCurrencies(event.data);
+                if (!LedgerRules.validEvent(trip, event) || (strict && !PeerIdentity.valid(event.id))) {
                     if (strict) throw new JSONException("流水格式无效");
                     continue;
                 }
@@ -611,199 +600,124 @@ final class LedgerStore extends SQLiteOpenHelper {
                     try (Cursor existing = db.rawQuery("SELECT trip_id,kind,at,data FROM events WHERE id=?", new String[]{event.id})) {
                         if (existing.moveToFirst()) {
                             JSONObject data = new JSONObject(existing.getString(3));
-                            normalizeCurrency(data, "currency"); normalizeCurrency(data, "fromCurrency"); normalizeCurrency(data, "toCurrency");
+                            LedgerRules.normalizeCurrencies(data);
                             if (!tripId.equals(existing.getString(0)) || !event.kind.equals(existing.getString(1)) ||
                                     event.at != existing.getLong(2) || !PeerWire.canonical(event.data).equals(PeerWire.canonical(data)))
                                 throw new JSONException("发现同 ID 的冲突流水，已保留原账目");
+                            continue;
                         }
                     } catch (JSONException e) { throw e; }
                     catch (Exception e) { throw new JSONException("流水校验失败"); }
                 }
                 if (insertEvent(db, event) != -1) inserted++;
+                else if (strict) throw new JSONException("流水批次未完整保存");
             }
             db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
         return inserted;
     }
 
-    private void normalizeCurrency(JSONObject data, String field) throws JSONException {
-        if ("RMB".equalsIgnoreCase(data.optString(field))) data.put(field, "CNY");
-    }
-
-    private boolean validEvent(Trip trip, Event event) {
-        try {
-            JSONObject d = event.data;
-            switch (event.kind) {
-                case "opening": case "topup":
-                    return trip.indexOf(d.getString("person")) >= 0 && currency(d.getString("currency")) && validAmount(trip, d, "amount");
-                case "expense":
-                    if (trip.team != null) return validTeamExpense(trip, d);
-                    int share = d.getInt("shareA");
-                    return person(d.getString("payer")) && currency(d.getString("currency"))
-                            && d.getLong("amount") > 0 && share >= 0 && share <= 10000;
-                case "transfer":
-                    if (trip.team != null) return trip.indexOf(d.getString("from")) >= 0 && trip.indexOf(d.getString("to")) >= 0 &&
-                            !d.getString("from").equals(d.getString("to")) && currency(d.getString("currency")) && validAmount(trip, d, "amount");
-                    return person(d.getString("from")) && currency(d.getString("currency")) && d.getLong("amount") > 0;
-                case "exchange":
-                    return trip.indexOf(d.getString("person")) >= 0 && currency(d.getString("fromCurrency"))
-                            && currency(d.getString("toCurrency")) && validAmount(trip, d, "fromAmount")
-                            && validAmount(trip, d, "toAmount")
-                            && (trip.team == null || !d.getString("fromCurrency").equals(d.getString("toCurrency")));
-                case "delete":
-                    return trip.team == null ? !d.getString("target").isEmpty() : PeerIdentity.valid(d.getString("target"));
-                default: return false;
-            }
-        } catch (Exception ignored) { return false; }
-    }
-
-    private boolean validTeamExpense(Trip trip, JSONObject data) throws JSONException {
-        long amount = data.getLong("amount");
-        String payer = data.getString("payer");
-        JSONObject shares = data.getJSONObject("shares");
-        if (!validAmount(trip, data, "amount") || trip.indexOf(payer) < 0 || !currency(data.getString("currency")) ||
-                shares.length() == 0 || shares.length() > trip.people()) return false;
-        long total = 0;
-        java.util.Iterator<String> keys = shares.keys();
-        while (keys.hasNext()) {
-            String member = keys.next();
-            long share = exactLong(shares, member);
-            if (trip.indexOf(member) < 0 || share < 0 || share > amount - total) return false;
-            total += share;
-        }
-        return total == amount && (!"personal".equals(data.optString("mode")) ||
-                shares.length() == 1 && shares.optLong(payer, -1) == amount);
-    }
-
-    private boolean validAmount(Trip trip, JSONObject data, String field) throws JSONException {
-        if (trip.team == null) return data.getLong(field) > 0;
-        long amount = exactLong(data, field);
-        return amount > 0 && amount <= MAX_TEAM_AMOUNT;
-    }
-
-    private long exactLong(JSONObject data, String field) throws JSONException {
-        Object value = data.get(field);
-        if (value instanceof Integer || value instanceof Long) return ((Number) value).longValue();
-        throw new JSONException("金额应为整数最小货币单位");
-    }
-
-    private boolean person(String value) { return "a".equals(value) || "b".equals(value); }
-    private boolean currency(String value) {
-        try { return Money.code(value).equals(value); } catch (Exception ignored) { return false; }
-    }
-
-    synchronized JSONArray eventsJson(String tripId) throws JSONException {
+    JSONArray eventsJson(String tripId) throws JSONException {
         JSONArray result = new JSONArray();
         for (Event event : events(tripId)) result.put(event.json());
         return result;
     }
 
-    synchronized List<Event> events(String tripId) {
-        List<Event> result = new ArrayList<>();
+    List<Event> events(String tripId) {
+        return decodeEvents(tripId, readEvents(tripId, false));
+    }
+
+    List<Event> exchangesAndDeletes(String tripId) {
+        return decodeEvents(tripId, readEvents(tripId, true));
+    }
+
+    /** Copy SQLite rows while holding the store lock; JSON decoding and hashing run outside it. */
+    private synchronized List<StoredEvent> readEvents(String tripId, boolean exchangeOnly) {
+        List<StoredEvent> result = new ArrayList<>();
         try (Cursor c = getReadableDatabase().rawQuery(
-                "SELECT id,kind,at,data FROM events WHERE trip_id=? ORDER BY at,id", new String[]{tripId})) {
-            while (c.moveToNext()) {
-                try { result.add(new Event(c.getString(0), tripId, c.getString(1), c.getLong(2),
-                        new JSONObject(c.getString(3)))); }
-                catch (JSONException ignored) { }
-            }
+                "SELECT id,kind,at,data,rowid FROM events WHERE trip_id=?" +
+                        (exchangeOnly ? " AND kind IN ('exchange','delete')" : "") + " ORDER BY at,id",
+                new String[]{tripId})) {
+            while (c.moveToNext()) result.add(new StoredEvent(c.getString(0), c.getString(1), c.getLong(2),
+                    c.getString(3), c.getLong(4)));
         }
         return result;
     }
 
-    synchronized Summary summary(String tripId) {
-        Summary summary = new Summary();
-        Trip trip = getTrip(tripId);
-        List<Event> all = events(tripId);
-        Set<String> deleted = new HashSet<>();
-        for (Event event : all) if ("delete".equals(event.kind)) deleted.add(event.data.optString("target"));
-        for (Event event : all) {
-            if ("delete".equals(event.kind) || deleted.contains(event.id)) continue;
-            JSONObject d = event.data;
-            try {
-                if (trip != null && trip.team != null) {
-                    summarizeTeam(summary, event);
-                    summary.visible.add(event);
-                    continue;
-                }
-                switch (event.kind) {
-                    case "opening": case "topup":
-                        cash(summary, d.getString("person"), d.getString("currency"), d.getLong("amount"));
-                        break;
-                    case "expense": {
-                        String payer = d.getString("payer"), currency = d.getString("currency");
-                        long amount = d.getLong("amount");
-                        long aShare = Money.shareA(amount, d.getInt("shareA"));
-                        cash(summary, payer, currency, -amount);
-                        add(summary.spent, currency, amount);
-                        add(summary.debtBToA, currency, "a".equals(payer) ? amount - aShare : -aShare);
-                        break;
-                    }
-                    case "transfer": {
-                        String from = d.getString("from"), currency = d.getString("currency");
-                        long amount = d.getLong("amount");
-                        cash(summary, from, currency, -amount);
-                        cash(summary, "a".equals(from) ? "b" : "a", currency, amount);
-                        add(summary.debtBToA, currency, "b".equals(from) ? -amount : amount);
-                        break;
-                    }
-                    case "exchange": {
-                        String person = d.getString("person");
-                        cash(summary, person, d.getString("fromCurrency"), -d.getLong("fromAmount"));
-                        cash(summary, person, d.getString("toCurrency"), d.getLong("toAmount"));
-                        break;
-                    }
-                }
-                summary.visible.add(event);
-            } catch (Exception ignored) { }
+    private static final class StoredEvent {
+        final String id, kind, data;
+        final long at, row;
+        StoredEvent(String id, String kind, long at, String data, long row) {
+            this.id = id; this.kind = kind; this.at = at; this.data = data; this.row = row;
         }
-        Collections.reverse(summary.visible);
-        return summary;
     }
 
-    private void summarizeTeam(Summary summary, Event event) throws JSONException {
-        JSONObject d = event.data;
-        if ("exchange".equals(event.kind)) {
-            Map<String, Long> cash = summary.teamCash.computeIfAbsent(d.getString("person"), id -> new HashMap<>());
-            add(cash, d.getString("fromCurrency"), -d.getLong("fromAmount"));
-            add(cash, d.getString("toCurrency"), d.getLong("toAmount"));
-            return;
-        }
-        String currency = d.getString("currency");
-        long amount = d.getLong("amount");
-        switch (event.kind) {
-            case "opening": case "topup":
-                add(summary.teamCash.computeIfAbsent(d.getString("person"), id -> new HashMap<>()), currency, amount);
-                break;
-            case "expense": {
-                String payer = d.getString("payer");
-                add(summary.teamCash.computeIfAbsent(payer, id -> new HashMap<>()), currency, -amount);
-                add(summary.spent, currency, amount);
-                add(summary.teamNet.computeIfAbsent(payer, id -> new HashMap<>()), currency, amount);
-                JSONObject shares = d.getJSONObject("shares");
-                java.util.Iterator<String> keys = shares.keys();
-                while (keys.hasNext()) {
-                    String member = keys.next();
-                    add(summary.teamNet.computeIfAbsent(member, id -> new HashMap<>()), currency, -shares.getLong(member));
-                }
-                break;
-            }
-            case "transfer": {
-                String from = d.getString("from"), to = d.getString("to");
-                add(summary.teamCash.computeIfAbsent(from, id -> new HashMap<>()), currency, -amount);
-                add(summary.teamCash.computeIfAbsent(to, id -> new HashMap<>()), currency, amount);
-                add(summary.teamNet.computeIfAbsent(from, id -> new HashMap<>()), currency, amount);
-                add(summary.teamNet.computeIfAbsent(to, id -> new HashMap<>()), currency, -amount);
-                break;
+    private static List<Event> decodeEvents(String tripId, List<StoredEvent> rows) {
+        List<Event> events = new ArrayList<>(rows.size());
+        for (StoredEvent row : rows) {
+            try { events.add(new Event(row.id, tripId, row.kind, row.at, new JSONObject(row.data), row.row)); }
+            catch (JSONException error) {
+                // A damaged row must not silently vanish from totals or be acknowledged to a peer.
+                throw new IllegalStateException("本机流水无法读取，请保留账本后重试", error);
             }
         }
+        return events;
     }
 
-    private void cash(Summary summary, String person, String currency, long delta) {
-        add("a".equals(person) ? summary.cashA : summary.cashB, currency, delta);
+    Map<String, Long> recentCurrencyCodes(String tripId, Set<String> excluded, int limit) {
+        Map<String, Long> codes = new LinkedHashMap<>();
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT kind,data,at FROM events WHERE trip_id=? AND kind!='delete' ORDER BY at DESC,id DESC",
+                new String[]{tripId})) {
+            while (codes.size() < limit && c.moveToNext()) {
+                try {
+                    JSONObject data = new JSONObject(c.getString(1));
+                    long at = c.getLong(2);
+                    if ("exchange".equals(c.getString(0))) {
+                        addCurrencyCode(codes, excluded, data.optString("toCurrency"), at);
+                        if (codes.size() < limit) addCurrencyCode(codes, excluded, data.optString("fromCurrency"), at);
+                    } else addCurrencyCode(codes, excluded, data.optString("currency"), at);
+                } catch (JSONException ignored) { }
+            }
+        }
+        return codes;
     }
 
-    private void add(Map<String, Long> map, String currency, long delta) {
-        map.put(currency, Math.addExact(map.getOrDefault(currency, 0L), delta));
+    private static void addCurrencyCode(Map<String, Long> codes, Set<String> excluded, String raw, long at) {
+        String code;
+        try { code = Money.code(raw); }
+        catch (IllegalArgumentException ignored) { return; }
+        if (!excluded.contains(code)) codes.putIfAbsent(code, at);
+    }
+
+    static final class Snapshot {
+        final Trip trip;
+        final List<Event> events;
+        final SyncPoint syncPoint;
+
+        Snapshot(Trip trip, List<Event> events) {
+            this.trip = trip;
+            this.events = Collections.unmodifiableList(events);
+            long row = 0;
+            String id = "";
+            for (Event event : events) if (event.localRow > row) { row = event.localRow; id = event.id; }
+            syncPoint = new SyncPoint(row, id);
+        }
+
+        Summary totals() { return LedgerTotals.calculate(trip != null && trip.team != null, events); }
+    }
+
+    Snapshot snapshot(String tripId) {
+        Trip trip;
+        List<StoredEvent> rows;
+        synchronized (this) {
+            trip = getTrip(tripId);
+            rows = readEvents(tripId, false);
+        }
+        return new Snapshot(trip, decodeEvents(tripId, rows));
+    }
+
+    Summary summary(String tripId) {
+        return snapshot(tripId).totals();
     }
 }

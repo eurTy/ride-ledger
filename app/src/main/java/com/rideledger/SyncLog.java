@@ -10,14 +10,21 @@ import java.time.format.DateTimeParseException;
 
 /** App-private daily diagnostics. Callers pass only operation names, error types and platform codes. */
 final class SyncLog {
+    enum Event {
+        WIFI, HOTSPOT, BLUETOOTH, BLE_ADVERTISE, BLE_RECEIVER, BLE_SCAN, CHANNEL_SWITCH,
+        CHECKPOINT_SAVE, GATEWAY_LISTEN, GATEWAY_PROBE, GATEWAY_ROUTE, JOB_BLE, JOB_LAN,
+        JOB_SCHEDULE, JOB_START, LAN_ACCEPT, LAN_DISCOVER, LAN_NETWORK_CALLBACK,
+        LAN_REGISTER, LAN_RESOLVE, LAN_START, PERIODIC_JOB, QUEUE_READ, RADIO_JOB, RADIO_RECEIVER,
+        UI_REFRESH
+    }
     private static final long LIMIT = 64 * 1024;
     private static final String DIRECTORY = "nearby-sync";
 
-    static void write(Context context, String operation, Throwable error) {
+    static void write(Context context, Event operation, Throwable error) {
         write(context, operation, error.getClass().getSimpleName());
     }
 
-    static synchronized void write(Context context, String operation, String code) {
+    static synchronized void write(Context context, Event operation, String code) {
         LocalDate today = LocalDate.now();
         File directory = prune(context, today);
         if (!directory.isDirectory() && !directory.mkdirs()) return;

@@ -108,8 +108,8 @@ final class TeamChecks {
                     String selected = InviteQr.readImage(base.getContentResolver(), Uri.fromFile(file));
                     require(legacyInvite.equals(selected), "saved screenshot did not decode to the original invite");
                     guest.trip = new TeamJoiner(guest.store).join(selected, "队友乙");
-                    require(guest.trip.syncUrl.isEmpty() && !guest.store.teamReady(guest.trip),
-                            "a legacy relay address was persisted or bypassed enrollment");
+                    require(!guest.store.teamReady(guest.trip),
+                            "a legacy relay address bypassed enrollment");
                     require(exchange(guest, root).complete() && guest.store.teamReady(guest.trip),
                             "an old invite did not enroll over a nearby connection");
                 } finally {
@@ -119,26 +119,22 @@ final class TeamChecks {
                 }
             }
         });
+        sink.check("team: rotated QR recovers a finder-pattern miss", () -> {
+            java.util.Random random = new java.util.Random(907);
+            byte[] data = null;
+            for (int i = 0; i <= 39; i++) {
+                data = new byte[300 + i];
+                random.nextBytes(data);
+            }
+            String invite = "RLTEAM2." + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(data);
+            require(invite.equals(rotatedCameraScan(invite)), "rotation fallback did not recover the QR text");
+        });
         sink.check("team: offline QR decodes the invite and enrolls the selected member", () -> {
             try (Device root = new Device(base); Device guest = new Device(base)) {
                 root.create();
                 record(root, "CNY", 305, "before QR");
                 String invite = root.store.inviteCode(root.trip);
-                Bitmap qr = InviteQr.image(invite, 520);
-                Matrix rotation = new Matrix();
-                rotation.postRotate(90);
-                Bitmap rotated = Bitmap.createBitmap(qr, 0, 0, qr.getWidth(), qr.getHeight(), rotation, false);
-                int width = rotated.getWidth(), height = rotated.getHeight();
-                int[] pixels = new int[width * height];
-                byte[] luminance = new byte[pixels.length];
-                try {
-                    rotated.getPixels(pixels, 0, width, 0, 0, width, height);
-                    for (int i = 0; i < pixels.length; i++) luminance[i] = (byte) Color.red(pixels[i]);
-                } finally {
-                    rotated.recycle();
-                    qr.recycle();
-                }
-                String scanned = InviteQr.readFrame(luminance, width, height);
+                String scanned = rotatedCameraScan(invite);
                 require(invite.equals(scanned), scanned == null ? "camera frame found no QR code" : "camera-frame decode altered the invitation");
                 guest.trip = guest.store.joinTrip(scanned, "m4");
                 require("阿满".equals(guest.trip.nameOf(guest.trip.localPerson)), "scanned roster could not select the fourth member");
@@ -242,6 +238,38 @@ final class TeamChecks {
                             "ledger diverged or currencies mixed");
                     require(summary.teamNet.get("m2").get("CNY") == 81 && summary.teamNet.get("m1").get("CNY") == -21,
                             "minor-unit split did not add up");
+                }
+            }
+        });
+
+        sink.check("team: three simultaneous Bluetooth peers all sync and a manual refresh never duplicates records", () -> {
+            try (Device a = new Device(base); Device b = new Device(base);
+                 Device c = new Device(base); Device d = new Device(base)) {
+                a.trip = a.store.createTeam("三位蓝牙队友", MEMBERS.subList(0, 4));
+                List<Device> peers = Arrays.asList(b, c, d);
+                for (int i = 0; i < peers.size(); i++) {
+                    Device peer = peers.get(i);
+                    peer.enroll(a, i + 1);
+                    record(peer, "CNY", 100 + i, "独立离线账目 " + i);
+                    peer.openCoordinator();
+                }
+                a.openCoordinator();
+                onMain(() -> {
+                    for (int i = 0; i < peers.size(); i++)
+                        a.link(peers.get(i), PeerRoutePolicy.Channel.BLUETOOTH, null, false);
+                });
+                await(() -> a.count() == 3 && peers.stream().allMatch(peer -> peer.count() == 3) &&
+                                a.sync.syncState().links.size() == 3 && !a.sync.transferring(), 18000,
+                        "the coordinator did not sync all three peers");
+                int[] previous = peers.stream().mapToInt(peer -> peer.inboundDials.get()).toArray();
+                onMain(a.sync::reconnect);
+                await(() -> b.inboundDials.get() > previous[0] && c.inboundDials.get() > previous[1] &&
+                                d.inboundDials.get() > previous[2] && !a.sync.transferring() &&
+                                peers.stream().noneMatch(peer -> peer.sync.transferring()), 10000,
+                        "manual refresh did not recheck each known peer");
+                for (Device device : Arrays.asList(a, b, c, d)) {
+                    require(device.count() == 3 && device.store.summary(device.trip.id).spent.get("CNY") == 303,
+                            "reconnecting to already synchronized peers duplicated money");
                 }
             }
         });
@@ -359,7 +387,7 @@ final class TeamChecks {
             File current = new File(directory, today + ".log");
             try {
                 require(expired.createNewFile() && retained.createNewFile(), "log fixtures could not be created");
-                SyncLog.write(context, "WIFI", new IOException("测试成员 512.00 CNY"));
+                SyncLog.write(context, SyncLog.Event.WIFI, new IOException("测试成员 512.00 CNY"));
                 String logged = new String(Files.readAllBytes(current.toPath()), StandardCharsets.UTF_8);
                 require(!expired.exists() && retained.exists(), "daily retention did not preserve only the latest seven days");
                 require(logged.contains("WIFI IOException") && !logged.contains("测试成员") && !logged.contains("512.00"),
@@ -464,6 +492,7 @@ final class TeamChecks {
     private static final class Device implements AutoCloseable {
         final PeerProtocolChecks.Ctx context;
         final Team.Identity id;
+        final AtomicInteger inboundDials = new AtomicInteger();
         LedgerStore store;
         LedgerStore.Trip trip;
         PeerSync sync;
@@ -500,6 +529,7 @@ final class TeamChecks {
                         try (ServerSocket listener = loopback()) {
                             Socket client = new Socket("127.0.0.1", listener.getLocalPort());
                             Socket server = listener.accept();
+                            other.inboundDials.incrementAndGet();
                             other.sync.accept(other.connection(server, this, channel), channel, "");
                             return connection(client, other, channel);
                         }
@@ -536,6 +566,23 @@ final class TeamChecks {
             SystemClock.sleep(50);
         }
         throw new AssertionError(message.get());
+    }
+
+    private static String rotatedCameraScan(String invite) throws Exception {
+        Bitmap qr = InviteQr.image(invite, 520);
+        try {
+            Matrix rotation = new Matrix();
+            rotation.postRotate(90);
+            Bitmap rotated = Bitmap.createBitmap(qr, 0, 0, qr.getWidth(), qr.getHeight(), rotation, false);
+            try {
+                int width = rotated.getWidth(), height = rotated.getHeight();
+                int[] pixels = new int[width * height];
+                byte[] luminance = new byte[pixels.length];
+                rotated.getPixels(pixels, 0, width, 0, 0, width, height);
+                for (int i = 0; i < pixels.length; i++) luminance[i] = (byte) Color.red(pixels[i]);
+                return InviteQr.readFrame(luminance, width, height);
+            } finally { rotated.recycle(); }
+        } finally { qr.recycle(); }
     }
 
     private static void require(boolean value, String message) { if (!value) throw new AssertionError(message); }

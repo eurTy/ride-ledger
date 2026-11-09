@@ -7,7 +7,6 @@ import android.graphics.Color;
 import android.net.Uri;
 
 import com.google.zxing.BarcodeFormat;
-import com.google.zxing.BinaryBitmap;
 import com.google.zxing.DecodeHintType;
 import com.google.zxing.EncodeHintType;
 import com.google.zxing.LuminanceSource;
@@ -17,17 +16,21 @@ import com.google.zxing.ReaderException;
 import com.google.zxing.WriterException;
 import com.google.zxing.common.BitMatrix;
 import com.google.zxing.common.HybridBinarizer;
-import com.google.zxing.qrcode.QRCodeReader;
 import com.google.zxing.qrcode.QRCodeWriter;
+import com.google.zxing.qrcode.decoder.Decoder;
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel;
+import com.google.zxing.qrcode.detector.Detector;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Collections;
+import java.util.Map;
 
 /** Carries the existing invitation as-is. Encoding and decoding run on the device. */
 final class InviteQr {
     private static final int MAX_IMAGE_SIDE = 2048;
+    private static final Map<DecodeHintType, Boolean> SCAN_HINTS =
+            Collections.singletonMap(DecodeHintType.TRY_HARDER, Boolean.TRUE);
     private InviteQr() { }
 
     static boolean isTeamCode(String value) {
@@ -75,10 +78,18 @@ final class InviteQr {
     }
 
     private static String decode(LuminanceSource source) {
-        try {
-            return new QRCodeReader().decode(new BinaryBitmap(new HybridBinarizer(source)),
-                    Collections.singletonMap(DecodeHintType.TRY_HARDER, Boolean.TRUE)).getText();
-        }
+        BitMatrix image;
+        try { image = new HybridBinarizer(source).getBlackMatrix(); }
         catch (ReaderException ignored) { return null; }
+        Decoder decoder = new Decoder();
+        for (int turn = 0; turn < 4; turn++) {
+            // Finder-pattern detection scans by row. Reuse the thresholded image at each angle.
+            if (turn > 0) image.rotate90();
+            try {
+                BitMatrix modules = new Detector(image).detect(SCAN_HINTS).getBits();
+                return decoder.decode(modules, SCAN_HINTS).getText();
+            } catch (ReaderException ignored) { }
+        }
+        return null;
     }
 }

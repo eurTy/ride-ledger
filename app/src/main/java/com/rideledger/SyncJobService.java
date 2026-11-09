@@ -9,20 +9,29 @@ import android.net.NetworkCapabilities;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 
 import java.net.NetworkInterface;
 import java.util.Enumeration;
 import java.util.Locale;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.ArrayDeque;
 
 /** Brief discovery lease. Data is transferred only after the team handshake. */
 public final class SyncJobService extends JobService {
-    private static final long DISCOVERY_WINDOW = 12000, MAX_WINDOW = 45000;
+    private static final long DISCOVERY_WINDOW = 12000, SOFT_WINDOW = 45000;
+    private static final long PROGRESS_GRACE = 15000, TRIP_BUDGET = 120000, JOB_BUDGET = 180000;
+    private static final int TRIPS_PER_JOB = 3;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final ArrayDeque<LedgerStore.Trip> queue = new ArrayDeque<>();
     private LedgerStore store;
     private PeerSync peer;
     private JobParameters active;
-    private final Runnable checkContact = () -> { if (peer != null && !peer.hasContact()) finish(); };
-    private final Runnable endWindow = this::finish;
+    private long tripStarted, jobStarted;
+    private final Runnable checkContact = () -> { if (peer != null && !peer.hasContact() && !peer.transferring()) advance(); };
+    private final Runnable endWindow = this::checkWindow;
 
     @Override public boolean onStartJob(JobParameters params) {
         if (Build.VERSION.SDK_INT < 29 || !SyncBackground.acquire(this)) return false;
@@ -30,26 +39,64 @@ public final class SyncJobService extends JobService {
             SyncLog.maintain(this);
             SyncTriggerReceiver.install(getApplicationContext());
             if (!hasLocalNetwork() && !hasBluetooth()) { stop(); return false; }
-            store = new LedgerStore(getApplicationContext());
-            String id = getSharedPreferences("ui", MODE_PRIVATE).getString("last_trip", null);
-            LedgerStore.Trip trip = id == null ? null : store.getTrip(id);
-            if (!eligible(trip)) {
-                for (LedgerStore.Trip candidate : store.trips()) {
-                    if (eligible(candidate)) { trip = candidate; break; }
-                }
-            }
-            if (!eligible(trip)) { stop(); return false; }
+            store = LedgerStore.application(this);
+            List<LedgerStore.Trip> eligibleTrips = new ArrayList<>();
+            for (LedgerStore.Trip trip : store.trips()) if (eligible(trip)) eligibleTrips.add(trip);
+            if (eligibleTrips.isEmpty()) { stop(); return false; }
+            android.content.SharedPreferences cursor = getSharedPreferences("background_sync", MODE_PRIVATE);
+            LedgerStore.Trip trip = nextTrip(eligibleTrips, cursor.getString("last_attempt", ""));
+            int first = eligibleTrips.indexOf(trip);
+            for (int i = 0; i < Math.min(TRIPS_PER_JOB, eligibleTrips.size()); i++)
+                queue.add(eligibleTrips.get((first + i) % eligibleTrips.size()));
             active = params;
-            peer = new PeerSync(this, store, added -> { }, true, trip, true);
-            peer.start();
-            main.postDelayed(checkContact, DISCOVERY_WINDOW);
-            main.postDelayed(endWindow, MAX_WINDOW);
+            jobStarted = SystemClock.elapsedRealtime();
+            startNext();
             return true;
         } catch (RuntimeException error) {
-            SyncLog.write(this, "JOB_START", error);
+            SyncLog.write(this, SyncLog.Event.JOB_START, error);
             stop();
             return false;
         }
+    }
+
+    private void startNext() {
+        LedgerStore.Trip trip = queue.removeFirst();
+        tripStarted = SystemClock.elapsedRealtime();
+        peer = new PeerSync(this, store, added -> { }, true, trip, true);
+        // Record each attempted trip, so the next job continues after the last one it reached.
+        getSharedPreferences("background_sync", MODE_PRIVATE).edit().putString("last_attempt", trip.id).apply();
+        peer.start();
+        long remaining = jobStarted + JOB_BUDGET - tripStarted;
+        main.postDelayed(checkContact, Math.min(DISCOVERY_WINDOW, remaining));
+        main.postDelayed(endWindow, Math.min(SOFT_WINDOW, remaining));
+    }
+
+    private void checkWindow() {
+        if (peer == null) return;
+        long now = SystemClock.elapsedRealtime();
+        long deadline = Math.min(jobStarted + JOB_BUDGET, tripStarted + TRIP_BUDGET);
+        if (peer.transferring() && peer.lastProgress() > now - PROGRESS_GRACE && now < deadline) {
+            main.postDelayed(endWindow, Math.min(PROGRESS_GRACE, deadline - now));
+        } else advance();
+    }
+
+    private void advance() {
+        stopPeer();
+        if (queue.isEmpty() || SystemClock.elapsedRealtime() + DISCOVERY_WINDOW > jobStarted + JOB_BUDGET) {
+            finish();
+            return;
+        }
+        try { startNext(); }
+        catch (RuntimeException error) {
+            SyncLog.write(this, SyncLog.Event.JOB_START, error);
+            finish();
+        }
+    }
+
+    static LedgerStore.Trip nextTrip(List<LedgerStore.Trip> eligibleTrips, String lastAttempt) {
+        eligibleTrips.sort(Comparator.comparing(trip -> trip.id));
+        for (LedgerStore.Trip trip : eligibleTrips) if (trip.id.compareTo(lastAttempt) > 0) return trip;
+        return eligibleTrips.get(0);
     }
 
     private boolean eligible(LedgerStore.Trip trip) {
@@ -61,7 +108,7 @@ public final class SyncJobService extends JobService {
             BluetoothManager manager = getSystemService(BluetoothManager.class);
             return TeamBle.hasPermissions(this) && manager != null &&
                     manager.getAdapter() != null && manager.getAdapter().isEnabled();
-        } catch (RuntimeException error) { SyncLog.write(this, "JOB_BLE", error); return false; }
+        } catch (RuntimeException error) { SyncLog.write(this, SyncLog.Event.JOB_BLE, error); return false; }
     }
 
     private boolean hasLocalNetwork() {
@@ -81,7 +128,7 @@ public final class SyncJobService extends JobService {
                 if (link.isUp() && (name.contains("wlan") || name.contains("softap") || name.startsWith("ap")) &&
                         link.getInterfaceAddresses().stream().anyMatch(address -> address.getBroadcast() != null)) return true;
             }
-        } catch (Exception error) { SyncLog.write(this, "JOB_LAN", error); }
+        } catch (Exception error) { SyncLog.write(this, SyncLog.Event.JOB_LAN, error); }
         return false;
     }
 
@@ -93,11 +140,16 @@ public final class SyncJobService extends JobService {
 
     private void stop() {
         active = null;
+        stopPeer();
+        queue.clear();
+        store = null;
+        SyncBackground.release(this);
+    }
+
+    private void stopPeer() {
         main.removeCallbacks(checkContact);
         main.removeCallbacks(endWindow);
         if (peer != null) { peer.stop(); peer = null; }
-        if (store != null) { store.close(); store = null; }
-        SyncBackground.release(this);
     }
 
     @Override public boolean onStopJob(JobParameters params) {

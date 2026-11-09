@@ -30,24 +30,31 @@ final class PeerSync {
     private final PeerRoutePolicy routes = new PeerRoutePolicy(SystemClock::elapsedRealtime);
     private final SyncEngine engine;
     private final Map<PeerConnection, PeerRoutePolicy.Channel> connections = new ConcurrentHashMap<>();
-    final LanSync lan;
-    final BluetoothSync bluetooth;
-    private final TeamBle teamBle;
-    private ThreadPoolExecutor workers;
-    private ThreadPoolExecutor incomingWorkers;
-    private ScheduledExecutorService timer;
+    private final PeerRadios radios;
+    private volatile ThreadPoolExecutor workers;
+    private volatile ThreadPoolExecutor incomingWorkers;
+    private volatile ScheduledExecutorService timer;
     private volatile boolean running;
     private volatile boolean enrolled;
     private boolean initialHistory;
+    private long lastProgress;
+    private long nextManualReconnect;
+    private int pendingNotification;
+    private boolean notificationScheduled;
+    private final Runnable publishChange = this::publishChanges;
+
+    private void publishChanges() {
+        notificationScheduled = false;
+        int count = pendingNotification;
+        pendingNotification = 0;
+        if (running) listener.changed(count);
+    }
     private volatile int epoch;
     private long revision, lastBluetoothRefresh, discoveryStarted;
     private boolean pending = true;
     private volatile String summary = "本机账目已保存 · 等待同伴连接";
     private volatile String admissionError = "";
 
-    PeerSync(Context context, LedgerStore store, Listener listener) {
-        this(context, store, listener, true);
-    }
     PeerSync(Context context, LedgerStore store, Listener listener, boolean startRadios) {
         this(context, store, listener, startRadios, null);
     }
@@ -66,55 +73,30 @@ final class PeerSync {
         String discoveryId = team == null ? deviceId : TeamProtocol.routeId(team.team, deviceId);
         String scope = team == null ? "" : team.team.discoveryScope();
         enrollmentPeer = team == null ? "" : TeamProtocol.routeId(team.team, team.team.issuer);
-        lan = new LanSync(context, discoveryId, scope, new LanSync.Events() {
+        radios = new PeerRadios(context, team, deviceId, discoveryId, scope, new PeerRadios.Events() {
             @Override public void found(PeerRoutePolicy.Endpoint endpoint) { offer(endpoint); }
             @Override public void lost(String key) { lose(key); }
-            @Override public void incoming(PeerConnection connection, String address) {
-                PeerRoutePolicy.Channel channel = PeerRoutePolicy.Channel.WIFI;
-                if (team != null) try { channel = lanChannel(address); } catch (Exception ignored) { }
+            @Override public void lost(PeerRoutePolicy.Channel channel) { lose(channel); }
+            @Override public void incoming(PeerConnection connection, PeerRoutePolicy.Channel channel, String address) {
                 accept(connection, channel, address);
             }
-            @Override public void changed(String status) { notifyChange(0); }
-            @Override public void networkChanged() {
-                lose(PeerRoutePolicy.Channel.WIFI);
-                lose(PeerRoutePolicy.Channel.HOTSPOT);
-            }
-        }, team == null ? null : wire -> TeamProtocol.probe(wire, team));
-        bluetooth = team == null ? new BluetoothSync(context, new BluetoothSync.Events() {
-            @Override public void found(PeerRoutePolicy.Endpoint endpoint) { offer(endpoint); }
-            @Override public void incoming(PeerConnection connection, String address) { accept(connection, PeerRoutePolicy.Channel.BLUETOOTH, address); }
             @Override public void changed() { notifyChange(0); }
-            @Override public void reset() {
-                routes.removeChannel(PeerRoutePolicy.Channel.BLUETOOTH);
-                closeChannel(PeerRoutePolicy.Channel.BLUETOOTH); request(false);
-            }
-        }) : null;
-        teamBle = team == null ? null : new TeamBle(context, team, deviceId, new TeamBle.Events() {
-            @Override public void found(PeerRoutePolicy.Endpoint endpoint) { offer(endpoint); }
-            @Override public void lost(String key) { lose(key); }
-            @Override public void incoming(PeerConnection connection) { accept(connection, PeerRoutePolicy.Channel.BLUETOOTH, ""); }
-            @Override public void reset() {
-                lose(PeerRoutePolicy.Channel.BLUETOOTH);
-            }
         });
     }
-    private PeerRoutePolicy.Channel lanChannel(String address) throws Exception { return lan.channel(java.net.InetAddress.getByName(address)); }
 
     void start() {
         if (running) return; running = true; epoch++; pending = true;
         enrolled = team == null || store.teamReady(team);
         initialHistory = false;
+        lastProgress = 0;
+        nextManualReconnect = 0;
         discoveryStarted = SystemClock.elapsedRealtime();
         workers = new ThreadPoolExecutor(4, 4, 30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(16));
         // Reserve inbound capacity so four simultaneous dials cannot starve the matching receivers.
         if (team != null) incomingWorkers = new ThreadPoolExecutor(4, 4, 30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(8));
         timer = Executors.newSingleThreadScheduledExecutor();
         if (engine != null && enrolled) engine.start();
-        if (startRadios) {
-            lan.start(background);
-            if (teamBle != null) teamBle.start(timer, background);
-            else bluetooth.start();
-        }
+        if (startRadios) radios.start(timer, background);
         if (engine == null || !enrolled) main.post(tick);
     }
     private final Runnable tick = new Runnable() {
@@ -123,7 +105,7 @@ final class PeerSync {
             long now = SystemClock.elapsedRealtime();
             if (startRadios && team == null && now - lastBluetoothRefresh >= 10000) {
                 lastBluetoothRefresh = now;
-                bluetooth.refresh();
+                radios.refreshLegacyBluetooth();
             }
             boolean urgent;
             long current;
@@ -131,11 +113,17 @@ final class PeerSync {
             List<PeerRoutePolicy.Endpoint> ready;
             if (team == null) ready = routes.ready(urgent);
             else {
-                int maximumRank = (int) Math.min(2, (now - discoveryStarted) / 1500);
+                int maximumRank = (int) Math.min(2, (now - discoveryStarted) / PeerRoutePolicy.ENROLLMENT_STAGE_MILLIS);
                 ready = routes.readyForEnrollment(current, enrollmentPeer, maximumRank);
             }
             for (PeerRoutePolicy.Endpoint endpoint : ready) outgoing(endpoint, current, false);
-            main.removeCallbacks(this); main.postDelayed(this, 2000);
+            main.removeCallbacks(this);
+            if (team == null) {
+                main.postDelayed(this, 2000);
+            } else {
+                long wake = routes.nextEnrollmentWake(enrollmentPeer, discoveryStarted);
+                if (wake != Long.MAX_VALUE) main.postDelayed(this, Math.max(1, wake - now));
+            }
         }
     };
     void offer(PeerRoutePolicy.Endpoint endpoint) {
@@ -147,6 +135,7 @@ final class PeerSync {
     private void lose(String key) {
         onMain(epoch, () -> {
             routes.remove(key);
+            if (team != null && !enrolled) request(true);
             if (engine != null) engine.lost(key);
         });
     }
@@ -165,7 +154,7 @@ final class PeerSync {
                 request(false);
             } else if (enrolled) {
                 engine.request();
-                lan.announce();
+                radios.announce();
             } else if (store.teamReady(team)) {
                 enrolled = true;
                 main.removeCallbacks(tick);
@@ -177,7 +166,16 @@ final class PeerSync {
             }
         });
     }
-    void retryNow() { routes.resetBackoff(); request(false); }
+
+    void reconnect() {
+        onMain(epoch, () -> {
+            long now = SystemClock.elapsedRealtime();
+            if (engine == null || !enrolled || now < nextManualReconnect) return;
+            nextManualReconnect = now + 2000;
+            engine.reconnect();
+            if (startRadios) radios.rediscover();
+        });
+    }
     private void request(boolean unchangedRevision) {
         synchronized (this) { if (!unchangedRevision) revision++; pending = true; }
         if (running) { main.removeCallbacks(runSoon); main.postDelayed(runSoon, 150); }
@@ -194,13 +192,12 @@ final class PeerSync {
                 try {
                     if (!running || epoch != generation) return;
                     connection = endpoint.dial.call();
-                    if (!running || epoch != generation) return;
-                    connections.put(connection, endpoint.channel);
-                    ScheduledExecutorService watchdog = timer;
+                    ScheduledExecutorService watchdog = track(connection, endpoint.channel, generation);
+                    if (watchdog == null) return;
                     boolean admission = team != null && !ledgerSync;
                     if (admission) connection.watch(watchdog, ENROLLMENT_TIMEOUT, ENROLLMENT_TIMEOUT);
                     else connection.watch(watchdog);
-                    PeerProtocol.Listener callbacks = callbacks(endpoint.key, endpoint.channel, address(endpoint), generation, () -> { });
+                    PeerProtocol.Listener callbacks = callbacks(connection, endpoint.key, endpoint.channel, address(endpoint), generation, () -> { });
                     PeerConnection channel = connection;
                     if (team == null) legacy = new PeerProtocol(store, deviceId, callbacks);
                     PeerProtocol.Result result = legacy == null
@@ -217,6 +214,7 @@ final class PeerSync {
                         }
                         if (reverse != null) engine.offer(reverse);
                         completed(ledgerSync ? endpoint : null, endpoint.channel, result, captured, ledgerSync);
+                        if (engine != null) engine.sessionFinished(channel, endpoint.key);
                     });
                 } catch (Exception error) {
                     int added = legacy == null ? 0 : legacy.progress().added;
@@ -224,7 +222,14 @@ final class PeerSync {
                         if (ledgerSync) engine.failed(endpoint); else routes.failure(endpoint.key);
                         failed(endpoint.channel, error, added);
                     });
-                } finally { if (connection != null) { connections.remove(connection); connection.close(); } }
+                } finally {
+                    if (connection != null) {
+                        PeerConnection closed = connection;
+                        connections.remove(closed);
+                        closed.close();
+                        if (engine != null) onMain(generation, () -> engine.sessionFinished(closed, null));
+                    }
+                }
             });
         } catch (RejectedExecutionException error) {
             if (ledgerSync) engine.failed(endpoint); else routes.failure(endpoint.key);
@@ -239,9 +244,8 @@ final class PeerSync {
         final boolean ledgerSync = engine != null && enrolled;
         synchronized (this) { captured = ledgerSync ? engine.revision() : revision; }
         ThreadPoolExecutor pool = team == null ? workers : incomingWorkers;
-        ScheduledExecutorService watchdog = timer;
-        if (!running || pool == null || watchdog == null) { connection.close(); return; }
-        connections.put(connection, channel);
+        ScheduledExecutorService watchdog = pool == null ? null : track(connection, channel, generation);
+        if (watchdog == null) { connection.close(); return; }
         try {
             connection.watch(watchdog);
             pool.execute(() -> {
@@ -249,7 +253,7 @@ final class PeerSync {
                 boolean[] counted = {false};
                 try (PeerConnection peer = connection) {
                     if (!running || epoch != generation) return;
-                    PeerProtocol.Listener callbacks = callbacks("", channel, address, generation, () -> {
+                    PeerProtocol.Listener callbacks = callbacks(peer, "", channel, address, generation, () -> {
                         if (ledgerSync && !counted[0]) {
                             counted[0] = true;
                             onMain(generation, () -> engine.incoming(true));
@@ -265,6 +269,7 @@ final class PeerSync {
                         onMain(generation, () -> {
                             if (reverse != null) engine.offer(reverse);
                             completed(null, channel, result, captured, ledgerSync);
+                            if (engine != null) engine.sessionFinished(peer, reverse == null ? "" : reverse.key);
                         });
                     }
                 } catch (Exception error) {
@@ -272,6 +277,7 @@ final class PeerSync {
                     onMain(generation, () -> failed(channel, error, added));
                 } finally {
                     connections.remove(connection);
+                    if (engine != null) onMain(generation, () -> engine.sessionFinished(connection, null));
                     if (counted[0]) onMain(generation, () -> engine.incoming(false));
                 }
             });
@@ -279,6 +285,11 @@ final class PeerSync {
             connections.remove(connection); connection.close();
             onMain(generation, () -> failed(channel, error, 0));
         }
+    }
+    private synchronized ScheduledExecutorService track(PeerConnection connection, PeerRoutePolicy.Channel channel, int generation) {
+        if (!running || epoch != generation || timer == null) return null;
+        connections.put(connection, channel);
+        return timer;
     }
     private PeerRoutePolicy.Endpoint callbackEndpoint(PeerConnection connection, PeerProtocol.Result result) {
         return team == null ? null : connection.callbackEndpoint(TeamProtocol.routeId(team.team, result.remoteId), result.callbackPort);
@@ -289,16 +300,23 @@ final class PeerSync {
             onMain(generation, this::syncNow);
         }, listenerPort);
     }
-    private PeerProtocol.Listener callbacks(String key, PeerRoutePolicy.Channel channel, String address, int generation, Runnable authenticated) {
+    private PeerProtocol.Listener callbacks(PeerConnection connection, String key, PeerRoutePolicy.Channel channel,
+                                            String address, int generation, Runnable authenticated) {
         return new PeerProtocol.Listener() {
             @Override public void authenticated(String peerId) {
                 if (!running || epoch != generation) return;
                 if (team == null && !key.isEmpty()) routes.remember(key, peerId, true);
-                if (bluetooth != null && channel == PeerRoutePolicy.Channel.BLUETOOTH) bluetooth.rememberAuthenticated(address, peerId);
+                if (channel == PeerRoutePolicy.Channel.BLUETOOTH) radios.rememberBluetooth(address, peerId);
+                if (engine != null && !background)
+                    onMain(generation, () -> engine.authenticated(connection, peerId, channel, key));
                 authenticated.run();
             }
             @Override public void stored(int added) {
-                onMain(generation, () -> { syncNow(); notifyChange(added); });
+                onMain(generation, () -> {
+                    lastProgress = SystemClock.elapsedRealtime();
+                    syncNow();
+                    notifyChange(added);
+                });
             }
         };
     }
@@ -319,13 +337,13 @@ final class PeerSync {
     }
     private void failed(PeerRoutePolicy.Channel channel, Exception error, int received) {
         if (team != null) {
-            SyncLog.write(context, channel.name(), error);
+            SyncLog.write(context, SyncLog.Event.valueOf(channel.name()), error);
             if (!enrolled && error instanceof TeamProtocol.Admission) {
                 summary = error.getMessage();
                 admissionError = summary;
             }
         } else summary = "本机记录保留 · " + (received > 0 ? "已收到 " + received + " 笔，确认待重试" :
-                channel == PeerRoutePolicy.Channel.WIFI && bluetooth.enabled() ? "热点待连接，自动尝试蓝牙" : "等待同伴，连接恢复后自动补传");
+                channel == PeerRoutePolicy.Channel.WIFI && radios.legacyBluetoothEnabled() ? "热点待连接，自动尝试蓝牙" : "等待同伴，连接恢复后自动补传");
         if (engine == null || !enrolled) request(true);
         notifyChange(0);
     }
@@ -335,28 +353,39 @@ final class PeerSync {
         } else main.post(() -> { if (running && generation == epoch) action.run(); });
     }
     private void notifyChange(int added) {
-        final int generation = epoch;
-        main.post(() -> { if (running && generation == epoch) listener.changed(added); });
+        onMain(epoch, () -> {
+            pendingNotification += added;
+            if (!notificationScheduled) {
+                notificationScheduled = true;
+                main.postDelayed(publishChange, 50);
+            }
+        });
     }
     String status() { return engine != null && enrolled ? syncState().label() : summary; }
     SyncEngine.Status syncState() { return engine == null ? SyncEngine.Status.EMPTY : engine.status(); }
-    void refreshBluetooth() { if (teamBle != null) teamBle.refresh(); }
+    void refreshBluetooth() { radios.refreshTeamBluetooth(); }
     boolean initialHistoryReceived() { return initialHistory; }
     boolean hasContact() { return engine != null && engine.hasContact(); }
+    boolean transferring() { return !connections.isEmpty(); }
+    long lastProgress() {
+        long latest = lastProgress;
+        for (PeerConnection connection : connections.keySet()) latest = Math.max(latest, connection.lastProgress());
+        return latest;
+    }
     String admissionError() { return enrolled ? "" : admissionError; }
     boolean enrollingNearby() { return !enrollmentPeer.isEmpty() && routes.busy(enrollmentPeer); }
-    String details() { return team != null ? summary : summary + "\n" + lan.status() + "\n" + bluetooth.status(); }
-    void connectManual(String address) { lan.connectManual(address); retryNow(); }
     private void closeChannel(PeerRoutePolicy.Channel channel) {
         for (Map.Entry<PeerConnection, PeerRoutePolicy.Channel> item : connections.entrySet())
             if (item.getValue() == channel) item.getKey().close();
     }
     void stop() {
-        running = false; epoch++;
+        synchronized (this) { running = false; epoch++; }
         main.removeCallbacks(tick); main.removeCallbacks(runSoon);
+        main.removeCallbacks(publishChange);
+        pendingNotification = 0;
+        notificationScheduled = false;
         if (engine != null) engine.stop();
-        lan.stop();
-        if (teamBle != null) teamBle.stop(); else bluetooth.stop();
+        radios.stop();
         for (PeerConnection connection : connections.keySet()) connection.close(); connections.clear();
         if (workers != null) workers.shutdownNow(); workers = null;
         if (incomingWorkers != null) incomingWorkers.shutdownNow(); incomingWorkers = null;

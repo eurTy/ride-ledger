@@ -27,6 +27,7 @@ import android.view.View;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -45,13 +46,9 @@ public final class TeamSetupActivity extends Activity {
     private static final int SCAN = 1, IMAGE = 2, CAMERA_PERMISSION = 3;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService decoder = Executors.newSingleThreadExecutor();
-    private final Runnable tick = new Runnable() {
-        @Override public void run() {
-            if (!started) return;
-            refresh();
-            if (started && !isFinishing()) main.postDelayed(this, 250);
-        }
-    };
+    // Transport callbacks refresh membership immediately. Only user-visible deadlines
+    // need a timer; an idle invitation page must not read SQLite four times per second.
+    private final Runnable tick = this::refresh;
     private LedgerStore store;
     private TeamCreator creator;
     private TeamJoiner joiner;
@@ -74,7 +71,7 @@ public final class TeamSetupActivity extends Activity {
 
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
-        store = new LedgerStore(getApplicationContext());
+        store = LedgerStore.application(this);
         creator = new TeamCreator(store);
         joiner = new TeamJoiner(store);
         transport = new TeamTransportAdapter(this, store, added -> refresh(), true);
@@ -157,7 +154,11 @@ public final class TeamSetupActivity extends Activity {
         body.setBackgroundColor(Color.rgb(248, 249, 247));
         body.setPadding(dp(20), dp(16), dp(20), dp(28));
         scroll.addView(body);
-        setContentView(scroll);
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.rgb(248, 249, 247));
+        root.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
+        FormInput.fitActivityWindow(getWindow(), root);
+        setContentView(root);
         button("返回", this::finish);
         LedgerStore.Trip current = trip();
         if (JOIN.equals(mode)) joining(current);
@@ -170,6 +171,7 @@ public final class TeamSetupActivity extends Activity {
         title = input(body, "旅行名称", 80);
         name = input(body, "本人名称", 30);
         if (current == null) {
+            FormInput.next(title, name);
             showTeamSize();
             status = text(body, "", 14, Color.GRAY);
             button("生成邀请", () -> {
@@ -370,6 +372,7 @@ public final class TeamSetupActivity extends Activity {
     }
 
     private void refresh() {
+        main.removeCallbacks(tick);
         if (status == null || isFinishing()) return;
         LedgerStore.Trip current = trip();
         if (current == null) return;
@@ -393,6 +396,10 @@ public final class TeamSetupActivity extends Activity {
             if (enrolled && started && !receiving && now - joinedAt >= TeamJoiner.RETURN_MILLIS) {
                 selectResult();
                 finish();
+            } else if (!enrolled && !expired && joinFailure.isEmpty()) {
+                refreshAt(startedAt + TeamJoiner.WAIT_MILLIS);
+            } else if (enrolled) {
+                refreshAt(joinedAt + (receiving ? TeamJoiner.HISTORY_WAIT_MILLIS : TeamJoiner.RETURN_MILLIS));
             }
             return;
         }
@@ -405,7 +412,13 @@ public final class TeamSetupActivity extends Activity {
             ready.setVisibility(complete ? View.VISIBLE : View.GONE);
             updateText(status, complete ? "小队已就绪，可开始记账" : now - startedAt >= TeamJoiner.WAIT_MILLIS ?
                     "等待队友加入中，可分享二维码或令牌" : "正在等待队友登记");
+            if (!complete && now - startedAt < TeamJoiner.WAIT_MILLIS)
+                refreshAt(startedAt + TeamJoiner.WAIT_MILLIS);
         } catch (Exception error) { inline(error); }
+    }
+
+    private void refreshAt(long deadline) {
+        if (started && !isFinishing()) main.postDelayed(tick, Math.max(1, deadline - SystemClock.elapsedRealtime()));
     }
 
     private void openScanner() {
@@ -476,6 +489,7 @@ public final class TeamSetupActivity extends Activity {
         field.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
         field.setFilters(new InputFilter[]{new InputFilter.LengthFilter(length)});
         field.setSingleLine(true);
+        FormInput.done(field);
         parent.addView(field);
         return field;
     }

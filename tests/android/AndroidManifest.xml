@@ -18,7 +18,7 @@
     <application android:debuggable="true" android:allowBackup="false"
         android:usesCleartextTraffic="true" android:label="Ride Ledger isolated sync tests"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
-        <service android:name="com.rideledger.SyncJobService" android:exported="true" android:permission="android.permission.BIND_JOB_SERVICE" />
+        <service android:name="com.rideledger.SyncJobService" android:exported="false" android:permission="android.permission.BIND_JOB_SERVICE" />
         <activity android:name="com.rideledger.InviteScannerActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name="com.rideledger.TeamSetupActivity" android:exported="false" />
         <activity android:name="com.rideledger.MainActivity" android:exported="true">

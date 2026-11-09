@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -10,7 +9,6 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import * as codec from './support/legacy-web-codec.mjs';
 import { fixture, expectedSummary, invalidInvites } from './support/scenario.mjs';
-import { startRelay } from './support/relay.mjs';
 import { DesktopLanSync } from '../desktop/lan-sync.mjs';
 import { DesktopTeams, encodeInvite } from '../desktop/team.mjs';
 import { randomUUID } from 'node:crypto';
@@ -30,7 +28,6 @@ const build = await run('powershell.exe', ['-NoProfile', '-File',
   windowsHide: true, maxBuffer: 1_000_000, timeout: 60000
 });
 process.stdout.write(build.stdout);
-const relay = await startRelay();
 const { t, events } = fixture();
 const webBundle = codec.encryptedBundle(t, events);
 const receivedFrames = [];
@@ -55,26 +52,6 @@ try {
   await desktopTeam.start();
   desktopTeam.updateTeam(directory.snapshot(team, [...ledger.values()]));
   await mkdir(output, { recursive: true });
-  const proxy = http.createServer(async (req, res) => {
-    try {
-      const parts = [];
-      for await (const part of req) parts.push(part);
-      if (req.url === '/503/sync') { res.writeHead(503); res.end('{}'); return; }
-      const response = await fetch(relay.origin + '/sync', {
-        method: 'POST', body: Buffer.concat(parts),
-        headers: { 'Content-Type': 'application/json', 'X-Trip-Token': req.headers['x-trip-token'] }
-      });
-      const body = await response.json();
-      if (req.url === '/lost-ack/sync') { req.socket.destroy(); return; }
-      if (req.url === '/truncated/sync') { res.writeHead(200); res.end('{"snapshots":['); return; }
-      if (req.url === '/corrupt/sync' && response.ok) body.snapshots.unshift({ ...body.snapshots[0], data: 'AAAA' });
-      res.writeHead(response.status, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(body));
-    } catch (error) { if (!res.destroyed) { res.writeHead(500); res.end('{}'); } }
-  });
-  servers.push(proxy);
-  proxy.listen(0, '127.0.0.1'); await once(proxy, 'listening');
-
   const tcp = async mode => {
     const server = net.createServer(socket => {
       let received = Buffer.alloc(0), handled = false;
@@ -109,9 +86,8 @@ try {
   const legacy = { ...valid }; delete legacy.inviterRole;
   const testHost = process.env.ANDROID_TEST_ADB_REVERSE === '1' ? '127.0.0.1' : '10.0.2.2';
   const lanPort = await tcp('normal'), lanDropPort = await tcp('drop'), lanCorruptPort = await tcp('corrupt');
-  const proxyPort = proxy.address().port;
   if (testHost === '127.0.0.1') {
-    for (const port of [proxyPort, desktopTeam.port, lanPort, lanDropPort, lanCorruptPort]) {
+    for (const port of [desktopTeam.port, lanPort, lanDropPort, lanCorruptPort]) {
       const endpoint = 'tcp:' + port;
       await adbRun('reverse', '--no-rebind', endpoint, endpoint);
       reversedPorts.push(endpoint);
@@ -123,7 +99,7 @@ try {
     legacyInvite: encode(legacy), wrappedInvite: inviteA.match(/.{1,39}/g).join('\r\n'),
     wrongKeyInvite: encode({ ...valid, secret: Buffer.alloc(32, 19).toString('base64url') }),
     invalidInvites: invalidInvites(valid),
-    testHost, endpoint: 'http://' + testHost + ':' + proxyPort,
+    testHost,
     desktopTeamInvite: encodeInvite(team), desktopTeamPort: desktopTeam.port,
     lanPort, lanDropPort, lanCorruptPort
   };
@@ -149,23 +125,11 @@ try {
     assert.equal(invite.id, t.id); assert.equal(invite.inviterRole, 'b');
     assert.equal(invite.personA, t.personA); assert.equal(invite.personB, t.personB);
   }
-  if (result.connectedInvite) {
-    const connected = codec.parseInviteCode(result.connectedInvite);
-    assert.equal(connected.syncUrl, 'https://relay.example.test');
-    assert.equal(connected.inviterRole, 'b');
-    console.log('INTEROP_PASS Android connection-bearing invitation read by desktop/web client');
-  }
   if (result.androidBundle) {
     const decoded = codec.decryptBundle(t, JSON.parse(result.androidBundle));
     const sort = values => JSON.parse(JSON.stringify(values)).sort((a, b) => a.id.localeCompare(b.id));
     assert.deepEqual(sort(decoded), sort(events));
     console.log('INTEROP_PASS Android invitation and AES-GCM records read by web client');
-  }
-  if (result.androidCloudBundle) {
-    const decoded = codec.decryptBundle(t, JSON.parse(result.androidCloudBundle));
-    assert.equal(new Set(decoded.map(event => event.id)).size, events.length + 2);
-    for (const event of events) assert.deepEqual(JSON.parse(JSON.stringify(decoded.find(item => item.id === event.id))), event);
-    console.log('INTEROP_PASS Native offline entries survive HTTP failures with original timestamps');
   }
   for (const message of receivedFrames) {
     assert.equal(message.version, 1);
@@ -182,5 +146,4 @@ try {
   for (const port of reversedPorts) await adbRun('reverse', '--remove', port).catch(() => {});
   for (const server of servers) await new Promise(resolve => server.close(resolve));
   await desktopTeam?.close();
-  await relay.cleanup();
 }

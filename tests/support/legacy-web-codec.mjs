@@ -2,9 +2,8 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 
 // Independent legacy fixtures for the Android compatibility checks.
 export function inviteCode(trip) {
-  const { id, name, personA, personB, secret, localPerson, syncUrl } = trip;
-  return Buffer.from(JSON.stringify({ id, name, personA, personB, secret, inviterRole: localPerson,
-    ...(syncUrl ? { syncUrl } : {}) })).toString('base64url');
+  const { id, name, personA, personB, secret, localPerson } = trip;
+  return Buffer.from(JSON.stringify({ id, name, personA, personB, secret, inviterRole: localPerson })).toString('base64url');
 }
 
 export function parseInviteCode(code) {

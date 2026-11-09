@@ -67,13 +67,14 @@ final class LanSync {
     private ExecutorService workers;
     private ExecutorService gatewayWorker;
     private volatile boolean running;
-    private volatile String status = "局域网同步未启动";
     private String ownServiceName = "";
     private int generation, discoveryEpoch;
     private volatile int gatewayGeneration;
     private boolean probingGateway;
     private long nextGatewayProbe;
     private final Runnable checkGateway = this::probeGateway;
+    private final Runnable updateNetwork = this::networkChanged;
+    private String networkSignature = "";
     private boolean resolving;
     private volatile boolean gatewayIsPeer;
 
@@ -123,22 +124,24 @@ final class LanSync {
             hotspotDiscovery.start();
             register(); discover();
             connectivity = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            networkSignature = localNetworkSignature();
+            int epoch = generation;
             networkCallback = new ConnectivityManager.NetworkCallback() {
-                @Override public void onAvailable(Network network) { main.post(LanSync.this::networkChanged); }
-                @Override public void onLost(Network network) { main.post(LanSync.this::networkChanged); }
-                @Override public void onLinkPropertiesChanged(Network network, LinkProperties properties) { main.post(LanSync.this::networkChanged); }
+                @Override public void onAvailable(Network network) { scheduleNetworkUpdate(epoch); }
+                @Override public void onLost(Network network) { scheduleNetworkUpdate(epoch); }
+                @Override public void onLinkPropertiesChanged(Network network, LinkProperties properties) { scheduleNetworkUpdate(epoch); }
             };
             if (connectivity != null) try {
                 connectivity.registerNetworkCallback(new NetworkRequest.Builder().clearCapabilities()
                         .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                         .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET).build(), networkCallback);
-            } catch (Exception error) { if (gatewayProbe != null) SyncLog.write(context, "LAN_NETWORK_CALLBACK", error); }
+            } catch (Exception error) { if (gatewayProbe != null) SyncLog.write(context, SyncLog.Event.LAN_NETWORK_CALLBACK, error); }
             if (!bounded && teamScope.isEmpty()) main.postDelayed(calibrate, 60000);
             if (events == null) main.postDelayed(legacyTick, 10000);
             if (gatewayProbe != null) main.postDelayed(checkGateway, 700);
             publish("同一热点下可自动同步 · 本机地址 " + addressLabel(), 0);
         } catch (Exception error) {
-            if (!teamScope.isEmpty()) SyncLog.write(context, "LAN_START", error);
+            if (!teamScope.isEmpty()) SyncLog.write(context, SyncLog.Event.LAN_START, error);
             stop();
             publish("热点连接暂不可用，可使用蓝牙", 0);
         }
@@ -151,7 +154,7 @@ final class LanSync {
             return socket;
         } catch (java.io.IOException error) {
             socket.close();
-            SyncLog.write(context, "GATEWAY_LISTEN", error);
+            SyncLog.write(context, SyncLog.Event.GATEWAY_LISTEN, error);
             return new ServerSocket(0);
         }
     }
@@ -159,6 +162,21 @@ final class LanSync {
     void announce() {
         if (hotspotDiscovery != null) hotspotDiscovery.networkChanged();
         probeGateway();
+    }
+
+    void rediscover() {
+        if (!running) {
+            start(false);
+            return;
+        }
+        if (registration == null) {
+            main.removeCallbacks(retryRegistration);
+            register();
+        }
+        main.removeCallbacks(refresh);
+        main.post(refresh);
+        nextGatewayProbe = 0;
+        announce();
     }
 
     private void probeGateway() {
@@ -180,11 +198,11 @@ final class LanSync {
                             if (running && epoch == gatewayGeneration) offer("gateway:" + route, address, route, true);
                         });
                     } catch (Exception error) {
-                        if (running && epoch == gatewayGeneration) SyncLog.write(context, "GATEWAY_PROBE", error);
+                        if (running && epoch == gatewayGeneration) SyncLog.write(context, SyncLog.Event.GATEWAY_PROBE, error);
                     }
                 }
             } catch (RuntimeException error) {
-                if (running && epoch == gatewayGeneration) SyncLog.write(context, "GATEWAY_ROUTE", error);
+                if (running && epoch == gatewayGeneration) SyncLog.write(context, SyncLog.Event.GATEWAY_ROUTE, error);
             } finally {
                 main.post(() -> { if (epoch == gatewayGeneration) probingGateway = false; });
             }
@@ -205,7 +223,7 @@ final class LanSync {
                 }
                 @Override public void onRegistrationFailed(NsdServiceInfo service, int errorCode) {
                     main.post(() -> { if (running && epoch == generation) {
-                        if (gatewayProbe != null) SyncLog.write(context, "LAN_REGISTER", Integer.toString(errorCode));
+                        if (gatewayProbe != null) SyncLog.write(context, SyncLog.Event.LAN_REGISTER, Integer.toString(errorCode));
                         registration = null; main.removeCallbacks(retryRegistration); main.postDelayed(retryRegistration, 10000);
                     } });
                 }
@@ -214,7 +232,7 @@ final class LanSync {
             };
             nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, registration);
         } catch (Exception error) {
-            if (gatewayProbe != null) SyncLog.write(context, "LAN_REGISTER", error);
+            if (gatewayProbe != null) SyncLog.write(context, SyncLog.Event.LAN_REGISTER, error);
             registration = null; main.removeCallbacks(retryRegistration); main.postDelayed(retryRegistration, 10000);
         }
     }
@@ -226,8 +244,38 @@ final class LanSync {
         @Override public void run() { if (running) { syncNow(); main.postDelayed(this, 10000); } }
     };
     private final Runnable refresh = () -> { if (running) restartDiscovery(); };
+    private void scheduleNetworkUpdate(int epoch) {
+        main.post(() -> {
+            if (!running || epoch != generation) return;
+            main.removeCallbacks(updateNetwork);
+            main.postDelayed(updateNetwork, 350);
+        });
+    }
+
+    private String localNetworkSignature() {
+        List<String> links = new ArrayList<>();
+        if (connectivity == null) return "";
+        for (Network network : connectivity.getAllNetworks()) {
+            NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(network);
+            if (capabilities == null || !(capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))) continue;
+            LinkProperties properties = connectivity.getLinkProperties(network);
+            if (properties == null) continue;
+            List<String> routes = new ArrayList<>();
+            for (RouteInfo route : properties.getRoutes()) routes.add(route.toString());
+            for (android.net.LinkAddress address : properties.getLinkAddresses()) routes.add(address.toString());
+            java.util.Collections.sort(routes);
+            links.add(network + ":" + properties.getInterfaceName() + ":" + routes);
+        }
+        java.util.Collections.sort(links);
+        return links.toString();
+    }
+
     private void networkChanged() {
         if (!running) return;
+        String signature = localNetworkSignature();
+        if (networkSignature.equals(signature)) return;
+        networkSignature = signature;
         gatewayGeneration++;
         probingGateway = false;
         nextGatewayProbe = 0;
@@ -249,7 +297,7 @@ final class LanSync {
             @Override public void onStartDiscoveryFailed(String type, int code) {
                 main.post(() -> {
                     if (!running || epoch != discoveryEpoch) return;
-                    if (gatewayProbe != null) SyncLog.write(context, "LAN_DISCOVER", Integer.toString(code));
+                    if (gatewayProbe != null) SyncLog.write(context, SyncLog.Event.LAN_DISCOVER, Integer.toString(code));
                     stopDiscovery();
                     main.removeCallbacks(refresh);
                     main.postDelayed(refresh, 10000);
@@ -273,7 +321,7 @@ final class LanSync {
         };
         try { nsd.discoverServices(serviceType(), NsdManager.PROTOCOL_DNS_SD, discovery); }
         catch (Exception error) {
-            if (gatewayProbe != null) SyncLog.write(context, "LAN_DISCOVER", error);
+            if (gatewayProbe != null) SyncLog.write(context, SyncLog.Event.LAN_DISCOVER, error);
             discovery = null; main.postDelayed(refresh, 10000);
         }
     }
@@ -283,7 +331,7 @@ final class LanSync {
         try {
             nsd.resolveService(service, new NsdManager.ResolveListener() {
                 @Override public void onResolveFailed(NsdServiceInfo value, int code) {
-                    if (gatewayProbe != null) SyncLog.write(context, "LAN_RESOLVE", Integer.toString(code));
+                    if (gatewayProbe != null) SyncLog.write(context, SyncLog.Event.LAN_RESOLVE, Integer.toString(code));
                     finished(null);
                 }
                 @Override public void onServiceResolved(NsdServiceInfo value) { finished(value); }
@@ -300,7 +348,7 @@ final class LanSync {
                 }
             });
         } catch (Exception error) {
-            if (gatewayProbe != null) SyncLog.write(context, "LAN_RESOLVE", error);
+            if (gatewayProbe != null) SyncLog.write(context, SyncLog.Event.LAN_RESOLVE, error);
             resolving = false; main.postDelayed(() -> resolveNext(epoch), 500);
         }
     }
@@ -399,7 +447,7 @@ final class LanSync {
         ConnectivityManager manager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
         if (manager == null) return null;
         // A hotspot may have no Internet while cellular remains the system default. Select its local
-        // route explicitly for this socket; never bind the whole app or its optional cloud connection.
+        // route explicitly for this socket; never bind the whole app.
         for (Network network : manager.getAllNetworks()) {
             NetworkCapabilities capabilities = manager.getNetworkCapabilities(network);
             if (capabilities == null || !(capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
@@ -422,16 +470,21 @@ final class LanSync {
     }
     private void acceptLoop(ServerSocket listening) {
         while (running && server == listening) {
+            Socket socket = null;
             try {
-                Socket socket = listening.accept();
-                if (!running || sockets.size() >= 8) { socket.close(); continue; }
+                socket = listening.accept();
+                if (!running || server != listening || sockets.size() >= 8) { socket.close(); continue; }
                 sockets.add(socket); socket.setSoTimeout(15000); socket.setTcpNoDelay(true);
                 PeerConnection connection = connection(socket);
                 if (events != null) events.incoming(connection, socket.getInetAddress().getHostAddress());
                 else workers.execute(() -> standalone(connection, false));
             } catch (Exception error) {
+                if (socket != null) {
+                    sockets.remove(socket);
+                    try { socket.close(); } catch (Exception ignored) { }
+                }
                 if (!running || server != listening) return;
-                if (gatewayProbe != null) SyncLog.write(context, "LAN_ACCEPT", error);
+                if (gatewayProbe != null) SyncLog.write(context, SyncLog.Event.LAN_ACCEPT, error);
                 else publish("热点连接待重试", 0);
             }
         }
@@ -460,13 +513,6 @@ final class LanSync {
                     Integer.parseInt(endpoint.key.substring(endpoint.key.lastIndexOf(':') + 1)))));
         }
     }
-    void connectManual(String raw) {
-        String[] parts = raw.trim().split(":");
-        if (parts.length != 2 || !parts[0].matches("[0-9]{1,3}(\\.[0-9]{1,3}){3}")) throw new IllegalArgumentException("请输入有效的 IP:端口");
-        for (String piece : parts[0].split("\\.")) if (Integer.parseInt(piece) > 255) throw new IllegalArgumentException("IP 地址无效");
-        int port = Integer.parseInt(parts[1]); if (port < 1 || port > 65535) throw new IllegalArgumentException("端口无效");
-        offer("manual", new InetSocketAddress(parts[0], port), "", false);
-    }
     String addressLabel() {
         if (server == null) return "等待热点";
         List<String> result = new ArrayList<>();
@@ -482,15 +528,14 @@ final class LanSync {
         } catch (Exception ignored) { }
         return result.isEmpty() ? "等待热点" : String.join(" / ", result);
     }
-    String status() { return status; }
     private void publish(String value, int added) {
-        status = value;
         main.post(() -> { if (events != null) events.changed(value); else standaloneListener.changed(value, added); });
     }
     synchronized void stop() {
         running = false; generation++; gatewayGeneration++;
         main.removeCallbacks(calibrate); main.removeCallbacks(legacyTick); main.removeCallbacks(refresh); main.removeCallbacks(retryRegistration);
         main.removeCallbacks(checkGateway);
+        main.removeCallbacks(updateNetwork);
         if (gatewayWorker != null) gatewayWorker.shutdownNow();
         gatewayWorker = null;
         probingGateway = false;

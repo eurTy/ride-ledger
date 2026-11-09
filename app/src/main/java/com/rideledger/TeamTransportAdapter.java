@@ -42,6 +42,7 @@ final class TeamTransportAdapter {
     }
 
     void recordsChanged() { if (nearby != null) nearby.syncNow(); }
+    void reconnect() { if (nearby != null) nearby.reconnect(); }
 
     void permissionsChanged() { if (nearby != null) nearby.refreshBluetooth(); }
 

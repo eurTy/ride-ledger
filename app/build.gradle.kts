@@ -15,8 +15,8 @@ android {
         applicationId = "com.rideledger"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.2.0-test.10"
+        versionCode = 17
+        versionName = "0.2.1"
     }
 
     signingConfigs {

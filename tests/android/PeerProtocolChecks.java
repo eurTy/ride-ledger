@@ -7,6 +7,7 @@ import android.content.SharedPreferences;
 import android.database.DatabaseErrorHandler;
 import android.database.sqlite.SQLiteDatabase;
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -148,6 +149,20 @@ final class PeerProtocolChecks {
                 require(first.ok() && first.a.modern && first.a.durable && first.b.durable, "v1 capability negotiation failed: "+first.errors);
                 require(a.store.events(trip).size()==2 && b.store.events(trip).size()==2,"legacy data changed");
                 Pair second = pair(a,b,true,"",null); require(second.ok() && second.a.sent==0 && second.b.sent==0,"upgrade resent history");
+            }
+        });
+        sink.check("strict peer merge: ignored database insert rolls back the whole batch", () -> {
+            try (Env env = new Env(base, invite, "a")) {
+                env.store.getWritableDatabase().execSQL("CREATE TRIGGER reject_test_event BEFORE INSERT ON events " +
+                        "WHEN NEW.at=2 BEGIN SELECT RAISE(IGNORE); END");
+                JSONObject accepted = new LedgerStore.Event(UUID.randomUUID().toString(), trip, "expense", 1,
+                        expense("a", "valid first row")).json();
+                JSONObject refused = new LedgerStore.Event(UUID.randomUUID().toString(), trip, "expense", 2,
+                        expense("a", "ignored second row")).json();
+                boolean rejected = false;
+                try { env.store.mergeStrict(trip, new JSONArray().put(accepted).put(refused)); }
+                catch (JSONException expected) { rejected = true; }
+                require(rejected && env.store.events(trip).isEmpty(), "receiver accepted an incomplete batch");
             }
         });
         sink.check("routes: Wi-Fi is preferred, failures switch to Bluetooth, and recovered Wi-Fi wins", () -> {

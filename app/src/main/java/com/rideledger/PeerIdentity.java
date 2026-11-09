@@ -7,7 +7,7 @@ import java.util.UUID;
 final class PeerIdentity {
     private PeerIdentity() { }
     static synchronized String deviceId(Context context) {
-        // Reuse the existing cloud identity so upgrading does not add another device snapshot.
+        // Keep the original preferences key so upgrades preserve device identity and team seats.
         SharedPreferences prefs = context.getSharedPreferences("cloud", Context.MODE_PRIVATE);
         String value = prefs.getString("device_id", "");
         if (!valid(value)) {

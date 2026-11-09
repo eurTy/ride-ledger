@@ -66,21 +66,25 @@ final class PeerProtocol {
         this.remoteDevice = remoteDevice;
         this.sessionKey = sessionKey;
         if (!PeerIdentity.valid(deviceId)) throw new IllegalArgumentException("设备身份无效");
-        synchronized (store) {
-            for (LedgerStore.Trip trip : store.trips()) {
-                if (teamTrip == null ? trip.team != null : trip.team == null || !trip.id.equals(teamTrip.id) ||
-                        !trip.team.fingerprint.equals(teamTrip.team.fingerprint) || !trip.secret.equals(teamTrip.secret)) continue;
-                Snapshot snapshot = new Snapshot(trip);
-                if (teamTrip != null) result.syncPoint = store.syncPoint(trip.id);
-                for (LedgerStore.Event entry : store.events(trip.id)) {
-                    JSONObject event = entry.json(), data = event.getJSONObject("data");
-                    for (String field : new String[]{"currency", "fromCurrency", "toCurrency"})
-                        if ("RMB".equalsIgnoreCase(data.optString(field))) data.put(field, "CNY");
-                    snapshot.events.put(entry.id, event); snapshot.hashes.put(entry.id, PeerWire.hash(event));
-                }
-                if (snapshot.events.size() > MAX_EVENTS) throw new IllegalArgumentException("单趟旅行记录过多");
-                snapshot.root = PeerWire.hash(snapshot.hashes); snapshots.put(trip.id, snapshot);
+        // Freeze the journal and its acknowledgement point together. Do not hold the
+        // database monitor while canonicalizing/hashing every record for each peer.
+        List<LedgerStore.Trip> trips = teamTrip == null ? store.trips() : java.util.Collections.singletonList(teamTrip);
+        for (LedgerStore.Trip requested : trips) {
+            LedgerStore.Snapshot journal = store.snapshot(requested.id);
+            LedgerStore.Trip trip = journal.trip;
+            if (trip == null) continue;
+            if (teamTrip == null ? trip.team != null : trip.team == null || !trip.id.equals(teamTrip.id) ||
+                    !trip.team.fingerprint.equals(teamTrip.team.fingerprint) || !trip.secret.equals(teamTrip.secret)) continue;
+            Snapshot snapshot = new Snapshot(trip);
+            if (teamTrip != null) result.syncPoint = journal.syncPoint;
+            for (LedgerStore.Event entry : journal.events) {
+                JSONObject event = entry.json();
+                LedgerRules.normalizeCurrencies(entry.data);
+                snapshot.events.put(entry.id, event);
+                snapshot.hashes.put(entry.id, PeerWire.hash(event));
             }
+            if (snapshot.events.size() > MAX_EVENTS) throw new IllegalArgumentException("单趟旅行记录过多");
+            snapshot.root = PeerWire.hash(snapshot.hashes); snapshots.put(trip.id, snapshot);
         }
     }
 
