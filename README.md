@@ -2,7 +2,7 @@
 
 为长途骑行和结伴旅行做的离线账本。一次旅行一个账本，随手记下谁付了钱、各自带了多少现金、换了多少外币。队友在附近时，账目自动补齐。
 
-[下载 Android 0.2.1 APK](https://github.com/eurTy/ride-ledger/releases/download/v0.2.1/ride-ledger-0.2.1-android.apk) · [版本记录](CHANGELOG.md) · [连接与真机测试](docs/android-peer-sync.md)
+[下载 Android 0.2.1 APK](https://github.com/eurTy/ride-ledger/releases/download/v0.2.1/ride-ledger-0.2.1-android.apk) · [版本记录](CHANGELOG.md) · [历次安卓测试版](CHANGELOG.md#安卓测试版本历史) · [连接与真机测试](docs/android-peer-sync.md)
 
 ## 0.2.1 功能
 
