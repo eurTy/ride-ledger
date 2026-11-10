@@ -73,7 +73,7 @@ final class LedgerStore extends SQLiteOpenHelper {
             this(id, tripId, kind, at, data, 0);
         }
 
-        private Event(String id, String tripId, String kind, long at, JSONObject data, long localRow) {
+        Event(String id, String tripId, String kind, long at, JSONObject data, long localRow) {
             this.id = id;
             this.tripId = tripId;
             this.kind = kind;
@@ -559,6 +559,29 @@ final class LedgerStore extends SQLiteOpenHelper {
         return event;
     }
 
+    synchronized void edit(Event original, JSONObject data) throws Exception {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            Trip trip = getTrip(original.tripId);
+            if (trip == null || !teamReady(trip)) throw new IllegalStateException("这趟旅行暂时无法编辑");
+            List<Event> events = events(original.tripId);
+            LedgerRevisions revisions = new LedgerRevisions(events);
+            Event base = null;
+            for (Event event : events) if (event.id.equals(original.id)) { base = event; break; }
+            Event current = base == null ? null : revisions.visible(base);
+            if (current == null) throw new IllegalStateException("这笔记录已删除");
+            if (current.localRow != original.localRow || !PeerWire.canonical(current.data).equals(PeerWire.canonical(original.data)))
+                throw new IllegalStateException("这笔记录已更新，请关闭后重新打开");
+            if (!PeerWire.canonical(current.data).equals(PeerWire.canonical(data))) {
+                JSONObject payload = new JSONObject().put("target", base.id).put("kind", base.kind)
+                        .put("revision", Math.addExact(revisions.revisionOf(base), 1)).put("record", data);
+                add(trip.id, "edit", payload);
+            }
+            db.setTransactionSuccessful();
+        } finally { db.endTransaction(); }
+    }
+
     private long insertEvent(SQLiteDatabase db, Event event) {
         ContentValues values = new ContentValues();
         values.put("id", event.id);
@@ -592,6 +615,8 @@ final class LedgerStore extends SQLiteOpenHelper {
                     continue;
                 }
                 LedgerRules.normalizeCurrencies(event.data);
+                if ("edit".equals(event.kind) && event.data.optJSONObject("record") != null)
+                    LedgerRules.normalizeCurrencies(event.data.getJSONObject("record"));
                 if (!LedgerRules.validEvent(trip, event) || (strict && !PeerIdentity.valid(event.id))) {
                     if (strict) throw new JSONException("流水格式无效");
                     continue;
@@ -627,6 +652,10 @@ final class LedgerStore extends SQLiteOpenHelper {
         return decodeEvents(tripId, readEvents(tripId, false));
     }
 
+    List<Event> visibleExchanges(String tripId) {
+        return LedgerRevisions.visibleRecords(exchangesAndDeletes(tripId));
+    }
+
     List<Event> exchangesAndDeletes(String tripId) {
         return decodeEvents(tripId, readEvents(tripId, true));
     }
@@ -636,7 +665,7 @@ final class LedgerStore extends SQLiteOpenHelper {
         List<StoredEvent> result = new ArrayList<>();
         try (Cursor c = getReadableDatabase().rawQuery(
                 "SELECT id,kind,at,data,rowid FROM events WHERE trip_id=?" +
-                        (exchangeOnly ? " AND kind IN ('exchange','delete')" : "") + " ORDER BY at,id",
+                        (exchangeOnly ? " AND kind IN ('exchange','delete','edit')" : "") + " ORDER BY at,id",
                 new String[]{tripId})) {
             while (c.moveToNext()) result.add(new StoredEvent(c.getString(0), c.getString(1), c.getLong(2),
                     c.getString(3), c.getLong(4)));
@@ -666,19 +695,13 @@ final class LedgerStore extends SQLiteOpenHelper {
 
     Map<String, Long> recentCurrencyCodes(String tripId, Set<String> excluded, int limit) {
         Map<String, Long> codes = new LinkedHashMap<>();
-        try (Cursor c = getReadableDatabase().rawQuery(
-                "SELECT kind,data,at FROM events WHERE trip_id=? AND kind!='delete' ORDER BY at DESC,id DESC",
-                new String[]{tripId})) {
-            while (codes.size() < limit && c.moveToNext()) {
-                try {
-                    JSONObject data = new JSONObject(c.getString(1));
-                    long at = c.getLong(2);
-                    if ("exchange".equals(c.getString(0))) {
-                        addCurrencyCode(codes, excluded, data.optString("toCurrency"), at);
-                        if (codes.size() < limit) addCurrencyCode(codes, excluded, data.optString("fromCurrency"), at);
-                    } else addCurrencyCode(codes, excluded, data.optString("currency"), at);
-                } catch (JSONException ignored) { }
-            }
+        List<Event> visible = LedgerRevisions.visibleRecords(events(tripId));
+        for (int i = visible.size() - 1; i >= 0 && codes.size() < limit; i--) {
+            Event event = visible.get(i);
+            if ("exchange".equals(event.kind)) {
+                addCurrencyCode(codes, excluded, event.data.optString("toCurrency"), event.at);
+                if (codes.size() < limit) addCurrencyCode(codes, excluded, event.data.optString("fromCurrency"), event.at);
+            } else addCurrencyCode(codes, excluded, event.data.optString("currency"), event.at);
         }
         return codes;
     }

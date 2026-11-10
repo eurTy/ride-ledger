@@ -251,6 +251,50 @@ final class PeerUiChecks {
         }
     }
 
+    static void runRecordEdit(Instrumentation instrumentation) throws Exception {
+        Context context = instrumentation.getTargetContext();
+        PeerProtocolChecks.Ctx other = new PeerProtocolChecks.Ctx(context);
+        try (LedgerStore local = new LedgerStore(context); LedgerStore remote = new LedgerStore(other)) {
+            LedgerStore.Trip trip = local.createTeam("编辑记录测试", Arrays.asList("甲", "乙"));
+            LedgerStore.Trip peer = remote.joinTrip(local.inviteCode(trip), "m2");
+            LedgerActions entries = new LedgerActions(local);
+            entries.expense(trip, "m1", "CNY", "36", false, "骑行午饭");
+            LedgerStore.Event original = local.events(trip.id).get(0);
+            context.getSharedPreferences("ui", 0).edit().putString("last_trip", trip.id)
+                    .putBoolean(MainActivity.STARTUP_PERMISSIONS_REQUESTED, true).commit();
+            Activity activity = instrumentation.startActivitySync(new Intent(context, MainActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            try {
+                PeerSync sync = transport(activity).nearby;
+                teamExchange(sync, remote, peer, other);
+                instrumentation.runOnMainSync(() -> text(activity.getWindow().getDecorView(), "复盘").performClick());
+                waitForText(instrumentation, activity, "1 笔");
+                instrumentation.runOnMainSync(() -> require(
+                        recordContaining(activity.getWindow().getDecorView(), "骑行午饭").performClick(), "record was not editable"));
+                instrumentation.waitForIdleSync();
+                instrumentation.runOnMainSync(() -> {
+                    View editor = windowWithText("编辑记录");
+                    require(editor != null, "edit sheet did not open");
+                    EditText amount = labeledInput(editor, "支付金额");
+                    require("36.00".contentEquals(amount.getText()), "editor did not load original amount");
+                    amount.setText("59");
+                    text(editor, "保存修改").performClick();
+                });
+                waitForRecordColor(instrumentation, activity, "59.00 CNY", 0xffe9ebed);
+                LedgerStore.Event updated = local.summary(trip.id).visible.get(0);
+                require(updated.id.equals(original.id) && updated.at == original.at, "edit changed stable identity or time");
+                require(remote.summary(peer.id).spent.get("CNY") == 3600, "offline edit reached the remote ledger prematurely");
+                teamExchange(sync, remote, peer, other);
+                teamExchange(sync, remote, peer, other);
+                require(remote.summary(peer.id).visible.size() == 1 && remote.summary(peer.id).spent.get("CNY") == 5900 &&
+                        remote.events(peer.id).size() == 2, "edit did not converge or replay created another record");
+            } finally {
+                instrumentation.runOnMainSync(activity::finish);
+                instrumentation.waitForIdleSync();
+            }
+        } finally { other.cleanup(); }
+    }
+
     static void runRecordDeletion(Instrumentation instrumentation) throws Exception {
         Context context = instrumentation.getTargetContext();
         PeerProtocolChecks.Ctx other = new PeerProtocolChecks.Ctx(context);

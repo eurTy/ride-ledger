@@ -2,10 +2,8 @@ package com.rideledger;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
-import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 
 /** Converts user input to validated ledger events. UI preferences and navigation are separate. */
@@ -68,30 +66,75 @@ final class LedgerActions {
 
     private void saveExpense(LedgerStore.Trip trip, String payer, String code, long amount,
                              String mode, String note, JSONObject shares) throws Exception {
-        store.add(trip.id, "expense", new JSONObject().put("payer", payer).put("currency", code)
-                .put("amount", amount).put("mode", mode).put("note", note.trim()).put("shares", shares));
+        store.add(trip.id, "expense", expenseData(payer, code, amount, mode, note, shares));
+    }
+
+    private static JSONObject expenseData(String payer, String code, long amount, String mode,
+                                          String note, JSONObject shares) throws Exception {
+        return new JSONObject().put("payer", payer).put("currency", code)
+                .put("amount", amount).put("mode", mode).put("note", note.trim()).put("shares", shares);
+    }
+
+    void editExpense(LedgerStore.Trip trip, LedgerStore.Event original, String payer, String code,
+                     String rawAmount, int splitMode, String[] inputs, String note) throws Exception {
+        if (splitMode == 2) {
+            CustomSplit split = customSplit(trip, code, inputs);
+            if (split.total <= 0) throw new IllegalArgumentException("分摊合计必须大于零");
+            store.edit(original, expenseData(payer, code, split.total, "custom", note, split.shares));
+            return;
+        }
+        boolean personal = splitMode == 1;
+        long amount = Money.parse(rawAmount, code);
+        String mode = personal ? "personal" : "shared";
+        JSONObject old = original.data;
+        boolean sameSplit = mode.equals(old.optString("mode", "shared")) && amount == old.optLong("amount") &&
+                payer.equals(old.optString("payer")) && code.equals(old.optString("currency"));
+        JSONObject shares = sameSplit ? old.getJSONObject("shares") : trip.team.shares(amount, payer, personal);
+        store.edit(original, expenseData(payer, code, amount, mode, note, shares));
     }
 
     void cash(LedgerStore.Trip trip, String member, String rawCurrency, String rawAmount) throws Exception {
+        cash(trip, member, rawCurrency, rawAmount, null);
+    }
+
+    void cash(LedgerStore.Trip trip, String member, String rawCurrency, String rawAmount, LedgerStore.Event original) throws Exception {
         String code = Money.code(rawCurrency);
-        store.add(trip.id, "topup", new JSONObject().put("person", member)
-                .put("currency", code).put("amount", Money.parse(rawAmount, code)));
+        save(trip, "topup", new JSONObject().put("person", member)
+                .put("currency", code).put("amount", Money.parse(rawAmount, code)), original);
     }
 
     void transfer(LedgerStore.Trip trip, String from, String to, String rawCurrency, String rawAmount) throws Exception {
+        transfer(trip, from, to, rawCurrency, rawAmount, null);
+    }
+
+    void transfer(LedgerStore.Trip trip, String from, String to, String rawCurrency, String rawAmount,
+                  LedgerStore.Event original) throws Exception {
         if (from.equals(to)) throw new IllegalArgumentException("请选择不同的付款人和收款人");
         String code = Money.code(rawCurrency);
-        store.add(trip.id, "transfer", new JSONObject().put("from", from).put("to", to)
-                .put("currency", code).put("amount", Money.parse(rawAmount, code)));
+        save(trip, "transfer", new JSONObject().put("from", from).put("to", to)
+                .put("currency", code).put("amount", Money.parse(rawAmount, code)), original);
     }
 
     void exchange(LedgerStore.Trip trip, String member, String rawFrom, String rawTo,
                   String fromAmount, String toAmount) throws Exception {
+        exchange(trip, member, rawFrom, rawTo, fromAmount, toAmount, null);
+    }
+
+    void exchange(LedgerStore.Trip trip, String member, String rawFrom, String rawTo,
+                  String fromAmount, String toAmount, LedgerStore.Event original) throws Exception {
         String from = Money.code(rawFrom), to = Money.code(rawTo);
         if (from.equals(to)) throw new IllegalArgumentException("请选择两种不同货币");
-        store.add(trip.id, "exchange", new JSONObject().put("person", member)
+        save(trip, "exchange", new JSONObject().put("person", member)
                 .put("fromCurrency", from).put("fromAmount", Money.parse(fromAmount, from))
-                .put("toCurrency", to).put("toAmount", Money.parse(toAmount, to)));
+                .put("toCurrency", to).put("toAmount", Money.parse(toAmount, to)), original);
+    }
+
+    private void save(LedgerStore.Trip trip, String kind, JSONObject data, LedgerStore.Event original) throws Exception {
+        if (original == null) store.add(trip.id, kind, data);
+        else {
+            if (original.data.has("note")) data.put("note", original.data.get("note"));
+            store.edit(original, data);
+        }
     }
 
     void delete(LedgerStore.Trip trip, List<String> records) throws Exception {
@@ -108,13 +151,9 @@ final class LedgerActions {
     }
 
     String[] exchangeDefaults(String tripId) {
-        List<LedgerStore.Event> events = store.exchangesAndDeletes(tripId);
-        Set<String> deleted = new HashSet<>();
-        for (LedgerStore.Event event : events)
-            if ("delete".equals(event.kind)) deleted.add(event.data.optString("target"));
+        List<LedgerStore.Event> events = store.visibleExchanges(tripId);
         for (int i = events.size() - 1; i >= 0; i--) {
             LedgerStore.Event event = events.get(i);
-            if (!"exchange".equals(event.kind) || deleted.contains(event.id)) continue;
             try {
                 String from = Money.code(event.data.getString("fromCurrency"));
                 String to = Money.code(event.data.getString("toCurrency"));

@@ -296,6 +296,7 @@ public final class SyncTestInstrumentation extends Instrumentation {
             check("two-person team UI: quick entry, review and sync use the same team flow", () -> PeerUiChecks.runTeam(this));
             check("custom split UI: payer, individual shares and settlement agree", () -> PeerUiChecks.runCustomSplit(this));
             check("record deletion: full-list checkboxes, confirmation, offline propagation and replay", () -> PeerUiChecks.runRecordDeletion(this));
+            check("record editing: bottom sheet, original time and offline propagation", () -> PeerUiChecks.runRecordEdit(this));
             check("review badge: verified channels, Wi-Fi failure falls back to Bluetooth on tap, and recent contact expires", () -> PeerUiChecks.runRosterRefresh(this));
             check("open team UI: organizer roster and validation are inline", () -> PeerUiChecks.runTeamSetup(this));
             check("open team UI: join details, connecting and delayed success are inline", () -> PeerUiChecks.runTeamJoin(this));

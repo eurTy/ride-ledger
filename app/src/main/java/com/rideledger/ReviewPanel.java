@@ -2,11 +2,13 @@ package com.rideledger;
 
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextUtils;
@@ -15,6 +17,7 @@ import android.text.style.RelativeSizeSpan;
 import android.text.style.StyleSpan;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
@@ -36,6 +39,7 @@ final class ReviewPanel extends ListView {
     interface Actions {
         void filter(String key);
         void delete(List<String> ids);
+        void edit(LedgerReview.Row row);
         void openAll();
         void reconnect();
     }
@@ -177,7 +181,7 @@ final class ReviewPanel extends ListView {
             for (int i = 0; i < end; i++) {
                 RecordCard card = new RecordCard();
                 preview.addView(card, fullMargin());
-                bindRecord(card, filtered.get(i), card);
+                bindRecord(card, filtered.get(i), true);
             }
         }
         if (!model.records.isEmpty())
@@ -256,8 +260,7 @@ final class ReviewPanel extends ListView {
                 @Override public int getCount() { return model.records.size(); }
                 @Override public LedgerReview.Row getItem(int position) { return model.records.get(position); }
                 @Override public long getItemId(int position) { return position; }
-                // Only the checkbox is interactive. ListView's item rectangle must
-                // not provide a second press target around the rounded card.
+                // The card and checkbox own their touch targets.
                 @Override public boolean areAllItemsEnabled() { return false; }
                 @Override public boolean isEnabled(int position) { return false; }
                 @Override public View getView(int position, View convertView, ViewGroup parent) {
@@ -266,7 +269,7 @@ final class ReviewPanel extends ListView {
                     CheckBox box = (CheckBox) row.getChildAt(0);
                     RecordCard card = (RecordCard) row.getChildAt(1);
                     LedgerReview.Row record = getItem(position);
-                    bindRecord(card, record, row);
+                    bindRecord(card, record, !selecting);
                     box.setOnCheckedChangeListener(null);
                     box.setChecked(selected.contains(record.id));
                     box.setVisibility(selecting ? VISIBLE : GONE);
@@ -352,19 +355,19 @@ final class ReviewPanel extends ListView {
             View view = preview.getChildAt(i);
             if (view != null && view.getTag() instanceof LedgerReview.Row) {
                 LedgerReview.Row record = (LedgerReview.Row) view.getTag();
-                if (record.localRow > previous && record.localRow <= row) styleRecord(view, record, view);
+                if (record.localRow > previous && record.localRow <= row) styleRecord(view, record);
             }
         }
     }
 
-    private void styleRecord(View item, LedgerReview.Row record, View background) {
+    private void styleRecord(View item, LedgerReview.Row record) {
         boolean pending = record.localRow > confirmedThrough;
-        background.setBackground(surface(pending ? 0xffe9ebed : 0xfff4f8f5, 0, 8));
+        item.setBackground(surface(pending ? 0xffe9ebed : 0xfff4f8f5, 0, 8));
         item.setContentDescription(record.label + (pending ? "，待同步" : ""));
     }
 
     private final class RecordCard extends LinearLayout {
-        final TextView type, time, details;
+        final TextView type, time, details, arrow;
 
         RecordCard() {
             super(ReviewPanel.this.getContext());
@@ -387,6 +390,14 @@ final class ReviewPanel extends ListView {
             time.setTextColor(0xff586b61);
             time.setGravity(Gravity.END);
             meta.addView(time, new LinearLayout.LayoutParams(-2, -2));
+            arrow = new TextView(getContext());
+            arrow.setText("›");
+            arrow.setTextSize(16);
+            arrow.setIncludeFontPadding(false);
+            arrow.setTextColor(0xff426d5b);
+            LinearLayout.LayoutParams arrowSize = new LinearLayout.LayoutParams(-2, -2);
+            arrowSize.setMarginStart(dp(8));
+            meta.addView(arrow, arrowSize);
             details = new TextView(getContext());
             details.setTextSize(15);
             details.setLineSpacing(dp(2), 1f);
@@ -395,16 +406,33 @@ final class ReviewPanel extends ListView {
             meta.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
             details.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
         }
+
+        @Override public boolean onTouchEvent(MotionEvent event) {
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                int radius = dp(8);
+                float dx = Math.max(0, radius - Math.min(event.getX(), getWidth() - event.getX()));
+                float dy = Math.max(0, radius - Math.min(event.getY(), getHeight() - event.getY()));
+                if (dx * dx + dy * dy > radius * radius) return false;
+            }
+            return super.onTouchEvent(event);
+        }
     }
 
-    private void bindRecord(RecordCard card, LedgerReview.Row record, View background) {
+    private void bindRecord(RecordCard card, LedgerReview.Row record, boolean editing) {
         card.type.setText(record.type);
         card.time.setText(record.time);
         CharSequence body = recordText(record);
         card.details.setText(body);
         card.details.setVisibility(body.length() == 0 ? GONE : VISIBLE);
         card.setTag(record);
-        styleRecord(card, record, background);
+        boolean editable = editing && LedgerRules.editable(record.event.kind);
+        card.arrow.setVisibility(editable ? VISIBLE : GONE);
+        card.setOnClickListener(editable ? view -> actions.edit(record) : null);
+        card.setClickable(editable);
+        card.setFocusable(editable);
+        card.setForeground(editable ? new RippleDrawable(ColorStateList.valueOf(0x26176344), null,
+                surface(Color.WHITE, 0, 8)) : null);
+        styleRecord(card, record);
     }
 
     private static CharSequence recordText(LedgerReview.Row record) {

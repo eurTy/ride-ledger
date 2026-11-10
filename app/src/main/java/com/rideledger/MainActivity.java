@@ -582,6 +582,7 @@ public final class MainActivity extends Activity {
             @Override public void filter(String key) { recordFilter = key; }
             @Override public void openAll() { openRecords(trip, review); }
             @Override public void reconnect() { teamTransport.reconnect(); }
+            @Override public void edit(LedgerReview.Row row) { forms.editRecord(trip, row); }
             @Override public void delete(List<String> ids) {
                 try { ledgerActions.delete(trip, ids); }
                 catch (Exception error) { error(error); return; }

@@ -16,6 +16,11 @@ final class LedgerRules {
             if ("RMB".equalsIgnoreCase(data.optString(field))) data.put(field, "CNY");
     }
 
+    static boolean editable(String kind) {
+        return "expense".equals(kind) || "opening".equals(kind) || "topup".equals(kind) ||
+                "transfer".equals(kind) || "exchange".equals(kind);
+    }
+
     static boolean validEvent(Trip trip, Event event) {
         try {
             JSONObject d = event.data;
@@ -38,6 +43,12 @@ final class LedgerRules {
                             && (trip.team == null || !d.getString("fromCurrency").equals(d.getString("toCurrency")));
                 case "delete":
                     return trip.team == null ? !d.getString("target").isEmpty() : PeerIdentity.valid(d.getString("target"));
+                case "edit":
+                    String kind = d.getString("kind");
+                    String target = d.getString("target");
+                    return trip.team != null && editable(kind) && PeerIdentity.valid(target) &&
+                            !event.id.equals(target) && exactLong(d, "revision") > 0 &&
+                            validEvent(trip, new Event(target, event.tripId, kind, event.at, d.getJSONObject("record")));
                 default: return false;
             }
         } catch (Exception ignored) { return false; }

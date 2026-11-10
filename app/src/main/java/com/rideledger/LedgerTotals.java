@@ -7,20 +7,15 @@ import org.json.JSONObject;
 
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /** Replays a stable ledger snapshot without accessing SQLite or the UI. */
 final class LedgerTotals {
     static Summary calculate(boolean team, List<Event> all) {
         Summary summary = new Summary();
-        Set<String> deleted = new HashSet<>();
-        for (Event event : all) if ("delete".equals(event.kind)) deleted.add(event.data.optString("target"));
-        for (Event event : all) {
-            if ("delete".equals(event.kind) || deleted.contains(event.id)) continue;
+        for (Event event : LedgerRevisions.visibleRecords(all)) {
             JSONObject d = event.data;
             Changes changes = new Changes();
             try {

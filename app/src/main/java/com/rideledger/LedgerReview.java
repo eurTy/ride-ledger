@@ -15,12 +15,14 @@ final class LedgerReview {
     static final String CASH_FILTER = "cash", CASH_LABEL = "现金入账";
 
     static final class Row {
+        final LedgerStore.Event event;
         final String id, filter, label;
         final String time, type, people, amount, received, split, note;
         final long localRow;
 
         Row(LedgerStore.Event event, String filter, String time, String type, String people,
             String amount, String received, String split, String note, String exportLine) {
+            this.event = event;
             id = event.id;
             this.filter = filter;
             this.time = time;
