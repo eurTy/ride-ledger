@@ -257,6 +257,26 @@ public final class SyncTestInstrumentation extends Instrumentation {
                             !row.getString(0).contains(team.secret), "legacy team secret remained in cleartext");
                 }
             });
+            check("version six journal upgrade indexes existing edits and keeps original record time", () -> {
+                TestContext migrated = context();
+                LedgerStore before = store(migrated);
+                LedgerStore.Trip trip = before.createTeam("旧修订升级", java.util.Arrays.asList("甲", "乙"));
+                LedgerActions actions = new LedgerActions(before);
+                actions.cash(trip, "m1", "CNY", "1");
+                LedgerStore.Event original = before.events(trip.id).get(0);
+                before.add(trip.id, "edit", new JSONObject().put("target", original.id)
+                        .put("kind", original.kind).put("revision", 1).put("record", new JSONObject()
+                                .put("person", "m1").put("currency", "CNY").put("amount", 200)));
+                before.getWritableDatabase().execSQL("UPDATE events SET target_id=NULL");
+                before.getWritableDatabase().setVersion(6);
+                before.close();
+                LedgerStore after = store(migrated);
+                LedgerStore.Event revised = after.summary(trip.id).visible.get(0);
+                new LedgerActions(after).cash(trip, "m1", "CNY", "3", revised);
+                LedgerStore.Event latestEdit = after.summary(trip.id).visible.get(0);
+                require(latestEdit.at == original.at && latestEdit.id.equals(original.id) && latestEdit.data.getLong("amount") == 300,
+                        "upgraded legacy revision could not be edited");
+            });
             check("background trip rotation survives removed and reordered trips", () -> {
                 LedgerStore.Trip rotationA = new LedgerStore.Trip("a", "", "", "", "", "");
                 LedgerStore.Trip rotationB = new LedgerStore.Trip("b", "", "", "", "", "");

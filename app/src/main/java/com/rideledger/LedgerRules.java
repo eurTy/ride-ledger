@@ -47,11 +47,24 @@ final class LedgerRules {
                     String kind = d.getString("kind");
                     String target = d.getString("target");
                     return trip.team != null && editable(kind) && PeerIdentity.valid(target) &&
-                            !event.id.equals(target) && exactLong(d, "revision") > 0 &&
+                            !event.id.equals(target) && exactLong(d, "revision") > 0 && validEditParts(kind, d) &&
                             validEvent(trip, new Event(target, event.tripId, kind, event.at, d.getJSONObject("record")));
                 default: return false;
             }
         } catch (Exception ignored) { return false; }
+    }
+
+    private static boolean validEditParts(String kind, JSONObject data) throws JSONException {
+        if (!data.has("parts")) return true; // Preserve revisions already stored by 0.2.2.
+        long parts = exactLong(data, "parts");
+        if (parts < 1 || parts > 3 || (!"expense".equals(kind) && parts != LedgerRevisions.FINANCIAL)) return false;
+        org.json.JSONArray parents = data.getJSONArray("parents");
+        java.util.Set<String> unique = new java.util.HashSet<>();
+        for (int i = 0; i < parents.length(); i++) {
+            String id = parents.getString(i);
+            if (!PeerIdentity.valid(id) || !unique.add(id)) return false;
+        }
+        return true;
     }
 
     private static boolean validTeamExpense(Trip trip, JSONObject data) throws JSONException {

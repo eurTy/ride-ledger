@@ -63,7 +63,9 @@ final class LanSync {
     private WifiManager.MulticastLock multicastLock;
     private ConnectivityManager connectivity;
     private ConnectivityManager.NetworkCallback networkCallback;
-    private ServerSocket server;
+    private volatile ServerSocket server, recoveredGateway;
+    private int gatewayBindAttempts;
+    private final Runnable retryGatewayBind = this::recoverGatewayListener;
     private ExecutorService workers;
     private ExecutorService gatewayWorker;
     private volatile boolean running;
@@ -116,8 +118,11 @@ final class LanSync {
             }
             nsd = (NsdManager) context.getSystemService(Context.NSD_SERVICE);
             final ServerSocket listening = server;
-            Thread acceptor = new Thread(() -> acceptLoop(listening), "RideLedger-LAN-listen");
-            acceptor.setDaemon(true); acceptor.start();
+            startListener(listening);
+            if (gatewayProbe != null && listening.getLocalPort() != TEAM_PORT) {
+                gatewayBindAttempts = 0;
+                main.postDelayed(retryGatewayBind, 500);
+            }
             hotspotDiscovery = new HotspotDiscovery(context, deviceId, server.getLocalPort(),
                     teamScope.isEmpty() ? HotspotDiscovery.DISCOVERY_PORT : TEAM_PORT, false, teamScope,
                     (address, peer) -> offer("udp:" + peer, address, peer, true));
@@ -147,6 +152,14 @@ final class LanSync {
         }
     }
     private ServerSocket listenOnTeamPort() throws java.io.IOException {
+        try { return bindTeamPort(); }
+        catch (java.io.IOException error) {
+            SyncLog.write(context, SyncLog.Event.GATEWAY_LISTEN, error);
+            return new ServerSocket(0);
+        }
+    }
+
+    private static ServerSocket bindTeamPort() throws java.io.IOException {
         ServerSocket socket = new ServerSocket();
         try {
             socket.setReuseAddress(true);
@@ -154,12 +167,38 @@ final class LanSync {
             return socket;
         } catch (java.io.IOException error) {
             socket.close();
-            SyncLog.write(context, SyncLog.Event.GATEWAY_LISTEN, error);
-            return new ServerSocket(0);
+            throw error;
+        }
+    }
+
+    private synchronized void recoverGatewayListener() {
+        if (!running || server == null || server.getLocalPort() == TEAM_PORT || recoveredGateway != null) return;
+        try {
+            recoveredGateway = bindTeamPort();
+            startListener(recoveredGateway);
+        } catch (java.io.IOException error) {
+            // Keep the advertised listener and existing transfers alive during the port handover.
+            if (++gatewayBindAttempts < 6)
+                main.postDelayed(retryGatewayBind, 500L << gatewayBindAttempts);
+        }
+    }
+
+    private void startListener(ServerSocket listening) {
+        Thread acceptor = new Thread(() -> acceptLoop(listening), "RideLedger-LAN-listen");
+        acceptor.setDaemon(true);
+        acceptor.start();
+    }
+
+    private void requestGatewayRecovery() {
+        if (running && gatewayProbe != null && server != null && server.getLocalPort() != TEAM_PORT &&
+                recoveredGateway == null && !main.hasCallbacks(retryGatewayBind)) {
+            gatewayBindAttempts = 0;
+            main.post(retryGatewayBind);
         }
     }
 
     void announce() {
+        requestGatewayRecovery();
         if (hotspotDiscovery != null) hotspotDiscovery.networkChanged();
         probeGateway();
     }
@@ -276,6 +315,7 @@ final class LanSync {
         String signature = localNetworkSignature();
         if (networkSignature.equals(signature)) return;
         networkSignature = signature;
+        requestGatewayRecovery();
         gatewayGeneration++;
         probingGateway = false;
         nextGatewayProbe = 0;
@@ -468,12 +508,14 @@ final class LanSync {
         return new PeerConnection(socket.getInputStream(), socket.getOutputStream(), socket, () -> sockets.remove(socket),
                 port, (peer, callback) -> endpoint(new InetSocketAddress(remote, callback), peer, true));
     }
+    private boolean listening(ServerSocket socket) { return running && (server == socket || recoveredGateway == socket); }
+
     private void acceptLoop(ServerSocket listening) {
-        while (running && server == listening) {
+        while (listening(listening)) {
             Socket socket = null;
             try {
                 socket = listening.accept();
-                if (!running || server != listening || sockets.size() >= 8) { socket.close(); continue; }
+                if (!listening(listening) || sockets.size() >= 8) { socket.close(); continue; }
                 sockets.add(socket); socket.setSoTimeout(15000); socket.setTcpNoDelay(true);
                 PeerConnection connection = connection(socket);
                 if (events != null) events.incoming(connection, socket.getInetAddress().getHostAddress());
@@ -483,7 +525,7 @@ final class LanSync {
                     sockets.remove(socket);
                     try { socket.close(); } catch (Exception ignored) { }
                 }
-                if (!running || server != listening) return;
+                if (!listening(listening)) return;
                 if (gatewayProbe != null) SyncLog.write(context, SyncLog.Event.LAN_ACCEPT, error);
                 else publish("热点连接待重试", 0);
             }
@@ -535,6 +577,7 @@ final class LanSync {
         running = false; generation++; gatewayGeneration++;
         main.removeCallbacks(calibrate); main.removeCallbacks(legacyTick); main.removeCallbacks(refresh); main.removeCallbacks(retryRegistration);
         main.removeCallbacks(checkGateway);
+        main.removeCallbacks(retryGatewayBind);
         main.removeCallbacks(updateNetwork);
         if (gatewayWorker != null) gatewayWorker.shutdownNow();
         gatewayWorker = null;
@@ -548,6 +591,8 @@ final class LanSync {
         networkCallback = null;
         if (server != null) try { server.close(); } catch (Exception ignored) { }
         server = null;
+        if (recoveredGateway != null) try { recoveredGateway.close(); } catch (Exception ignored) { }
+        recoveredGateway = null;
         for (Socket socket : sockets) try { socket.close(); } catch (Exception ignored) { }
         sockets.clear(); peers.clear();
         if (workers != null) workers.shutdownNow(); workers = null;

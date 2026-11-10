@@ -109,6 +109,8 @@ final class ReviewPanel extends ListView {
     }
 
     private void buildSettlement(LinearLayout card) {
+        if (model.records.stream().anyMatch(row -> !row.event.financialOptions.isEmpty()))
+            text(card, "有账目待核对，结算暂按当前显示版本计算", 13, 0xff94631c);
         if (model.settlement.isEmpty()) {
             text(card, "目前已结清", EMPTY_STATE_TEXT_SIZE, EMPTY_STATE_TEXT_COLOR);
             return;
@@ -363,7 +365,8 @@ final class ReviewPanel extends ListView {
     private void styleRecord(View item, LedgerReview.Row record) {
         boolean pending = record.localRow > confirmedThrough;
         item.setBackground(surface(pending ? 0xffe9ebed : 0xfff4f8f5, 0, 8));
-        item.setContentDescription(record.label + (pending ? "，待同步" : ""));
+        item.setContentDescription(record.label + (record.event.conflicted() ? "，有并发修改" : "") +
+                (pending ? "，待同步" : ""));
     }
 
     private final class RecordCard extends LinearLayout {
@@ -456,6 +459,10 @@ final class ReviewPanel extends ListView {
         if (!record.note.isEmpty()) {
             if (line.length() > 0) line.append('\n');
             append(line, record.note, 13, Color.BLACK, false);
+        }
+        if (record.event.conflicted()) {
+            if (line.length() > 0) line.append('\n');
+            append(line, "有并发修改 · 点开核对", 13, 0xff94631c, true);
         }
         return line;
     }

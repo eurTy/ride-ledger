@@ -25,7 +25,7 @@ final class PeerProtocol {
         long bytesRead, bytesWritten;
         LedgerStore.SyncPoint syncPoint;
     }
-    private static final int VERSION = 2, MAX_EVENTS = 10000, BATCH_BYTES = 48000;
+    private static final int VERSION = 2, LEGACY_LIMIT = 10000, INDEX_PAGE = 512, BATCH_BYTES = 48000;
     private final LedgerStore store;
     private final String deviceId;
     private final Listener listener;
@@ -49,11 +49,14 @@ final class PeerProtocol {
         final Snapshot local;
         final String remoteRoot;
         final int remoteCount;
+        final boolean paged;
         JSONObject remoteHashes;
         final Set<String> missing = new HashSet<>();
         final JSONArray sentHashes = new JSONArray(), receivedHashes = new JSONArray();
         boolean failed;
-        Travel(Snapshot local, String root, int count) { this.local = local; remoteRoot = root; remoteCount = count; }
+        Travel(Snapshot local, String root, int count, boolean paged) {
+            this.local = local; remoteRoot = root; remoteCount = count; this.paged = paged;
+        }
     }
 
     PeerProtocol(LedgerStore store, String deviceId, Listener listener) throws Exception {
@@ -83,7 +86,6 @@ final class PeerProtocol {
                 snapshot.events.put(entry.id, event);
                 snapshot.hashes.put(entry.id, PeerWire.hash(event));
             }
-            if (snapshot.events.size() > MAX_EVENTS) throw new IllegalArgumentException("单趟旅行记录过多");
             snapshot.root = PeerWire.hash(snapshot.hashes); snapshots.put(trip.id, snapshot);
         }
     }
@@ -95,7 +97,7 @@ final class PeerProtocol {
         session = UUID.randomUUID().toString();
         wire.write(hello(false));
         JSONObject remote = wire.read(); readHello(remote, "hello");
-        wire.write(index()); readIndex(readControl("index"));
+        sendIndex(); receiveIndex();
         sendDeltas(); wire.write(frame("end"));
         JSONObject end = receiveDeltas();
         boolean acknowledged = verifyReceipts(end.optJSONArray("receipts"));
@@ -110,7 +112,7 @@ final class PeerProtocol {
         session = first.getString("session");
         if (!PeerIdentity.valid(session)) throw new IllegalArgumentException("同步会话无效");
         readHello(first, "hello"); wire.write(hello(true));
-        readIndex(readControl("index")); wire.write(index());
+        receiveIndex(); sendIndex();
         receiveDeltas();
         sendDeltas(); wire.write(frame("end").put("receipts", receipts()));
         boolean acknowledged = verifyReceipts(readControl("confirm").optJSONArray("receipts"));
@@ -130,7 +132,8 @@ final class PeerProtocol {
         JSONArray values = new JSONArray();
         for (Snapshot value : snapshots.values()) {
             if (onlyCommon && !common.containsKey(value.trip.id)) continue;
-            values.put(SyncCodec.sealPeer(wireTrip(value.trip), payload("manifest").put("root", value.root).put("count", value.events.size())));
+            values.put(SyncCodec.sealPeer(wireTrip(value.trip), payload("manifest").put("root", value.root)
+                    .put("count", value.events.size()).put("paged", !sessionKey.isEmpty())));
         }
         return frame("hello").put("bundles", values);
     }
@@ -149,9 +152,11 @@ final class PeerProtocol {
             try {
                 JSONObject value = open(own, bundle, "manifest");
                 String root = value.getString("root"); int count = value.getInt("count");
-                if (!root.matches("[a-f0-9]{64}") || count < 0 || count > MAX_EVENTS || common.containsKey(own.trip.id))
+                boolean paged = !sessionKey.isEmpty() && value.optBoolean("paged");
+                if (!root.matches("[a-f0-9]{64}") || count < 0 || (!paged && count > LEGACY_LIMIT) ||
+                        common.containsKey(own.trip.id))
                     throw new IllegalArgumentException("摘要无效");
-                common.put(own.trip.id, new Travel(own, root, count));
+                common.put(own.trip.id, new Travel(own, root, count, paged));
             } catch (Exception ignored) { manifestFailure = true; }
         }
         if (common.isEmpty()) throw new IllegalArgumentException("请先让两台手机加入同一旅行");
@@ -180,6 +185,65 @@ final class PeerProtocol {
         }
         return frame("index").put("bundles", values);
     }
+
+    private boolean paged() {
+        for (Travel value : common.values()) if (!value.paged) return false;
+        return true;
+    }
+
+    private void sendIndex() throws Exception {
+        if (!paged()) { wire.write(index()); return; }
+        for (Travel value : common.values()) {
+            if (value.local.root.equals(value.remoteRoot)) continue;
+            JSONObject page = new JSONObject();
+            Iterator<String> ids = value.local.hashes.keys();
+            while (ids.hasNext()) {
+                String id = ids.next();
+                page.put(id, value.local.hashes.getString(id));
+                if (page.length() == INDEX_PAGE || !ids.hasNext()) {
+                    JSONObject bundle = SyncCodec.sealPeer(wireTrip(value.local.trip), payload("index").put("entries", page));
+                    wire.write(frame("index").put("bundle", bundle));
+                    page = new JSONObject();
+                }
+            }
+        }
+        wire.write(frame("index-end"));
+    }
+
+    private void receiveIndex() throws Exception {
+        if (!paged()) { readIndex(readControl("index")); return; }
+        for (Travel value : common.values()) value.remoteHashes = value.local.root.equals(value.remoteRoot)
+                ? value.local.hashes : new JSONObject();
+        while (true) {
+            JSONObject message = wire.read();
+            String kind = message.getString("kind");
+            verifyControl(message, kind);
+            if ("index-end".equals(kind)) break;
+            if (!"index".equals(kind)) throw new IllegalArgumentException("索引消息类型无效");
+            JSONObject bundle = message.getJSONObject("bundle");
+            Travel value = common.get(bundle.optString("tripId"));
+            if (value == null || value.remoteHashes == value.local.hashes)
+                throw new IllegalArgumentException("索引旅行不一致");
+            JSONObject entries = open(value.local, bundle, "index").getJSONObject("entries");
+            if (entries.length() < 1 || entries.length() > INDEX_PAGE ||
+                    entries.length() > value.remoteCount - value.remoteHashes.length())
+                throw new IllegalArgumentException("索引数量无效");
+            Iterator<String> ids = entries.keys();
+            while (ids.hasNext()) {
+                String id = ids.next(), hash = entries.getString(id);
+                if (value.remoteHashes.has(id) || !PeerIdentity.valid(id) || !hash.matches("[a-f0-9]{64}"))
+                    throw new IllegalArgumentException("流水索引无效");
+                value.remoteHashes.put(id, hash);
+            }
+        }
+        for (Travel value : common.values()) {
+            if (value.remoteHashes.length() != value.remoteCount ||
+                    (value.remoteHashes != value.local.hashes && !PeerWire.hash(value.remoteHashes).equals(value.remoteRoot)))
+                value.failed = true;
+        }
+        prepareDeltas();
+    }
+
     private void readIndex(JSONObject frame) throws Exception {
         Set<String> seen = new HashSet<>(); JSONArray bundles = frame.getJSONArray("bundles");
         if (bundles.length() > common.size()) throw new IllegalArgumentException("索引数量无效");
@@ -199,6 +263,10 @@ final class PeerProtocol {
                 value.remoteHashes = entries;
             } catch (Exception error) { value.failed = true; }
         }
+        prepareDeltas();
+    }
+
+    private void prepareDeltas() throws Exception {
         for (Travel value : common.values()) {
             if (value.local.root.equals(value.remoteRoot)) value.remoteHashes = value.local.hashes;
             if (value.remoteHashes == null) { value.failed = true; continue; }
@@ -229,21 +297,28 @@ final class PeerProtocol {
         value.sentHashes.put(PeerWire.hash(bundle)); result.sent += batch.length();
     }
     private JSONObject receiveDeltas() throws Exception {
-        for (int frames = 0; frames < 20000; frames++) {
+        boolean paged = paged();
+        Set<String> batchIds = new HashSet<>();
+        for (long frames = 0; paged || frames < 20000; frames++) {
             JSONObject next = wire.read(); String kind = next.getString("kind");
             verifyControl(next, kind);
-            if (wire.bytesRead > 32_000_000) throw new IllegalArgumentException("同步数据总量过大");
+            if (!paged && wire.bytesRead > 32_000_000) throw new IllegalArgumentException("同步数据总量过大");
             if ("end".equals(kind)) return next;
             if (!"delta".equals(kind)) throw new IllegalArgumentException("同步消息类型无效");
             JSONObject bundle = next.getJSONObject("bundle"); Travel value = common.get(bundle.optString("tripId"));
             if (value == null) throw new IllegalArgumentException("同步旅行未授权");
-            if (value.failed) continue;
+            if (value.failed) {
+                if (paged) throw new IllegalArgumentException("索引或流水校验失败");
+                continue;
+            }
             try {
                 JSONArray events = open(value.local, bundle, "events").getJSONArray("events");
-                if (events.length() < 1 || events.length() > MAX_EVENTS) throw new IllegalArgumentException("流水数量无效");
+                if (events.length() < 1 || events.length() > LEGACY_LIMIT) throw new IllegalArgumentException("流水数量无效");
+                batchIds.clear();
                 for (int i = 0; i < events.length(); i++) {
                     JSONObject event = events.getJSONObject(i); String id = event.getString("id");
-                    if (!value.remoteHashes.has(id) || !PeerWire.hash(event).equals(value.remoteHashes.getString(id)))
+                    if (!value.remoteHashes.has(id) || !PeerWire.hash(event).equals(value.remoteHashes.getString(id)) ||
+                            (paged && (!value.missing.contains(id) || !batchIds.add(id))))
                         throw new IllegalArgumentException("流水内容与摘要不一致");
                 }
                 int added;
@@ -257,7 +332,10 @@ final class PeerProtocol {
                 for (int i = 0; i < events.length(); i++) value.missing.remove(events.getJSONObject(i).getString("id"));
                 value.receivedHashes.put(PeerWire.hash(bundle)); result.added += added;
                 if (added > 0) listener.stored(added);
-            } catch (Exception error) { value.failed = true; }
+            } catch (Exception error) {
+                value.failed = true;
+                if (paged) throw error;
+            }
         }
         throw new IllegalArgumentException("同步消息数量过多");
     }

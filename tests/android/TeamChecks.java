@@ -12,6 +12,7 @@ import android.os.Looper;
 import android.os.SystemClock;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -297,6 +298,62 @@ final class TeamChecks {
             }
         });
 
+        sink.check("team edits: independent fields merge, competing values survive until selected", () -> {
+            try (Device a = new Device(base); Device b = new Device(base)) {
+                a.trip = a.store.createTeam("并发编辑", MEMBERS.subList(0, 2));
+                b.enroll(a, 1);
+                LedgerStore.Event original = record(a, "CNY", 100, "原备注");
+                require(exchange(a, b).complete(), "base record did not synchronize");
+                LedgerActions aActions = new LedgerActions(a.store), bActions = new LedgerActions(b.store);
+                aActions.editExpense(a.trip, visible(a), "m1", "CNY", "2", 0, null, "原备注");
+                bActions.editExpense(b.trip, visible(b), "m1", "CNY", "1", 0, null, "队友备注");
+                require(exchange(b, a).complete(), "independent edit exchange failed");
+                require(visible(a).data.getLong("amount") == 200 && visible(a).data.getString("note").equals("队友备注") &&
+                        !visible(a).conflicted(), "non-overlapping edits were not merged");
+                aActions.editExpense(a.trip, visible(a), "m1", "CNY", "3", 0, null, "队友备注");
+                bActions.editExpense(b.trip, visible(b), "m1", "CNY", "4", 0, null, "队友备注");
+                require(exchange(a, b).complete(), "competing edits did not synchronize");
+                LedgerStore.Event disputed = visible(b);
+                require(disputed.financialOptions.size() == 2 && visible(a).financialOptions.size() == 2 &&
+                        visible(a).data.getLong("amount") == disputed.data.getLong("amount"), "conflicting values did not converge");
+                bActions.editExpense(b.trip, disputed, "m1", "CNY", "3", 0, null, "队友备注");
+                require(exchange(b, a).complete(), "conflict resolution did not synchronize");
+                Pair replay = exchange(a, b);
+                LedgerStore.Event result = visible(a);
+                require(replay.complete() && replay.client.sent == 0 && replay.server.sent == 0 &&
+                        !result.conflicted() && !visible(b).conflicted() && result.at == original.at &&
+                        result.id.equals(original.id) && result.data.getLong("amount") == 300 &&
+                        result.data.getString("note").equals("队友备注"), "replay altered the resolved record or its time");
+                aActions.delete(a.trip, Collections.singletonList(original.id));
+                bActions.editExpense(b.trip, visible(b), "m1", "CNY", "5", 0, null, "离线编辑");
+                require(exchange(a, b).complete() && a.store.summary(a.trip.id).visible.isEmpty() &&
+                        b.store.summary(b.trip.id).visible.isEmpty(), "concurrent edit resurrected a deleted record");
+            }
+        });
+
+        sink.check("team journal: over 10000 operations resume after interruption and replay zero records", () -> {
+            try (Device a = new Device(base); Device b = new Device(base)) {
+                a.trip = a.store.createTeam("长账本", MEMBERS.subList(0, 2));
+                b.enroll(a, 1);
+                int total = 10051;
+                JSONArray operations = new JSONArray();
+                for (int i = 0; i < total; i++) operations.put(new LedgerStore.Event(
+                        java.util.UUID.randomUUID().toString(), a.trip.id, "topup", i,
+                        new JSONObject().put("person", "m1").put("currency", "CNY").put("amount", 1)).json());
+                require(a.store.mergeStrict(a.trip.id, operations) == total, "could not seed long journal");
+                Pair broken = exchange(a, b, "drop-second-delta", "");
+                int persisted = b.count();
+                require(!broken.complete() && persisted > 0 && persisted < total, "long journal did not keep the first batch: " + broken);
+                b.reopen();
+                Pair resumed = exchange(a, b);
+                require(resumed.complete() && resumed.client.sent == total - persisted && b.count() == total &&
+                        b.store.summary(b.trip.id).teamCash.get("m1").get("CNY") == total,
+                        "long journal did not resume the missing operations: " + resumed);
+                Pair replay = exchange(b, a);
+                require(replay.complete() && replay.client.sent == 0 && replay.server.sent == 0, "long journal replay was not empty");
+            }
+        });
+
         sink.check("team routes: revisions fan out per peer and recovered Wi-Fi takes priority", () -> {
             AtomicLong clock = new AtomicLong(100);
             PeerRoutePolicy routes = new PeerRoutePolicy(clock::get);
@@ -374,6 +431,15 @@ final class TeamChecks {
             }
         });
 
+        sink.check("hotspot: fixed gateway recovers after port occupation", () -> {
+            try (Device a = new Device(base); Device b = new Device(base);
+                 ServerSocket occupied = new ServerSocket(LanSync.TEAM_PORT)) {
+                a.trip = a.store.createTeam("热点端口恢复", MEMBERS.subList(0, 2));
+                b.enroll(a, 1);
+                gatewayExchange(a, b, occupied);
+            }
+        });
+
         sink.check("sync log: seven local days, private file and error type without sensitive message", () -> {
             File files = new File(base.getCacheDir(), "nearby-log-test-" + java.util.UUID.randomUUID());
             File directory = new File(files, "nearby-sync");
@@ -403,17 +469,25 @@ final class TeamChecks {
     }
 
     private static void gatewayExchange(Device host, Device client) throws Exception {
+        gatewayExchange(host, client, null);
+    }
+
+    private static LedgerStore.Event visible(Device device) { return device.store.summary(device.trip.id).visible.get(0); }
+
+    private static void gatewayExchange(Device host, Device client, ServerSocket occupied) throws Exception {
         record(host, "CNY", 234, "host offline");
         record(client, "USD", 123, "client offline");
         int expected = host.count() + 1;
         PeerSync listening = new PeerSync(host.context, host.store, added -> { }, true, host.trip);
         onMain(listening::start);
         try {
-            SystemClock.sleep(1000);
+            if (occupied != null) {
+                SystemClock.sleep(650);
+                occupied.close();
+            }
             java.net.InetSocketAddress endpoint = LanSync.gatewayAddress(InetAddress.getByName("127.0.0.1"));
             String route;
-            try (Socket socket = new Socket()) {
-                socket.connect(endpoint, 3000);
+            try (Socket socket = connectGateway(endpoint)) {
                 socket.setSoTimeout(5000);
                 route = TeamProtocol.probe(new PeerWire(socket.getInputStream(), socket.getOutputStream(), () -> { }), client.trip);
             }
@@ -426,6 +500,19 @@ final class TeamChecks {
             }
             require(host.count() == expected && client.count() == expected, "hotspot exchange was not bidirectional");
         } finally { onMain(listening::stop); }
+    }
+
+    private static Socket connectGateway(java.net.InetSocketAddress endpoint) throws Exception {
+        long deadline = SystemClock.elapsedRealtime() + 6000;
+        do {
+            Socket socket = new Socket();
+            try { socket.connect(endpoint, 1000); return socket; }
+            catch (IOException unavailable) {
+                socket.close();
+                if (SystemClock.elapsedRealtime() >= deadline) throw unavailable;
+                SystemClock.sleep(100);
+            }
+        } while (true);
     }
 
     private static void windowsExchange(Device phone, String host, int port) throws Exception {

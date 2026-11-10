@@ -68,19 +68,30 @@ final class LedgerStore extends SQLiteOpenHelper {
         final String id, tripId, kind;
         final long at, localRow;
         final JSONObject data;
+        final List<JSONObject> financialOptions;
+        final List<String> noteOptions;
 
         Event(String id, String tripId, String kind, long at, JSONObject data) {
             this(id, tripId, kind, at, data, 0);
         }
 
         Event(String id, String tripId, String kind, long at, JSONObject data, long localRow) {
+            this(id, tripId, kind, at, data, localRow, Collections.emptyList(), Collections.emptyList());
+        }
+
+        Event(String id, String tripId, String kind, long at, JSONObject data, long localRow,
+              List<JSONObject> financialOptions, List<String> noteOptions) {
             this.id = id;
             this.tripId = tripId;
             this.kind = kind;
             this.at = at;
             this.data = data;
             this.localRow = localRow;
+            this.financialOptions = financialOptions;
+            this.noteOptions = noteOptions;
         }
+
+        boolean conflicted() { return !financialOptions.isEmpty() || !noteOptions.isEmpty(); }
 
         JSONObject json() throws JSONException {
             return new JSONObject().put("id", id).put("tripId", tripId).put("kind", kind)
@@ -115,7 +126,7 @@ final class LedgerStore extends SQLiteOpenHelper {
     }
 
     LedgerStore(Context context) {
-        super(context, "ride_ledger.db", null, 6);
+        super(context, "ride_ledger.db", null, 7);
         this.context = context;
     }
 
@@ -124,8 +135,9 @@ final class LedgerStore extends SQLiteOpenHelper {
                 "person_b TEXT NOT NULL, secret TEXT NOT NULL, local_person TEXT NOT NULL, created_at INTEGER NOT NULL, " +
                 "team TEXT NOT NULL DEFAULT '', join_name TEXT NOT NULL DEFAULT '')");
         db.execSQL("CREATE TABLE events (id TEXT PRIMARY KEY, trip_id TEXT NOT NULL, kind TEXT NOT NULL, " +
-                "at INTEGER NOT NULL, data TEXT NOT NULL)");
+                "at INTEGER NOT NULL, data TEXT NOT NULL, target_id TEXT)");
         db.execSQL("CREATE INDEX events_trip ON events(trip_id, at, id)");
+        indexTargets(db);
         createSeats(db);
     }
 
@@ -160,6 +172,26 @@ final class LedgerStore extends SQLiteOpenHelper {
                 db.update("trips", values, "id=?", new String[]{entry.getKey()});
             }
         }
+        if (oldVersion < 7) {
+            boolean present = false;
+            try (Cursor columns = db.rawQuery("PRAGMA table_info(events)", null)) {
+                while (columns.moveToNext()) present |= "target_id".equals(columns.getString(1));
+            }
+            if (!present) db.execSQL("ALTER TABLE events ADD COLUMN target_id TEXT");
+            try (Cursor rows = db.rawQuery("SELECT id,data FROM events WHERE kind IN ('edit','delete')", null)) {
+                while (rows.moveToNext()) {
+                    ContentValues values = new ContentValues();
+                    try { values.put("target_id", new JSONObject(rows.getString(1)).getString("target")); }
+                    catch (JSONException error) { throw new IllegalStateException("无法读取旧账目修订", error); }
+                    db.update("events", values, "id=?", new String[]{rows.getString(0)});
+                }
+            }
+            indexTargets(db);
+        }
+    }
+
+    private void indexTargets(SQLiteDatabase db) {
+        db.execSQL("CREATE INDEX IF NOT EXISTS events_target ON events(trip_id, target_id) WHERE target_id IS NOT NULL");
     }
 
     // Keep consumed seats even if this device removes the trip locally.
@@ -565,17 +597,31 @@ final class LedgerStore extends SQLiteOpenHelper {
         try {
             Trip trip = getTrip(original.tripId);
             if (trip == null || !teamReady(trip)) throw new IllegalStateException("这趟旅行暂时无法编辑");
-            List<Event> events = events(original.tripId);
+            List<StoredEvent> rows = new ArrayList<>();
+            try (Cursor cursor = db.rawQuery("SELECT id,kind,at,data,rowid FROM events WHERE trip_id=? AND id=? " +
+                    "UNION ALL SELECT id,kind,at,data,rowid FROM events WHERE trip_id=? AND target_id=?",
+                    new String[]{original.tripId, original.id, original.tripId, original.id})) {
+                while (cursor.moveToNext()) rows.add(new StoredEvent(cursor.getString(0), cursor.getString(1),
+                        cursor.getLong(2), cursor.getString(3), cursor.getLong(4)));
+            }
+            List<Event> events = decodeEvents(original.tripId, rows);
             LedgerRevisions revisions = new LedgerRevisions(events);
             Event base = null;
             for (Event event : events) if (event.id.equals(original.id)) { base = event; break; }
-            Event current = base == null ? null : revisions.visible(base);
-            if (current == null) throw new IllegalStateException("这笔记录已删除");
-            if (current.localRow != original.localRow || !PeerWire.canonical(current.data).equals(PeerWire.canonical(original.data)))
+            LedgerRevisions.Resolution resolution = base == null ? null : revisions.resolve(base);
+            if (resolution == null) throw new IllegalStateException("这笔记录已删除");
+            Event current = resolution.current();
+            if (current.localRow != original.localRow)
                 throw new IllegalStateException("这笔记录已更新，请关闭后重新打开");
-            if (!PeerWire.canonical(current.data).equals(PeerWire.canonical(data))) {
+            int parts = 0;
+            if (!current.financialOptions.isEmpty() || !PeerWire.canonical(LedgerRevisions.financial(current.data))
+                    .equals(PeerWire.canonical(LedgerRevisions.financial(data)))) parts |= LedgerRevisions.FINANCIAL;
+            if ("expense".equals(base.kind) && (!current.noteOptions.isEmpty() ||
+                    !current.data.optString("note").equals(data.optString("note")))) parts |= LedgerRevisions.NOTE;
+            if (parts != 0) {
                 JSONObject payload = new JSONObject().put("target", base.id).put("kind", base.kind)
-                        .put("revision", Math.addExact(revisions.revisionOf(base), 1)).put("record", data);
+                        .put("revision", Math.addExact(resolution.revision, 1)).put("record", data)
+                        .put("parts", parts).put("parents", resolution.parents(parts));
                 add(trip.id, "edit", payload);
             }
             db.setTransactionSuccessful();
@@ -589,6 +635,8 @@ final class LedgerStore extends SQLiteOpenHelper {
         values.put("kind", event.kind);
         values.put("at", event.at);
         values.put("data", event.data.toString());
+        if ("edit".equals(event.kind) || "delete".equals(event.kind))
+            values.put("target_id", event.data.optString("target"));
         return db.insertWithOnConflict("events", null, values, SQLiteDatabase.CONFLICT_IGNORE);
     }
 

@@ -120,6 +120,12 @@ final class LedgerReview {
         return Collections.unmodifiableList(debts);
     }
 
+    static Row withFields(LedgerStore.Trip trip, Row source, JSONObject fields) {
+        LedgerStore.Event event = source.event;
+        return describe(trip, new LedgerStore.Event(event.id, event.tripId, event.kind, event.at, fields, event.localRow),
+                source.filter, new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA));
+    }
+
     private static Row describe(LedgerStore.Trip trip, LedgerStore.Event event, String filter, SimpleDateFormat clock) {
         JSONObject d = event.data;
         String time = clock.format(new Date(event.at));

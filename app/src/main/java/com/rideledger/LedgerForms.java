@@ -28,10 +28,12 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 /** Renders cash and split forms. LedgerActions is the only write entry point. */
 final class LedgerForms {
+    private static final Executor EDIT_WRITER = Executors.newSingleThreadExecutor();
     private final Activity activity;
     private final LedgerActions ledgerActions;
     private final CurrencyHistory currencyHistory;
@@ -102,12 +104,54 @@ final class LedgerForms {
     }
 
     void editRecord(LedgerStore.Trip trip, LedgerReview.Row record) {
+        if (record.event.conflicted()) {
+            chooseFinancialVersion(trip, record);
+            return;
+        }
         switch (record.event.kind) {
             case "opening": case "topup": moneyIn(trip, record); break;
             case "transfer": transfer(trip, record); break;
             case "exchange": exchange(trip, record); break;
             case "expense": expenseEditor(trip, record); break;
         }
+    }
+
+    private void chooseFinancialVersion(LedgerStore.Trip trip, LedgerReview.Row record) {
+        List<JSONObject> versions = record.event.financialOptions;
+        if (versions.isEmpty()) { chooseNoteVersion(trip, record, record.event.data); return; }
+        String[] labels = new String[versions.size()];
+        for (int i = 0; i < versions.size(); i++) {
+            LedgerReview.Row candidate = LedgerReview.withFields(trip, record, versions.get(i));
+            labels[i] = candidate.type + " · " + candidate.amount +
+                    (candidate.received.isEmpty() ? "" : " → " + candidate.received) +
+                    "\n" + candidate.people + (candidate.split.isEmpty() ? "" : "\n" + candidate.split);
+        }
+        chooseVersion("选择账目版本", labels, index -> chooseNoteVersion(trip, record, versions.get(index)));
+    }
+
+    private void chooseNoteVersion(LedgerStore.Trip trip, LedgerReview.Row record, JSONObject financial) {
+        List<String> notes = record.event.noteOptions;
+        if (notes.isEmpty()) {
+            openVersion(trip, record, financial, record.note);
+            return;
+        }
+        String[] labels = new String[notes.size()];
+        for (int i = 0; i < notes.size(); i++) labels[i] = notes.get(i).isEmpty() ? "（空备注）" : notes.get(i);
+        chooseVersion("选择备注版本", labels, index -> openVersion(trip, record, financial, notes.get(index)));
+    }
+
+    private void chooseVersion(String title, String[] choices, Consumer<Integer> select) {
+        AlertDialog dialog = new AlertDialog.Builder(activity).setTitle(title).setNegativeButton("取消", null)
+                .setItems(choices, (ignored, index) -> select.accept(index)).create();
+        activeForm = dialog;
+        dialog.setOnDismissListener(ignored -> { if (activeForm == dialog) activeForm = null; });
+        dialog.show();
+    }
+
+    private void openVersion(LedgerStore.Trip trip, LedgerReview.Row record, JSONObject fields, String note) {
+        try {
+            editRecord(trip, LedgerReview.withFields(trip, record, LedgerRevisions.combine(fields, note, record.event.data.has("note"))));
+        } catch (Exception failure) { showError.accept(failure); }
     }
 
     private void expenseEditor(LedgerStore.Trip trip, LedgerReview.Row record) {
@@ -193,14 +237,16 @@ final class LedgerForms {
         modes.setSelection(position);
         showMode.accept(position);
         updateTotal.run();
-        showEditor(record, form, () -> {
+        showEditor(trip, record, form, () -> {
             String code = Money.code(value(currency));
             String[] values = new String[inputs.length];
             for (int i = 0; i < inputs.length; i++) values[i] = value(inputs[i]);
-            ledgerActions.editExpense(trip, record.event, trip.member(payer.getSelectedItemPosition()), code,
-                    value(amount), modes.getSelectedItemPosition(), values, value(note));
-            currencyHistory.remember(trip.id, code, initialCode);
-            saved.accept(trip);
+            String member = trip.member(payer.getSelectedItemPosition()), rawAmount = value(amount), rawNote = value(note);
+            int mode = modes.getSelectedItemPosition();
+            return () -> {
+                ledgerActions.editExpense(trip, record.event, member, code, rawAmount, mode, values, rawNote);
+                currencyHistory.remember(trip.id, code, initialCode);
+            };
         });
     }
 
@@ -221,12 +267,13 @@ final class LedgerForms {
         }
         FormInput.next(amount, currency);
         FormInput.done(currency);
-        showRecordForm(record, LedgerReview.CASH_LABEL, form, () -> {
+        showRecordForm(trip, record, LedgerReview.CASH_LABEL, form, () -> {
             String code = Money.code(currency.getText().toString());
-            ledgerActions.cash(trip, trip.member(person.getSelectedItemPosition()), code, value(amount),
-                    record == null ? null : record.event);
-            currencyHistory.remember(trip.id, code, code);
-            saved.accept(trip);
+            String member = trip.member(person.getSelectedItemPosition()), rawAmount = value(amount);
+            return () -> {
+                ledgerActions.cash(trip, member, code, rawAmount, record == null ? null : record.event);
+                currencyHistory.remember(trip.id, code, code);
+            };
         });
     }
 
@@ -250,12 +297,14 @@ final class LedgerForms {
         }
         FormInput.next(amount, currency);
         FormInput.done(currency);
-        showRecordForm(record, "记录成员还款", form, () -> {
+        showRecordForm(trip, record, "记录成员还款", form, () -> {
             String code = Money.code(currency.getText().toString());
-            ledgerActions.transfer(trip, trip.member(from.getSelectedItemPosition()), trip.member(to.getSelectedItemPosition()),
-                    code, value(amount), record == null ? null : record.event);
-            currencyHistory.remember(trip.id, code, code);
-            saved.accept(trip);
+            String payer = trip.member(from.getSelectedItemPosition()), receiver = trip.member(to.getSelectedItemPosition());
+            String rawAmount = value(amount);
+            return () -> {
+                ledgerActions.transfer(trip, payer, receiver, code, rawAmount, record == null ? null : record.event);
+                currencyHistory.remember(trip.id, code, code);
+            };
         });
     }
 
@@ -284,13 +333,15 @@ final class LedgerForms {
         FormInput.next(fromCurrency, toAmount);
         FormInput.done(toAmount);
         FormInput.done(toCurrency);
-        showRecordForm(record, "记录换汇", form, () -> {
+        showRecordForm(trip, record, "记录换汇", form, () -> {
             String from = Money.code(fromCurrency.getText().toString());
             String to = Money.code(toCurrency.getText().toString());
-            ledgerActions.exchange(trip, trip.member(person.getSelectedItemPosition()), from, to,
-                    value(fromAmount), value(toAmount), record == null ? null : record.event);
-            currencyHistory.remember(trip.id, to, from);
-            saved.accept(trip);
+            String member = trip.member(person.getSelectedItemPosition());
+            String spent = value(fromAmount), received = value(toAmount);
+            return () -> {
+                ledgerActions.exchange(trip, member, from, to, spent, received, record == null ? null : record.event);
+                currencyHistory.remember(trip.id, to, from);
+            };
         });
     }
 
@@ -304,12 +355,14 @@ final class LedgerForms {
         input.setText(Money.amountText(data.optLong(key), code));
     }
 
-    private void showRecordForm(LedgerReview.Row record, String title, View form, SaveAction save) {
-        if (record == null) showForm(title, form, save);
-        else showEditor(record, form, save);
+    private interface EditInput { SaveAction capture() throws Exception; }
+
+    private void showRecordForm(LedgerStore.Trip trip, LedgerReview.Row record, String title, View form, EditInput input) {
+        if (record == null) showForm(title, form, () -> { input.capture().run(); saved.accept(trip); });
+        else showEditor(trip, record, form, input);
     }
 
-    private void showEditor(LedgerReview.Row record, View form, SaveAction save) {
+    private void showEditor(LedgerStore.Trip trip, LedgerReview.Row record, View form, EditInput input) {
         dismissCurrencyMenu();
         Dialog dialog = new Dialog(activity);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -357,11 +410,29 @@ final class LedgerForms {
         confirmSize.setMarginStart(dp(10));
         confirm.setLayoutParams(confirmSize);
         confirm.setOnClickListener(view -> {
-            try { save.run(); dialog.dismiss(); }
-            catch (Exception failure) {
-                error.setText(failure.getMessage() == null ? "无法保存，请检查后重试" : failure.getMessage());
-                error.setVisibility(View.VISIBLE);
-            }
+            SaveAction save;
+            try { save = input.capture(); }
+            catch (Exception failure) { editError(error, failure); return; }
+            confirm.setEnabled(false);
+            confirm.setText("正在保存…");
+            cancel.setEnabled(false);
+            dialog.setCancelable(false);
+            EDIT_WRITER.execute(() -> {
+                Exception problem = null;
+                try { save.run(); } catch (Exception failure) { problem = failure; }
+                Exception failure = problem;
+                activity.runOnUiThread(() -> {
+                    if (activity.isDestroyed() || activeForm != dialog) return;
+                    if (failure == null) { dialog.dismiss(); saved.accept(trip); }
+                    else {
+                        confirm.setEnabled(true);
+                        confirm.setText("保存修改");
+                        cancel.setEnabled(true);
+                        dialog.setCancelable(true);
+                        editError(error, failure);
+                    }
+                });
+            });
         });
         dialog.setContentView(sheet);
         Window window = dialog.getWindow();
@@ -376,6 +447,11 @@ final class LedgerForms {
         dialog.show();
         window.setLayout(-1, -2);
         form.requestFocus();
+    }
+
+    private static void editError(TextView error, Exception failure) {
+        error.setText(failure.getMessage() == null ? "无法保存，请检查后重试" : failure.getMessage());
+        error.setVisibility(View.VISIBLE);
     }
 
     private interface SaveAction { void run() throws Exception; }
