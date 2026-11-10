@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="72" android:viewportHeight="72">
+    <group android:pivotX="36" android:pivotY="36" android:scaleX="1.2" android:scaleY="1.2">
+        <path android:fillColor="#247153" android:fillType="evenOdd"
+            android:pathData="M16 20 H31 V26 H22 V46 H31 V52 H16 Z M56 20 H41 V26 H50 V46 H41 V52 H56 Z M28 33 H44 V39 H28 Z" />
+    </group>
+</vector>

@@ -1,5 +1,6 @@
 package com.rideledger;
 
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.ColorFilter;
@@ -7,6 +8,7 @@ import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
+import android.os.SystemClock;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextUtils;
@@ -21,7 +23,8 @@ import android.widget.TextView;
 final class ConnectionBadge extends TextView {
     private static final int NAME_LIMIT = 6;
     private static final int MUTED = 0xff60776a, ACTIVE = 0xff167053;
-    private enum Symbol { WIFI, HOTSPOT, BLUETOOTH, OFFLINE, REFRESH }
+    private enum Symbol { WIFI, HOTSPOT, BLUETOOTH, OFFLINE, REFRESH, SEARCH }
+    private boolean searching;
 
     ConnectionBadge(Context context, Runnable reconnect) {
         super(context);
@@ -42,9 +45,14 @@ final class ConnectionBadge extends TextView {
         SpannableStringBuilder text = new SpannableStringBuilder();
         StringBuilder description = new StringBuilder();
         boolean canReconnect = trip.people() > 1;
-        if (state.links.isEmpty()) {
-            icon(text, state.searching ? Symbol.REFRESH : Symbol.OFFLINE, MUTED);
-            String label = state.searching ? "查找队友…" : canReconnect ? "无连接" : "单人旅行";
+        searching = canReconnect && state.searching;
+        if (searching) {
+            icon(text, Symbol.SEARCH, ACTIVE);
+            text.append(" 查找队友…");
+            description.append("正在查找队友");
+        } else if (state.links.isEmpty()) {
+            icon(text, Symbol.OFFLINE, MUTED);
+            String label = canReconnect ? "无连接" : "单人旅行";
             text.append(" ").append(label);
             description.append(label);
         } else {
@@ -59,10 +67,9 @@ final class ConnectionBadge extends TextView {
                 description.append(name).append(link.active ? "正在通过" : "刚通过")
                         .append(channelName(link.channel)).append(link.active ? "同步" : "确认连通");
             }
-            if (state.searching) description.append("，正在查找队友");
         }
         if (canReconnect) {
-            if (!state.searching || !state.links.isEmpty()) {
+            if (!searching) {
                 text.append("   ");
                 icon(text, Symbol.REFRESH, MUTED);
             }
@@ -72,6 +79,12 @@ final class ConnectionBadge extends TextView {
         setContentDescription(description);
         setEnabled(canReconnect);
         setFocusable(canReconnect);
+    }
+
+    @Override protected void onDraw(Canvas canvas) {
+        super.onDraw(canvas);
+        if (searching && isShown() && getWindowVisibility() == VISIBLE && ValueAnimator.areAnimatorsEnabled())
+            postInvalidateOnAnimation();
     }
 
     @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
@@ -142,6 +155,10 @@ final class ConnectionBadge extends TextView {
                     canvas.drawArc(2.8f, 2.8f, 13.2f, 13.2f, 20, 300, false, paint);
                     canvas.drawLine(13, 2.7f, 13, 5.7f, paint);
                     canvas.drawLine(13, 5.7f, 10, 5.7f, paint);
+                    break;
+                case SEARCH:
+                    float angle = ValueAnimator.areAnimatorsEnabled() ? SystemClock.uptimeMillis() % 900L * 0.4f : 0f;
+                    canvas.drawArc(2.8f, 2.8f, 13.2f, 13.2f, angle, 265, false, paint);
                     break;
             }
             canvas.restoreToCount(save);

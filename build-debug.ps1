@@ -50,8 +50,12 @@ foreach ($required in $requiredTools) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Missing required existing tool: $required" }
 }
 
+$unsigned = Join-Path $build 'unsigned.apk'
+& (Join-Path $project 'scripts/android-link-resources.ps1') -Aapt2 (Join-Path $tools 'aapt2.exe') `
+    -AndroidJar $androidJar -Manifest (Join-Path $project 'app/src/main/AndroidManifest.xml') -BuildDir $BuildDir
 $sources = @(rg --files (Join-Path $project 'app\src\main\java') -g '*.java')
 if ($sources.Count -eq 0) { throw 'No Java sources found.' }
+$sources += (Join-Path $build 'generated/com/rideledger/R.java')
 & $javac --release 17 -encoding UTF-8 -classpath "$androidJar;$qrCore" -d (Join-Path $build 'classes') @sources
 if ($LASTEXITCODE -ne 0) { throw 'Java compilation failed.' }
 
@@ -63,17 +67,6 @@ $env:JAVA_HOME = $JavaHome
 & (Join-Path $tools 'd8.bat') --lib $androidJar --min-api 26 --output (Join-Path $build 'dex') $classJar $qrCore
 if ($LASTEXITCODE -ne 0) { throw 'DEX compilation failed.' }
 
-$unsigned = Join-Path $build 'unsigned.apk'
-$aapt2 = Join-Path $tools 'aapt2.exe'
-$compiledResources = Join-Path $build 'android-resources.zip'
-Push-Location -LiteralPath $project
-try {
-    # aapt2 on Windows cannot enumerate an absolute resource directory containing CJK characters.
-    & $aapt2 compile --dir 'app/src/main/res' -o (Join-Path $BuildDir 'android-resources.zip')
-    if ($LASTEXITCODE -ne 0) { throw 'APK resource compilation failed.' }
-} finally { Pop-Location }
-& $aapt2 link -o $unsigned -I $androidJar --manifest (Join-Path $project 'app\src\main\AndroidManifest.xml') $compiledResources
-if ($LASTEXITCODE -ne 0) { throw 'APK resource packaging failed.' }
 & $jar --update --file $unsigned -C (Join-Path $build 'dex') classes.dex `
     -C (Join-Path $project 'app/src/main/resources') META-INF/ZXING-LICENSE.txt
 if ($LASTEXITCODE -ne 0) { throw 'Adding DEX to APK failed.' }

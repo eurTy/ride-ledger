@@ -15,6 +15,8 @@ import java.util.function.Consumer;
 
 /** The service and the foreground both drive this scheduler on the main looper. */
 final class SyncEngine {
+    private static final long SEARCH_MILLIS = 5000;
+
     enum Phase { SYNCING, COMPLETE, PENDING }
 
     static final class Status {
@@ -125,9 +127,13 @@ final class SyncEngine {
         schedule();
     }
 
-    void reconnect() {
-        searchUntil = SystemClock.elapsedRealtime() + 5000;
+    boolean reconnect() {
+        long now = SystemClock.elapsedRealtime();
+        if (!running || searchUntil > now) return false;
+        searchUntil = now + SEARCH_MILLIS;
         request();
+        updateStatus(status.phase, status.pending, status.confirmedThrough, status.links, true);
+        return true;
     }
 
     void authenticated(PeerConnection session, String peer, PeerRoutePolicy.Channel channel, String route, boolean visible) {
@@ -219,7 +225,10 @@ final class SyncEngine {
         Phase phase = incoming + routes.syncing() > 0 ? Phase.SYNCING : count > 0 ? Phase.PENDING : Phase.COMPLETE;
         long now = SystemClock.elapsedRealtime();
         List<PeerPresence.Link> links = presence.links(now);
-        boolean searching = searchUntil > now;
+        updateStatus(phase, count, confirmed, links, searchUntil > now);
+    }
+
+    private void updateStatus(Phase phase, int count, long confirmed, List<PeerPresence.Link> links, boolean searching) {
         if (status.phase == phase && status.pending == count && status.confirmedThrough == confirmed &&
                 status.searching == searching && status.links.equals(links)) return;
         status = new Status(phase, count, confirmed, links, searching);

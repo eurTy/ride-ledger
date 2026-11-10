@@ -327,17 +327,17 @@ public final class MainActivity extends Activity {
         Button createTrip = button("新建小队旅行", () -> openTeam(TeamSetupActivity.CREATE, null));
         createTrip.setEnabled(Build.VERSION.SDK_INT >= 29);
         createTrip.setTextColor(Color.WHITE);
-        createTrip.setBackground(forms.chip(Color.rgb(33, 132, 91), Color.rgb(33, 132, 91), false));
+        int actionGreen = Color.rgb(33, 132, 91);
+        createTrip.setBackground(forms.chip(actionGreen, actionGreen, false));
         if (trips.isEmpty()) body.addView(createTrip, fullMargin());
         else {
             Button deleteTrip = button(deletingTrips ? "完成" : "删除旅行", () -> {
                 deletingTrips = !deletingTrips;
                 renderTrips();
             });
-            if (!deletingTrips) {
-                deleteTrip.setTextColor(Color.rgb(174, 73, 57));
-                deleteTrip.setBackground(forms.chip(Color.WHITE, Color.rgb(239, 183, 168), false));
-            }
+            deleteTrip.setTextColor(deletingTrips ? actionGreen : Color.rgb(174, 73, 57));
+            int border = deletingTrips ? Color.rgb(199, 223, 208) : Color.rgb(239, 183, 168);
+            deleteTrip.setBackground(forms.chip(Color.WHITE, border, false));
             row(body, createTrip, deleteTrip);
             if (deletingTrips) text(body, "点右侧 × 选择旅行，随后确认删除。", 13,
                     Color.rgb(183, 98, 81));
@@ -478,6 +478,7 @@ public final class MainActivity extends Activity {
         sections.addView(cash, margin);
         TextView title = text(cash, "现金与结算", 18, 0xff154b3c);
         title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
+        LedgerIcon.attach(title, R.drawable.ic_ledger_split);
         View divider = new View(this);
         divider.setBackgroundColor(0xffe6eee8);
         cash.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
@@ -585,7 +586,10 @@ public final class MainActivity extends Activity {
         reviewPanel = new ReviewPanel(this, trip.name, review, recordFilter, latest, new ReviewPanel.Actions() {
             @Override public void filter(String key) { recordFilter = key; }
             @Override public void openAll() { openRecords(trip, review); }
-            @Override public void reconnect() { teamTransport.reconnect(); }
+            @Override public void reconnect() {
+                teamTransport.reconnect();
+                updateSync();
+            }
             @Override public void edit(LedgerReview.Row row) { forms.editRecord(trip, row); }
             @Override public void delete(List<String> ids) {
                 if (deletingRecords) return;

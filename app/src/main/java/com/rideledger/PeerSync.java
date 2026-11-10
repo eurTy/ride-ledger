@@ -38,7 +38,6 @@ final class PeerSync {
     private volatile boolean enrolled;
     private boolean initialHistory;
     private long lastProgress;
-    private long nextManualReconnect;
     private int pendingNotification;
     private boolean notificationScheduled;
     private final Runnable publishChange = this::publishChanges;
@@ -89,7 +88,6 @@ final class PeerSync {
         enrolled = team == null || store.teamReady(team);
         initialHistory = false;
         lastProgress = 0;
-        nextManualReconnect = 0;
         discoveryStarted = SystemClock.elapsedRealtime();
         workers = new ThreadPoolExecutor(4, 4, 30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(16));
         // Reserve inbound capacity so four simultaneous dials cannot starve the matching receivers.
@@ -169,10 +167,7 @@ final class PeerSync {
 
     void reconnect() {
         onMain(epoch, () -> {
-            long now = SystemClock.elapsedRealtime();
-            if (engine == null || !enrolled || now < nextManualReconnect) return;
-            nextManualReconnect = now + 2000;
-            engine.reconnect();
+            if (engine == null || !enrolled || !engine.reconnect()) return;
             if (startRadios) radios.rediscover();
         });
     }

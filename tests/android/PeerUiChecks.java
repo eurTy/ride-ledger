@@ -610,22 +610,36 @@ final class PeerUiChecks {
                 LedgerStore.Trip registered = companion.getTrip(peer.id);
                 new LedgerActions(companion).cash(registered, registered.localPerson, "CNY", "17.29");
                 wifiDown.set(true);
-                java.util.concurrent.atomic.AtomicBoolean clicked = new java.util.concurrent.atomic.AtomicBoolean();
-                instrumentation.runOnMainSync(() -> {
-                    View badge = description(activity.getWindow().getDecorView(), wifiBadge);
-                    clicked.set(badge != null && badge.performClick());
-                });
-                require(clicked.get(), "review badge could not request a reconnection");
-                awaitBadge(instrumentation, activity, teammate + "刚通过蓝牙确认连通。点击重新连接", 7000);
+                clickBadgeAndExpectSearch(instrumentation, activity, wifiBadge);
+                String bluetoothBadge = teammate + "刚通过蓝牙确认连通。点击重新连接";
+                awaitBadge(instrumentation, activity, bluetoothBadge, 7000);
                 waitForText(instrumentation, activity, "1 笔");
                 require(failedWifiDials.get() > 0 && bluetoothDials.get() > 0,
                         "refresh did not attempt Wi-Fi then fall back to Bluetooth");
-                awaitBadge(instrumentation, activity, "无连接。点击重新连接", PeerPresence.RECENT_MILLIS + 6000);
+                int previousDials = bluetoothDials.get();
+                clickBadgeAndExpectSearch(instrumentation, activity, bluetoothBadge);
+                awaitBadge(instrumentation, activity, bluetoothBadge, 7000);
+                require(bluetoothDials.get() > previousDials, "a second tap reused an old contact without searching");
+                String offlineBadge = "无连接。点击重新连接";
+                awaitBadge(instrumentation, activity, offlineBadge, PeerPresence.RECENT_MILLIS + 6000);
+                listener.close();
+                clickBadgeAndExpectSearch(instrumentation, activity, offlineBadge);
+                awaitBadge(instrumentation, activity, offlineBadge, 8000);
             } finally {
                 listener.close();
                 server.join(3000);
             }
         }
+    }
+
+    private static void clickBadgeAndExpectSearch(Instrumentation instrumentation, Activity activity, String current) {
+        instrumentation.runOnMainSync(() -> {
+            View root = activity.getWindow().getDecorView();
+            View badge = description(root, current);
+            require(badge instanceof ConnectionBadge && badge.performClick(), "review badge could not request a reconnection");
+            require(description(root, "正在查找队友。点击重新连接") == badge,
+                    "review badge did not immediately replace the previous status with searching");
+        });
     }
 
     private static final PeerProtocol.Listener QUIET = new PeerProtocol.Listener() {

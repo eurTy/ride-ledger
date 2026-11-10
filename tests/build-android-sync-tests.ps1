@@ -18,8 +18,12 @@ $androidJar = Join-Path $Sdk 'platforms\android-36.1\android.jar'
 $qrCore = & (Join-Path $project 'scripts/android-qr-core.ps1')
 $env:JAVA_HOME = $JavaHome
 Set-Location -LiteralPath $project
+$unsigned = Join-Path $testBuild 'unsigned.apk'
+& (Join-Path $project 'scripts/android-link-resources.ps1') -Aapt2 (Join-Path $tools 'aapt2.exe') `
+    -AndroidJar $androidJar -Manifest (Join-Path $PSScriptRoot 'android/AndroidManifest.xml') -BuildDir 'build/android-sync-tests'
 $sources = @(rg --files 'app/src/main/java' -g '*.java')
 $sources += @(rg --files 'tests/android' -g '*.java')
+$sources += (Join-Path $testBuild 'generated/com/rideledger/R.java')
 & (Join-Path $JavaHome 'bin\javac.exe') --release 17 -encoding UTF-8 -classpath "$androidJar;$qrCore" `
     -d (Join-Path $testBuild 'classes') @sources
 if ($LASTEXITCODE -ne 0) { throw 'Android sync test compilation failed.' }
@@ -28,10 +32,6 @@ $jar = Join-Path $testBuild 'classes.jar'
 if ($LASTEXITCODE -ne 0) { throw 'Android test archive failed.' }
 & (Join-Path $tools 'd8.bat') --lib $androidJar --min-api 26 --output (Join-Path $testBuild 'dex') $jar $qrCore
 if ($LASTEXITCODE -ne 0) { throw 'Android test DEX generation failed.' }
-$unsigned = Join-Path $testBuild 'unsigned.apk'
-& (Join-Path $tools 'aapt2.exe') link -o $unsigned -I $androidJar `
-    --manifest (Join-Path $PSScriptRoot 'android\AndroidManifest.xml')
-if ($LASTEXITCODE -ne 0) { throw 'Android test APK packaging failed.' }
 & (Join-Path $JavaHome 'bin\jar.exe') --update --file $unsigned -C (Join-Path $testBuild 'dex') classes.dex
 if ($LASTEXITCODE -ne 0) { throw 'Android test APK DEX packaging failed.' }
 $aligned = Join-Path $testBuild 'aligned.apk'

@@ -87,16 +87,16 @@ final class ReviewPanel extends ListView {
         badgeWidth.setMarginStart(dp(8));
         titleRow.addView(connection, badgeWidth);
         if (model.incomplete) text(header, "部分记录超出金额范围，合计不完整。", 14, 0xff9b4b25);
-        LinearLayout spending = card(header, "总支出");
+        LinearLayout spending = card(header, "总支出", R.drawable.ic_ledger_receipt);
         text(spending, model.spending, model.hasSpending ? 20 : 15, model.hasSpending ? Color.BLACK : Color.GRAY);
-        LinearLayout balances = card(header, "现金余额");
+        LinearLayout balances = card(header, "现金余额", R.drawable.ic_ledger_balance);
         for (String balance : model.balances) text(balances, balance, 16, Color.BLACK);
-        LinearLayout history = card(header, "旅行记录");
+        LinearLayout history = card(header, "旅行记录", R.drawable.ic_ledger_book);
         count = text(history, "", 13, Color.GRAY);
         buildFilters(history);
         preview = column();
         history.addView(preview, fullMargin());
-        buildSettlement(card(ending, "小队结算"));
+        buildSettlement(card(ending, "小队结算", R.drawable.ic_ledger_reconcile));
         syncStatus = text(ending, "", 13, Color.GRAY);
         header.addView(ending);
         selectFilter(initialFilter);
@@ -503,7 +503,7 @@ final class ReviewPanel extends ListView {
         return column;
     }
 
-    private LinearLayout card(LinearLayout parent, String title) {
+    private LinearLayout card(LinearLayout parent, String title, int icon) {
         LinearLayout card = column();
         card.setPadding(dp(16), dp(10), dp(16), dp(8));
         card.setBackground(surface(Color.WHITE, 0xffdce6df, 16));
@@ -512,6 +512,7 @@ final class ReviewPanel extends ListView {
         parent.addView(card, params);
         TextView label = text(card, title, 18, 0xff154b3c);
         label.setTypeface(label.getTypeface(), Typeface.BOLD);
+        LedgerIcon.attach(label, icon);
         divider(card);
         return card;
     }
