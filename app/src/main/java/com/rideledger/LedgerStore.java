@@ -126,7 +126,7 @@ final class LedgerStore extends SQLiteOpenHelper {
     }
 
     LedgerStore(Context context) {
-        super(context, "ride_ledger.db", null, 7);
+        super(context, "ride_ledger.db", null, 8);
         this.context = context;
     }
 
@@ -134,10 +134,9 @@ final class LedgerStore extends SQLiteOpenHelper {
         db.execSQL("CREATE TABLE trips (id TEXT PRIMARY KEY, name TEXT NOT NULL, person_a TEXT NOT NULL, " +
                 "person_b TEXT NOT NULL, secret TEXT NOT NULL, local_person TEXT NOT NULL, created_at INTEGER NOT NULL, " +
                 "team TEXT NOT NULL DEFAULT '', join_name TEXT NOT NULL DEFAULT '')");
-        db.execSQL("CREATE TABLE events (id TEXT PRIMARY KEY, trip_id TEXT NOT NULL, kind TEXT NOT NULL, " +
-                "at INTEGER NOT NULL, data TEXT NOT NULL, target_id TEXT)");
-        db.execSQL("CREATE INDEX events_trip ON events(trip_id, at, id)");
-        indexTargets(db);
+        createEvents(db);
+        createEventIndexes(db);
+        createJournalMetadata(db);
         createSeats(db);
     }
 
@@ -188,6 +187,40 @@ final class LedgerStore extends SQLiteOpenHelper {
             }
             indexTargets(db);
         }
+        if (oldVersion < 8) {
+            boolean hasSequence = false;
+            try (Cursor columns = db.rawQuery("PRAGMA table_info(events)", null)) {
+                while (columns.moveToNext()) hasSequence |= "seq".equals(columns.getString(1));
+            }
+            if (!hasSequence) {
+                db.execSQL("ALTER TABLE events RENAME TO events_before_journal");
+                createEvents(db);
+                db.execSQL("INSERT INTO events(seq,id,trip_id,kind,at,data,target_id) " +
+                        "SELECT rowid,id,trip_id,kind,at,data,target_id FROM events_before_journal ORDER BY rowid");
+                db.execSQL("DROP TABLE events_before_journal");
+                createEventIndexes(db);
+            }
+            createJournalMetadata(db);
+        }
+    }
+
+    private void createEvents(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, " +
+                "trip_id TEXT NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL, target_id TEXT, " +
+                "source_epoch TEXT, source_seq INTEGER)");
+    }
+
+    private void createEventIndexes(SQLiteDatabase db) {
+        db.execSQL("CREATE INDEX events_trip ON events(trip_id, at, id)");
+        db.execSQL("CREATE INDEX events_sequence ON events(trip_id, seq)");
+        indexTargets(db);
+    }
+
+    private void createJournalMetadata(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS journal_epochs (trip_id TEXT PRIMARY KEY, epoch TEXT NOT NULL)");
+        db.execSQL("CREATE TABLE IF NOT EXISTS journal_cursors (trip_id TEXT NOT NULL, peer TEXT NOT NULL, " +
+                "epoch TEXT NOT NULL, seq INTEGER NOT NULL, event_id TEXT NOT NULL, digest TEXT NOT NULL, " +
+                "PRIMARY KEY(trip_id, peer, epoch))");
     }
 
     private void indexTargets(SQLiteDatabase db) {
@@ -252,11 +285,152 @@ final class LedgerStore extends SQLiteOpenHelper {
         }
     }
 
-    /** Local progress marker only. Peers reconcile by event ID and hash, never by SQLite row ID. */
+    /** Local acknowledgement point for UI. Journal positions are scoped to a single sender and epoch. */
     static final class SyncPoint {
         final long row;
         final String event;
         SyncPoint(long row, String event) { this.row = row; this.event = event; }
+    }
+
+    static final class JournalPosition {
+        static final JournalPosition START = new JournalPosition(0, "", "");
+        final long seq;
+        final String id, digest;
+
+        JournalPosition(long seq, String id, String digest) { this.seq = seq; this.id = id; this.digest = digest; }
+
+        boolean matches(JournalPosition other) {
+            return seq == other.seq && id.equals(other.id) && digest.equals(other.digest);
+        }
+    }
+
+    static final class JournalWindow {
+        final String epoch;
+        final JournalPosition tip;
+
+        JournalWindow(String epoch, JournalPosition tip) { this.epoch = epoch; this.tip = tip; }
+    }
+
+    synchronized JournalWindow journalWindow(Trip trip) throws Exception {
+        Trip current = getTrip(trip.id);
+        if (current == null || !current.secret.equals(trip.secret) || current.team == null ||
+                !current.team.fingerprint.equals(trip.team.fingerprint) || !teamReady(current))
+            throw new IllegalStateException("旅行已变更，请重新连接");
+        SQLiteDatabase db = getWritableDatabase();
+        String epoch = journalEpoch(db, trip.id);
+        if (epoch.isEmpty()) {
+            ContentValues values = new ContentValues();
+            values.put("trip_id", trip.id);
+            values.put("epoch", UUID.randomUUID().toString());
+            db.insertWithOnConflict("journal_epochs", null, values, SQLiteDatabase.CONFLICT_IGNORE);
+            epoch = journalEpoch(db, trip.id);
+            if (epoch.isEmpty()) throw new IllegalStateException("无法保存同步日志代次");
+        }
+        try (Cursor cursor = db.rawQuery("SELECT id,kind,at,data,seq FROM events WHERE trip_id=? ORDER BY seq DESC LIMIT 1",
+                new String[]{trip.id})) {
+            return new JournalWindow(epoch, cursor.moveToFirst()
+                    ? position(trip.id, cursor) : JournalPosition.START);
+        }
+    }
+
+    private static String journalEpoch(SQLiteDatabase db, String tripId) {
+        try (Cursor cursor = db.rawQuery("SELECT epoch FROM journal_epochs WHERE trip_id=?", new String[]{tripId})) {
+            return cursor.moveToFirst() ? cursor.getString(0) : "";
+        }
+    }
+
+    private static void requireEpoch(SQLiteDatabase db, String tripId, String epoch) {
+        if (!epoch.equals(journalEpoch(db, tripId))) throw new IllegalStateException("同步日志已重建");
+    }
+
+    private static JournalPosition position(String tripId, Cursor cursor) throws Exception {
+        Event event = new Event(cursor.getString(0), tripId, cursor.getString(1), cursor.getLong(2),
+                new JSONObject(cursor.getString(3)), cursor.getLong(4));
+        return new JournalPosition(event.localRow, event.id, PeerWire.hash(journalEvent(event)));
+    }
+
+    static JSONObject journalEvent(Event event) throws JSONException {
+        normalizeEventData(event.kind, event.data);
+        return event.json();
+    }
+
+    private static void normalizeEventData(String kind, JSONObject data) throws JSONException {
+        LedgerRules.normalizeCurrencies(data);
+        if ("edit".equals(kind) && data.optJSONObject("record") != null)
+            LedgerRules.normalizeCurrencies(data.getJSONObject("record"));
+    }
+
+    synchronized boolean validJournalPosition(String tripId, String epoch, JournalPosition point) throws Exception {
+        SQLiteDatabase db = getReadableDatabase();
+        requireEpoch(db, tripId, epoch);
+        if (point.seq == 0) return point.matches(JournalPosition.START);
+        try (Cursor cursor = db.rawQuery("SELECT id,kind,at,data,seq FROM events WHERE trip_id=? AND seq=?",
+                new String[]{tripId, Long.toString(point.seq)})) {
+            return cursor.moveToFirst() && point.matches(position(tripId, cursor));
+        }
+    }
+
+    List<Event> journalPage(String tripId, JournalWindow window, long after, JournalWindow remote, int limit) {
+        List<StoredEvent> rows = new ArrayList<>();
+        synchronized (this) {
+            SQLiteDatabase db = getReadableDatabase();
+            requireEpoch(db, tripId, window.epoch);
+            // A record first received from this peer in this epoch is already on that peer.
+            try (Cursor cursor = db.rawQuery("SELECT id,kind,at,data,seq FROM events WHERE trip_id=? AND seq>? AND seq<=? " +
+                    "AND (source_epoch IS NULL OR source_epoch<>? OR source_seq>?) ORDER BY seq LIMIT ?",
+                    new String[]{tripId, Long.toString(after), Long.toString(window.tip.seq), remote.epoch,
+                            Long.toString(remote.tip.seq), Integer.toString(limit)})) {
+                while (cursor.moveToNext()) rows.add(new StoredEvent(cursor.getString(0), cursor.getString(1),
+                        cursor.getLong(2), cursor.getString(3), cursor.getLong(4)));
+            }
+        }
+        return decodeEvents(tripId, rows);
+    }
+
+    synchronized JournalPosition journalCursor(String tripId, String peer, String epoch) {
+        return journalCursor(getReadableDatabase(), tripId, peer, epoch);
+    }
+
+    private static JournalPosition journalCursor(SQLiteDatabase db, String tripId, String peer, String epoch) {
+        try (Cursor cursor = db.rawQuery("SELECT seq,event_id,digest FROM journal_cursors WHERE trip_id=? AND peer=? AND epoch=?",
+                new String[]{tripId, peer, epoch})) {
+            return cursor.moveToFirst() ? new JournalPosition(cursor.getLong(0), cursor.getString(1), cursor.getString(2))
+                    : JournalPosition.START;
+        }
+    }
+
+    synchronized int commitJournal(Trip trip, String localEpoch, String peer, String remoteEpoch,
+                                   JournalPosition expected, JournalPosition next,
+                                   JSONArray events, List<Long> sourceSequences) throws Exception {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            requireEpoch(db, trip.id, localEpoch);
+            if (!journalCursor(db, trip.id, peer, remoteEpoch).matches(expected))
+                throw new IllegalStateException("同伴同步位点已更新，请重连");
+            int inserted = mergeRows(db, trip, events, true, remoteEpoch, sourceSequences);
+            if (next.seq != 0) {
+                // A trailing row can have been omitted because it originally came from this device.
+                try (Cursor cursor = db.rawQuery("SELECT id,kind,at,data,seq FROM events WHERE trip_id=? AND id=?",
+                        new String[]{trip.id, next.id})) {
+                    if (!cursor.moveToFirst() || !next.digest.equals(position(trip.id, cursor).digest))
+                        throw new IllegalStateException("同步位点与本机流水不一致");
+                }
+            }
+            if (!next.matches(expected)) {
+                ContentValues values = new ContentValues();
+                values.put("trip_id", trip.id);
+                values.put("peer", peer);
+                values.put("epoch", remoteEpoch);
+                values.put("seq", next.seq);
+                values.put("event_id", next.id);
+                values.put("digest", next.digest);
+                if (db.insertWithOnConflict("journal_cursors", null, values, SQLiteDatabase.CONFLICT_REPLACE) < 0)
+                    throw new IllegalStateException("同步位点未保存");
+            }
+            db.setTransactionSuccessful();
+            return inserted;
+        } finally { db.endTransaction(); }
     }
 
     synchronized long confirmedRow(String tripId, long row, String event) {
@@ -554,6 +728,8 @@ final class LedgerStore extends SQLiteOpenHelper {
         db.beginTransaction();
         try {
             db.delete("events", "trip_id=?", new String[]{id});
+            db.delete("journal_cursors", "trip_id=?", new String[]{id});
+            db.delete("journal_epochs", "trip_id=?", new String[]{id});
             int removed = db.delete("trips", "id=?", new String[]{id});
             db.setTransactionSuccessful();
             return removed > 0;
@@ -581,14 +757,19 @@ final class LedgerStore extends SQLiteOpenHelper {
     }
 
     synchronized Event add(String tripId, String kind, JSONObject data) {
-        Event event = new Event(UUID.randomUUID().toString(), tripId, kind, System.currentTimeMillis(), data);
         Trip trip = getTrip(tripId);
         if (trip == null) throw new IllegalArgumentException("旅行不存在");
-        if (trip.team != null && (!teamReady(trip) || !LedgerRules.validEvent(trip, event)))
-            throw new IllegalArgumentException("请完成首次设备登记并检查流水内容");
-        if (insertEvent(getWritableDatabase(), event) == -1)
-            throw new IllegalStateException("流水未保存，请重试");
-        return event;
+        return appendLocal(getWritableDatabase(), trip, kind, data);
+    }
+
+    private Event appendLocal(SQLiteDatabase db, Trip trip, String kind, JSONObject data) {
+        if (!teamReady(trip)) throw new IllegalArgumentException("请完成首次设备登记");
+        Event event = new Event(UUID.randomUUID().toString(), trip.id, kind, System.currentTimeMillis(), data);
+        try {
+            if (!writeEvent(db, trip, event, WriteMode.LOCAL, null, 0))
+                throw new IllegalStateException("流水未保存，请重试");
+            return event;
+        } catch (JSONException error) { throw new IllegalArgumentException(error.getMessage(), error); }
     }
 
     synchronized void edit(Event original, JSONObject data) throws Exception {
@@ -622,13 +803,27 @@ final class LedgerStore extends SQLiteOpenHelper {
                 JSONObject payload = new JSONObject().put("target", base.id).put("kind", base.kind)
                         .put("revision", Math.addExact(resolution.revision, 1)).put("record", data)
                         .put("parts", parts).put("parents", resolution.parents(parts));
-                add(trip.id, "edit", payload);
+                appendLocal(db, trip, "edit", payload);
             }
             db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
     }
 
-    private long insertEvent(SQLiteDatabase db, Event event) {
+    private enum WriteMode { LOCAL, STRICT, IMPORT }
+
+    private boolean writeEvent(SQLiteDatabase db, Trip trip, Event event, WriteMode mode,
+                               String sourceEpoch, long sourceSequence) throws JSONException {
+        if (!trip.id.equals(event.tripId)) {
+            if (mode != WriteMode.IMPORT) throw new JSONException("流水旅行不一致");
+            return false;
+        }
+        normalizeEventData(event.kind, event.data);
+        if (((mode != WriteMode.LOCAL || trip.team != null) && !LedgerRules.validEvent(trip, event)) ||
+                (mode == WriteMode.STRICT && !PeerIdentity.valid(event.id))) {
+            if (mode != WriteMode.IMPORT) throw new JSONException("流水格式无效");
+            return false;
+        }
+        if (mode == WriteMode.STRICT && alreadyStored(db, event)) return false;
         ContentValues values = new ContentValues();
         values.put("id", event.id);
         values.put("trip_id", event.tripId);
@@ -637,7 +832,26 @@ final class LedgerStore extends SQLiteOpenHelper {
         values.put("data", event.data.toString());
         if ("edit".equals(event.kind) || "delete".equals(event.kind))
             values.put("target_id", event.data.optString("target"));
-        return db.insertWithOnConflict("events", null, values, SQLiteDatabase.CONFLICT_IGNORE);
+        if (sourceEpoch != null) {
+            values.put("source_epoch", sourceEpoch);
+            values.put("source_seq", sourceSequence);
+        }
+        boolean inserted = db.insertWithOnConflict("events", null, values, SQLiteDatabase.CONFLICT_IGNORE) != -1;
+        if (!inserted && mode == WriteMode.STRICT) throw new JSONException("流水批次未完整保存");
+        return inserted;
+    }
+
+    private static boolean alreadyStored(SQLiteDatabase db, Event event) throws JSONException {
+        try (Cursor existing = db.rawQuery("SELECT trip_id,kind,at,data FROM events WHERE id=?", new String[]{event.id})) {
+            if (!existing.moveToFirst()) return false;
+            JSONObject data = new JSONObject(existing.getString(3));
+            normalizeEventData(existing.getString(1), data);
+            if (!event.tripId.equals(existing.getString(0)) || !event.kind.equals(existing.getString(1)) ||
+                    event.at != existing.getLong(2) || !PeerWire.canonical(event.data).equals(PeerWire.canonical(data)))
+                throw new JSONException("发现同 ID 的冲突流水，已保留原账目");
+            return true;
+        } catch (JSONException error) { throw error; }
+        catch (Exception error) { throw new JSONException("流水校验失败"); }
     }
 
     synchronized int merge(String tripId, JSONArray incoming) throws JSONException {
@@ -653,40 +867,22 @@ final class LedgerStore extends SQLiteOpenHelper {
         if (trip == null) return 0;
         if (!teamReady(trip)) throw new JSONException("请先完成小队设备登记");
         SQLiteDatabase db = getWritableDatabase();
-        int inserted = 0;
         db.beginTransaction();
         try {
-            for (int i = 0; i < incoming.length(); i++) {
-                Event event = Event.from(incoming.getJSONObject(i));
-                if (!tripId.equals(event.tripId)) {
-                    if (strict) throw new JSONException("流水旅行不一致");
-                    continue;
-                }
-                LedgerRules.normalizeCurrencies(event.data);
-                if ("edit".equals(event.kind) && event.data.optJSONObject("record") != null)
-                    LedgerRules.normalizeCurrencies(event.data.getJSONObject("record"));
-                if (!LedgerRules.validEvent(trip, event) || (strict && !PeerIdentity.valid(event.id))) {
-                    if (strict) throw new JSONException("流水格式无效");
-                    continue;
-                }
-                if (strict) {
-                    try (Cursor existing = db.rawQuery("SELECT trip_id,kind,at,data FROM events WHERE id=?", new String[]{event.id})) {
-                        if (existing.moveToFirst()) {
-                            JSONObject data = new JSONObject(existing.getString(3));
-                            LedgerRules.normalizeCurrencies(data);
-                            if (!tripId.equals(existing.getString(0)) || !event.kind.equals(existing.getString(1)) ||
-                                    event.at != existing.getLong(2) || !PeerWire.canonical(event.data).equals(PeerWire.canonical(data)))
-                                throw new JSONException("发现同 ID 的冲突流水，已保留原账目");
-                            continue;
-                        }
-                    } catch (JSONException e) { throw e; }
-                    catch (Exception e) { throw new JSONException("流水校验失败"); }
-                }
-                if (insertEvent(db, event) != -1) inserted++;
-                else if (strict) throw new JSONException("流水批次未完整保存");
-            }
+            int inserted = mergeRows(db, trip, incoming, strict, null, null);
             db.setTransactionSuccessful();
+            return inserted;
         } finally { db.endTransaction(); }
+    }
+
+    private int mergeRows(SQLiteDatabase db, Trip trip, JSONArray incoming, boolean strict,
+                          String sourceEpoch, List<Long> sourceSequences) throws JSONException {
+        int inserted = 0;
+        WriteMode mode = strict ? WriteMode.STRICT : WriteMode.IMPORT;
+        for (int i = 0; i < incoming.length(); i++) {
+            Event event = Event.from(incoming.getJSONObject(i));
+            if (writeEvent(db, trip, event, mode, sourceEpoch, sourceSequences == null ? 0 : sourceSequences.get(i))) inserted++;
+        }
         return inserted;
     }
 

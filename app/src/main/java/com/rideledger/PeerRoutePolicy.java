@@ -97,8 +97,11 @@ final class PeerRoutePolicy {
         return ready(urgent, -1, "", 2, Phase.LEGACY);
     }
     synchronized List<Endpoint> readyForRevision(long revision, String onlyPeer) {
+        return readyForRevision(revision, onlyPeer, java.util.Collections.emptySet());
+    }
+    synchronized List<Endpoint> readyForRevision(long revision, String onlyPeer, Set<String> activePeers) {
         List<Endpoint> result = new ArrayList<>();
-        for (State state : syncCandidates(revision, onlyPeer).values()) {
+        for (State state : syncCandidates(revision, onlyPeer, activePeers).values()) {
             if (clock.getAsLong() < state.retryAt) continue;
             state.busy = true;
             state.attempt = state.endpoint;
@@ -107,8 +110,11 @@ final class PeerRoutePolicy {
         return result;
     }
     synchronized long nextSyncRetry(long revision) {
+        return nextSyncRetry(revision, java.util.Collections.emptySet());
+    }
+    synchronized long nextSyncRetry(long revision, Set<String> activePeers) {
         long next = Long.MAX_VALUE;
-        for (State state : syncCandidates(revision, "").values()) next = Math.min(next, state.retryAt);
+        for (State state : syncCandidates(revision, "", activePeers).values()) next = Math.min(next, state.retryAt);
         return next;
     }
     synchronized void syncFailure(Endpoint endpoint) {
@@ -146,7 +152,7 @@ final class PeerRoutePolicy {
         }
         return peers;
     }
-    private Map<String, State> syncCandidates(long revision, String onlyPeer) {
+    private Map<String, State> syncCandidates(long revision, String onlyPeer, Set<String> activePeers) {
         Map<String, State> candidates = new LinkedHashMap<>();
         Map<String, Integer> completed = new HashMap<>();
         Map<String, Boolean> busy = new HashMap<>();
@@ -159,7 +165,7 @@ final class PeerRoutePolicy {
         for (State state : states.values()) {
             String peer = group(state.endpoint);
             int rank = rank(state.endpoint.channel, Phase.LEDGER);
-            if ((!onlyPeer.isEmpty() && !onlyPeer.equals(peer)) || busy.containsKey(peer) ||
+            if ((!onlyPeer.isEmpty() && !onlyPeer.equals(peer)) || busy.containsKey(peer) || activePeers.contains(peer) ||
                     syncFailures.getOrDefault(peer, 0) >= 4 || completed.getOrDefault(peer, 2) <= rank) continue;
             State previous = candidates.get(peer);
             if (previous == null || prefer(state, previous, now)) candidates.put(peer, state);
@@ -243,6 +249,10 @@ final class PeerRoutePolicy {
             state.revision = Math.max(state.revision, revision);
             state.retryAt = 0;
         }
+    }
+    synchronized void markRelayedFrom(String peer, long revision) {
+        for (State state : states.values())
+            if (group(state.endpoint).equals(peer)) state.revision = Math.max(state.revision, revision);
     }
     synchronized void failure(String key) {
         State state = states.get(key);

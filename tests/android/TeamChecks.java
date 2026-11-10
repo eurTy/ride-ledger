@@ -351,6 +351,100 @@ final class TeamChecks {
                         "long journal did not resume the missing operations: " + resumed);
                 Pair replay = exchange(b, a);
                 require(replay.complete() && replay.client.sent == 0 && replay.server.sent == 0, "long journal replay was not empty");
+                LedgerStore.Event original = visible(a);
+                new LedgerActions(a.store).cash(a.trip, "m1", "CNY", "0.02", original);
+                Pair oneChange = exchange(a, b);
+                require(oneChange.complete() && oneChange.client.sent == 1 && oneChange.server.sent == 0 &&
+                        oneChange.client.bytesRead + oneChange.client.bytesWritten < 32000 &&
+                        visible(b).id.equals(original.id) && visible(b).at == original.at &&
+                        b.store.summary(b.trip.id).visible.size() == total &&
+                        b.store.summary(b.trip.id).teamCash.get("m1").get("CNY") == total + 1,
+                        "one edit exchanged excess history or changed accounting time: " + oneChange);
+                new LedgerActions(a.store).cash(a.trip, "m1", "CNY", "0.03", visible(a));
+                Pair missingReceipt = exchange(a, b, "", "drop-confirm");
+                require(!missingReceipt.complete() && visible(b).data.getLong("amount") == 3,
+                        "record was not durable before confirmation");
+                a.reopen();
+                b.reopen();
+                Pair afterReceiptLoss = exchange(a, b);
+                require(afterReceiptLoss.complete() && afterReceiptLoss.client.sent == 0 && afterReceiptLoss.server.sent == 0 &&
+                        visible(b).id.equals(original.id) && visible(b).at == original.at &&
+                        b.store.summary(b.trip.id).visible.size() == total &&
+                        b.store.summary(b.trip.id).teamCash.get("m1").get("CNY") == total + 2,
+                        "durable cursor did not survive reconnect after confirmation loss");
+            }
+        });
+
+        sink.check("team cursors: three offline devices converge across reordered relays and competing resolutions", () -> {
+            try (Device a = new Device(base); Device b = new Device(base); Device c = new Device(base)) {
+                a.trip = a.store.createTeam("三机并发", MEMBERS.subList(0, 3));
+                b.enroll(a, 1);
+                c.enroll(a, 2);
+                LedgerStore.Event original = record(a, "CNY", 100, "原备注");
+                require(exchange(a, b).complete() && exchange(a, c).complete(), "could not seed three replicas");
+                new LedgerActions(a.store).editExpense(a.trip, visible(a), "m1", "CNY", "2", 0, null, "原备注");
+                new LedgerActions(b.store).editExpense(b.trip, visible(b), "m1", "CNY", "3", 0, null, "原备注");
+                new LedgerActions(c.store).editExpense(c.trip, visible(c), "m1", "CNY", "1", 0, null, "三号备注");
+                require(exchange(c, b).complete() && exchange(a, c).complete() && exchange(b, a).complete(),
+                        "relay exchange failed");
+                long provisional = visible(a).data.getLong("amount");
+                for (Device device : Arrays.asList(a, b, c))
+                    require(visible(device).financialOptions.size() == 2 && visible(device).data.getLong("amount") == provisional &&
+                            visible(device).data.getString("note").equals("三号备注"), "replicas disagree on conflict candidates");
+                new LedgerActions(a.store).editExpense(a.trip, visible(a), "m1", "CNY", "2", 0, null, "三号备注");
+                new LedgerActions(b.store).editExpense(b.trip, visible(b), "m1", "CNY", "3", 0, null, "三号备注");
+                require(exchange(a, b).complete() && visible(a).financialOptions.size() == 2,
+                        "two concurrent resolutions hid the remaining conflict");
+                new LedgerActions(a.store).editExpense(a.trip, visible(a), "m1", "CNY", "3", 0, null, "三号备注");
+                require(exchange(a, c).complete() && exchange(c, b).complete() && exchange(b, a).complete(), "final selection did not relay");
+                for (Device device : Arrays.asList(a, b, c))
+                    require(!visible(device).conflicted() && visible(device).id.equals(original.id) &&
+                            visible(device).at == original.at && visible(device).data.getLong("amount") == 300 &&
+                            device.store.summary(device.trip.id).visible.size() == 1, "resolved replicas differ in time or accounting");
+            }
+        });
+
+        sink.check("team relay: receiving a batch does not dial, forwarding starts once after the session", () -> {
+            try (Device source = new Device(base); Device hub = new Device(base); Device target = new Device(base)) {
+                source.trip = source.store.createTeam("批次转发", MEMBERS.subList(0, 3));
+                hub.enroll(source, 1);
+                target.enroll(source, 2);
+                hub.openCoordinator();
+                target.openCoordinator();
+                onMain(() -> hub.link(target, PeerRoutePolicy.Channel.WIFI, null, false));
+                await(() -> target.inboundDials.get() == 1 && !hub.sync.transferring() && !target.sync.transferring() &&
+                        !hub.sync.syncState().links.isEmpty(), 10000, "relay target was not initially settled");
+                String note = new String(new char[2400]).replace('\0', '骑');
+                for (int i = 0; i < 20; i++) record(source, "CNY", 100, note + i);
+                java.util.concurrent.CountDownLatch pause = new java.util.concurrent.CountDownLatch(1);
+                java.util.concurrent.CountDownLatch resume = new java.util.concurrent.CountDownLatch(1);
+                ExecutorService worker = Executors.newSingleThreadExecutor();
+                try (ServerSocket listener = loopback();
+                     Socket socket = new Socket("127.0.0.1", listener.getLocalPort())) {
+                    socket.setSoTimeout(12000);
+                    Socket inbound = listener.accept();
+                    hub.sync.accept(hub.connection(inbound, source, PeerRoutePolicy.Channel.WIFI),
+                            PeerRoutePolicy.Channel.WIFI, "");
+                    Future<PeerProtocol.Result> exchange = worker.submit(() -> source.protocol().exchange(
+                            new PeerWire(socket.getInputStream(), new PeerProtocolChecks.FaultOutput(socket, "", () -> {
+                                pause.countDown();
+                                try {
+                                    if (!resume.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("relay test gate timed out");
+                                } catch (InterruptedException error) { throw new IllegalStateException(error); }
+                            }), () -> { }), TeamProtocol.routeId(hub.trip.team, hub.id.deviceId)));
+                    try {
+                        require(pause.await(5, TimeUnit.SECONDS), "long session never reached the second batch");
+                        await(() -> hub.count() > 0, 5000, "first batch was not stored");
+                        SystemClock.sleep(600);
+                        require(hub.count() < 20 && target.count() == 0 && target.inboundDials.get() == 1,
+                                "a committed batch caused a new dial before the session ended");
+                    } finally { resume.countDown(); }
+                    require(exchange.get(10, TimeUnit.SECONDS).complete, "source session did not finish");
+                    await(() -> target.count() == 20 && !hub.sync.transferring() && !target.sync.transferring(),
+                            10000, "completed session did not forward the journal");
+                    require(target.inboundDials.get() == 2 && target.store.summary(target.trip.id).spent.get("CNY") == 2000,
+                            "relay should make a single dial without duplicate entries, inbound=" + target.inboundDials.get());
+                } finally { worker.shutdownNow(); }
             }
         });
 
@@ -401,6 +495,24 @@ final class TeamChecks {
                     "retry budget did not stop the engine");
             routes.newSyncRequest();
             require(only(routes.readyForRevision(2, ""), "wifi"), "new work should reactivate the route");
+        });
+
+        sink.check("team routes: relay preserves another peer's retry deadline and excludes active peers", () -> {
+            AtomicLong clock = new AtomicLong(100);
+            PeerRoutePolicy routes = new PeerRoutePolicy(clock::get);
+            String source = java.util.UUID.randomUUID().toString(), other = java.util.UUID.randomUUID().toString();
+            PeerRoutePolicy.Endpoint a = new PeerRoutePolicy.Endpoint("source", PeerRoutePolicy.Channel.WIFI, source, true, null);
+            PeerRoutePolicy.Endpoint b = new PeerRoutePolicy.Endpoint("other", PeerRoutePolicy.Channel.WIFI, other, true, null);
+            routes.offer(a);
+            routes.offer(b);
+            require(only(routes.readyForRevision(1, "", Collections.singleton(source)), "other"), "active source was dialed");
+            routes.syncFailure(b);
+            long retry = routes.nextSyncRetry(1, Collections.singleton(source));
+            routes.markRelayedFrom(source, 2);
+            require(routes.readyForRevision(2, "").isEmpty() && retry == 2100 && routes.nextSyncRetry(2) == retry,
+                    "relay cleared another peer's backoff or dialed the source");
+            clock.set(retry);
+            require(only(routes.readyForRevision(2, ""), "other"), "relay was lost after the existing backoff");
         });
 
         sink.check("team sync engine: offline queue and authenticated checkpoint survive a reopen", () -> {
@@ -466,6 +578,38 @@ final class TeamChecks {
                 files.delete();
             }
         });
+    }
+
+    static void crashCursor(Context base, String runId, boolean prepare) throws Exception {
+        require(PeerIdentity.valid(runId), "invalid crash fixture ID");
+        android.content.SharedPreferences state = base.getSharedPreferences("journal_crash_" + runId, 0);
+        try (Device a = new Device(new PeerProtocolChecks.Ctx(base, "crash_a_" + runId + "_"));
+             Device b = new Device(new PeerProtocolChecks.Ctx(base, "crash_b_" + runId + "_"))) {
+            if (prepare) {
+                a.trip = a.store.createTeam("确认前强退", MEMBERS.subList(0, 2));
+                b.enroll(a, 1);
+                LedgerStore.Event original = record(a, "CNY", 100, "断点测试");
+                require(exchange(a, b).complete(), "could not seed crash fixture");
+                require(state.edit().putString("trip", a.trip.id).putString("event", original.id)
+                        .putLong("at", original.at).commit(), "could not persist test fixture");
+                new LedgerActions(a.store).editExpense(a.trip, visible(a), "m1", "CNY", "2", 0, null, "断点测试");
+                exchange(a, b, "", "kill-before-confirm");
+                throw new AssertionError("expected process termination before receipt");
+            }
+            String trip = state.getString("trip", "");
+            a.trip = a.store.getTrip(trip);
+            b.trip = b.store.getTrip(trip);
+            require(a.trip != null && b.trip != null && visible(b).data.getLong("amount") == 200,
+                    "edit had not persisted before termination");
+            Pair retry = exchange(a, b);
+            Pair replay = exchange(b, a);
+            require(retry.complete() && replay.complete() && retry.client.sent == 0 && retry.server.sent == 0 &&
+                    replay.client.sent == 0 && replay.server.sent == 0, "restart retransmitted acknowledged operations");
+            LedgerStore.Event record = visible(b);
+            require(record.id.equals(state.getString("event", "")) && record.at == state.getLong("at", -1) &&
+                    a.count() == 2 && b.count() == 2 && b.store.summary(trip).visible.size() == 1 &&
+                    b.store.summary(trip).spent.get("CNY") == 200, "restart altered visible records, totals, or time");
+        } finally { state.edit().clear().commit(); }
     }
 
     private static void gatewayExchange(Device host, Device client) throws Exception {
@@ -585,7 +729,10 @@ final class TeamChecks {
         PeerSync sync;
 
         Device(Context base) throws Exception {
-            context = new PeerProtocolChecks.Ctx(base);
+            this(new PeerProtocolChecks.Ctx(base));
+        }
+        Device(PeerProtocolChecks.Ctx context) throws Exception {
+            this.context = context;
             store = new LedgerStore(context);
             id = Team.Identity.load(context);
         }

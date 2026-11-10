@@ -25,6 +25,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.Arrays;
+import java.util.List;
 
 /** Runs the production screen in the separate test package, with a fictitious local trip. */
 final class PeerUiChecks {
@@ -95,12 +96,13 @@ final class PeerUiChecks {
                     requireNext(labeledInput(root, "支付金额"), labeledInput(root, "货币"));
                     requireNext(labeledInput(root, "货币"), labeledInput(root, "备注（可选）"));
                     amount(root).setText("1.01");
-                    require(text(root, "保存这笔支出").performClick(), "group save action missing");
+                    require(save.performClick(), "group save action missing");
+                    save.performClick();
                     require(text(activity.getWindow().getDecorView(), "复盘").performClick(), "review navigation missing");
                 });
+                waitForRecordColor(instrumentation, activity, "1.01 CNY", 0xffe9ebed);
                 require(store.events(trip.id).size() == 1 && store.summary(trip.id).spent.get("CNY") == 101L,
                         "group could not record offline");
-                waitForRecordColor(instrumentation, activity, "1.01 CNY", 0xffe9ebed);
                 instrumentation.runOnMainSync(() -> require(description(activity.getWindow().getDecorView(),
                         "无连接。点击重新连接") instanceof ConnectionBadge, "offline review badge was missing"));
                 teamExchange(sync, companion, peer, other);
@@ -238,16 +240,84 @@ final class PeerUiChecks {
                     text(activity.getWindow().getDecorView(), "复盘").performClick();
                 });
                 waitForText(instrumentation, activity, "1 笔");
-                instrumentation.runOnMainSync(() -> {
-                    View root = activity.getWindow().getDecorView();
-                    require(recordContaining(root, "分摊：甲 36.00 · 乙 23.00") != null
-                            && text(root, "甲 → 乙") != null, "review lost the detail or reversed the repayment");
-                });
+                java.util.concurrent.atomic.AtomicBoolean hasDetails = new java.util.concurrent.atomic.AtomicBoolean();
+                long deadline = SystemClock.elapsedRealtime() + 5000;
+                do {
+                    instrumentation.runOnMainSync(() -> {
+                        View root = activity.getWindow().getDecorView();
+                        hasDetails.set(recordContaining(root, "分摊：甲 36.00 · 乙 23.00") != null &&
+                                text(root, "甲 → 乙") != null);
+                    });
+                    if (!hasDetails.get()) SystemClock.sleep(40);
+                } while (!hasDetails.get() && SystemClock.elapsedRealtime() < deadline);
+                require(hasDetails.get(), "review lost the detail or reversed the repayment");
                 LedgerStore.Summary summary = store.summary(trip.id);
                 require(summary.spent.get("CNY") == 5900L && summary.teamNet.get("m1").get("CNY") == -3600L
                         && summary.teamCash.get("m2").get("CNY") == -5900L,
                         "custom split changed the total, payer cash or repayment amount");
             } finally { instrumentation.runOnMainSync(activity::finish); instrumentation.waitForIdleSync(); }
+        }
+    }
+
+    static void runLedgerBackup(Instrumentation instrumentation) throws Exception {
+        Context context = instrumentation.getTargetContext();
+        try (LedgerStore store = new LedgerStore(context)) {
+            LedgerStore.Trip trip = store.createTeam("备份检查", Arrays.asList("甲", "乙"));
+            LedgerActions actions = new LedgerActions(store);
+            actions.expense(trip, "m1", "CNY", "12", false, "原备注");
+            LedgerStore.Event original = store.summary(trip.id).visible.get(0);
+            actions.editExpense(trip, original, "m1", "CNY", "15", 0, null, "修订\n备注");
+            actions.delete(trip, java.util.Collections.singletonList(original.id));
+            actions.cash(trip, "m1", "USD", "25");
+            List<LedgerStore.Event> operations = store.events(trip.id);
+            context.getSharedPreferences("ui", 0).edit().putString("last_trip", trip.id)
+                    .putBoolean(MainActivity.STARTUP_PERMISSIONS_REQUESTED, true).commit();
+            Activity activity = instrumentation.startActivitySync(new Intent(context, MainActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            java.io.File file = java.io.File.createTempFile("ride-backup-", ".rlbackup.txt", context.getCacheDir());
+            android.content.IntentFilter createDocument = new android.content.IntentFilter(Intent.ACTION_CREATE_DOCUMENT);
+            createDocument.addCategory(Intent.CATEGORY_OPENABLE);
+            createDocument.addDataType("text/plain");
+            Instrumentation.ActivityMonitor picker = instrumentation.addMonitor(createDocument, new Instrumentation.ActivityResult(
+                    Activity.RESULT_OK, new Intent().setData(android.net.Uri.fromFile(file))), true);
+            try {
+                instrumentation.runOnMainSync(() -> text(activity.getWindow().getDecorView(), "复盘").performClick());
+                waitForText(instrumentation, activity, "1 笔");
+                instrumentation.runOnMainSync(() -> text(activity.getWindow().getDecorView(), "查看全部").performClick());
+                waitForText(instrumentation, activity, "全部旅行记录");
+                instrumentation.runOnMainSync(() -> require(text(activity.getWindow().getDecorView(), "导出").performClick(),
+                        "existing export action unavailable"));
+                long deadline = SystemClock.elapsedRealtime() + 5000;
+                String contents;
+                do {
+                    contents = new String(java.nio.file.Files.readAllBytes(file.toPath()), java.nio.charset.StandardCharsets.UTF_8);
+                    if (contents.contains("\"sha256\"") && contents.endsWith("\n")) break;
+                    SystemClock.sleep(40);
+                } while (SystemClock.elapsedRealtime() < deadline);
+                String[] lines = contents.split("\n");
+                require(picker.getHits() == 1 && lines.length == operations.size() + 2 &&
+                        LedgerBackup.isBackupName("trip.RLBACKUP") && !LedgerBackup.isBackupName("trip.txt"),
+                        "backup did not use the existing picker or omitted operations");
+                JSONObject header = new JSONObject(lines[0]);
+                require(header.getInt("version") == 1 && header.getString("tripId").equals(trip.id) &&
+                        header.getInt("operations") == 4 && header.getJSONObject("members").getString("m1").equals("甲") &&
+                        !contents.contains(trip.secret), "backup metadata is missing or contains credentials");
+                for (int i = 0; i < operations.size(); i++)
+                    require(PeerWire.canonical(new JSONObject(lines[i + 1])).equals(PeerWire.canonical(operations.get(i).json())),
+                            "backup changed an operation, its timestamp, or its payload");
+                String payload = contents.substring(0, contents.length() - lines[lines.length - 1].length() - 1);
+                byte[] hash = java.security.MessageDigest.getInstance("SHA-256")
+                        .digest(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                StringBuilder hex = new StringBuilder();
+                for (byte value : hash) hex.append(String.format(java.util.Locale.ROOT, "%02x", value & 255));
+                require(new JSONObject(lines[lines.length - 1]).getString("sha256").contentEquals(hex),
+                        "backup checksum does not match the exported bytes");
+            } finally {
+                instrumentation.removeMonitor(picker);
+                file.delete();
+                instrumentation.runOnMainSync(activity::finish);
+                instrumentation.waitForIdleSync();
+            }
         }
     }
 
@@ -661,6 +731,15 @@ final class PeerUiChecks {
                     } else text(dialog, "取消").performClick();
                 }
             });
+            if ("现金入账".equals(action)) {
+                java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
+                long deadline = SystemClock.elapsedRealtime() + 5000;
+                do {
+                    instrumentation.runOnMainSync(() -> closed.set(windowWithText("保存") == null));
+                    if (!closed.get()) SystemClock.sleep(40);
+                } while (!closed.get() && SystemClock.elapsedRealtime() < deadline);
+                require(closed.get(), "cash save did not finish");
+            }
         }
         long end = SystemClock.elapsedRealtime() + 4000;
         java.util.concurrent.atomic.AtomicBoolean selected = new java.util.concurrent.atomic.AtomicBoolean();

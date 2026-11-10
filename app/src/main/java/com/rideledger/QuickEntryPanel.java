@@ -154,18 +154,25 @@ final class QuickEntryPanel extends LinearLayout {
                 String code = Money.code(currency.getText().toString());
                 String who = current.member(payer.getSelectedItemPosition());
                 boolean personal = personalMode[0];
-                if (custom[0] == null) {
-                    ledgerActions.expense(current, who, code, amount.getText().toString(), personal, note.getText().toString());
-                } else {
-                    if (!code.equals(custom[0].currency))
-                        throw new IllegalArgumentException("货币已更改，请重新确认自定义分摊");
-                    ledgerActions.expense(current, who, custom[0], note.getText().toString());
-                }
+                LedgerActions.CustomSplit split = custom[0];
+                String rawAmount = amount.getText().toString(), rawNote = note.getText().toString();
+                if (split != null && !code.equals(split.currency))
+                    throw new IllegalArgumentException("货币已更改，请重新确认自定义分摊");
                 committed = true;
-                currencyHistory.remember(current.id, code, code);
-                uiPrefs.edit().putString("payer:" + trip.id, who)
-                        .putString("mode:" + trip.id, personal ? "personal" : "shared").apply();
-                saved.accept(current);
+                save.setEnabled(false);
+                ledgerActions.submit(() -> {
+                    if (split == null) ledgerActions.expense(current, who, code, rawAmount, personal, rawNote);
+                    else ledgerActions.expense(current, who, split, rawNote);
+                }, () -> {
+                    currencyHistory.remember(current.id, code, code);
+                    uiPrefs.edit().putString("payer:" + current.id, who)
+                            .putString("mode:" + current.id, personal ? "personal" : "shared").apply();
+                    if (!activity.isDestroyed()) saved.accept(current);
+                }, error -> {
+                    committed = false;
+                    save.setEnabled(true);
+                    if (!activity.isDestroyed()) showError.accept(error);
+                });
             } catch (Exception e) { showError.accept(e); }
         });
         save.setTextSize(17);

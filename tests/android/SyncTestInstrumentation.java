@@ -40,7 +40,11 @@ public final class SyncTestInstrumentation extends Instrumentation {
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
-            if (arguments.containsKey("desktopPeerInvite")) runDesktopPeer(result);
+            if (arguments.containsKey("journalCrash")) {
+                check("journal cursor survives process death after commit before receipt", () ->
+                        TeamChecks.crashCursor(getTargetContext(), arguments.getString("runId"),
+                                "prepare".equals(arguments.getString("journalCrash"))));
+            } else if (arguments.containsKey("desktopPeerInvite")) runDesktopPeer(result);
             else {
                 JSONObject fixture = new JSONObject(new String(Base64.decode(arguments.getString("fixture"),
                         Base64.URL_SAFE | Base64.NO_WRAP), StandardCharsets.UTF_8));
@@ -317,6 +321,7 @@ public final class SyncTestInstrumentation extends Instrumentation {
             check("custom split UI: payer, individual shares and settlement agree", () -> PeerUiChecks.runCustomSplit(this));
             check("record deletion: full-list checkboxes, confirmation, offline propagation and replay", () -> PeerUiChecks.runRecordDeletion(this));
             check("record editing: bottom sheet, original time and offline propagation", () -> PeerUiChecks.runRecordEdit(this));
+            check("ledger backup: existing picker exports raw revisions, tombstones and original times", () -> PeerUiChecks.runLedgerBackup(this));
             check("review badge: verified channels, Wi-Fi failure falls back to Bluetooth on tap, and recent contact expires", () -> PeerUiChecks.runRosterRefresh(this));
             check("open team UI: organizer roster and validation are inline", () -> PeerUiChecks.runTeamSetup(this));
             check("open team UI: join details, connecting and delayed success are inline", () -> PeerUiChecks.runTeamJoin(this));

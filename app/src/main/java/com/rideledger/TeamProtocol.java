@@ -89,7 +89,9 @@ final class TeamProtocol {
         }
         if (store.acceptRoster(trip, decision.optJSONArray("roster"))) enrolled.run();
         store.acceptSeat(trip, remote.grant, remote.device, remote.key, remote.member);
-        PeerProtocol.Result result = new PeerProtocol(store, local.deviceId, listener, trip, remote.device, session.secret).exchange(wire, true);
+        PeerProtocol.Result result = remote.journalCursor
+                ? new JournalSync(store, trip, session.secret, remote.device, wire, listener).exchange(true)
+                : new PeerProtocol(store, local.deviceId, listener, trip, remote.device, session.secret).exchange(wire, true);
         result.callbackPort = remote.callbackPort;
         return result;
     }
@@ -131,7 +133,9 @@ final class TeamProtocol {
         }
         if (trip.team.openSeats) decision.put("roster", store.teamSeats(trip.id));
         write(wire, session, decision);
-        PeerProtocol.Result result = new PeerProtocol(store, local.deviceId, listener, trip, remote.device, session.secret).accept(wire);
+        PeerProtocol.Result result = remote.journalCursor
+                ? new JournalSync(store, trip, session.secret, remote.device, wire, listener).exchange(false)
+                : new PeerProtocol(store, local.deviceId, listener, trip, remote.device, session.secret).accept(wire);
         result.callbackPort = remote.callbackPort;
         return result;
     }
@@ -143,7 +147,7 @@ final class TeamProtocol {
                 .put("nonce", UUID.randomUUID().toString()).put("device", local.deviceId)
                 .put("key", local.key).put("member", member)
                 .put("ephemeral", Team.encode(keys.getPublic().getEncoded()))
-                .put("grant", grant);
+                .put("grant", grant).put("journalCursor", 1);
         if (listenerPort > 0) hello.put("callbackPort", listenerPort);
         if (trip.team.openSeats) {
             if (grant == null) hello.put("name", trip.joinName);
@@ -171,6 +175,7 @@ final class TeamProtocol {
         final String device, key, member, ephemeral, name;
         final JSONObject grant;
         final int callbackPort;
+        final boolean journalCursor;
         Remote(JSONObject message) throws Exception {
             device = message.getString("device");
             key = message.getString("key");
@@ -179,6 +184,7 @@ final class TeamProtocol {
             ephemeral = message.getString("ephemeral");
             grant = message.optJSONObject("grant");
             callbackPort = message.optInt("callbackPort");
+            journalCursor = message.optInt("journalCursor") == 1;
         }
     }
 

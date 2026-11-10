@@ -6,12 +6,14 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Build;
 import android.provider.Settings;
+import android.provider.OpenableColumns;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -48,6 +50,7 @@ public final class MainActivity extends Activity {
     private View recordsOverlay;
     private String exportTripId;
     private List<LedgerReview.Row> pendingExport;
+    private boolean deletingRecords;
     private ReviewPanel reviewPanel;
     private TeamTransportAdapter teamTransport;
     private Map<String, String> renderedSeatNames = Collections.emptyMap();
@@ -584,10 +587,17 @@ public final class MainActivity extends Activity {
             @Override public void reconnect() { teamTransport.reconnect(); }
             @Override public void edit(LedgerReview.Row row) { forms.editRecord(trip, row); }
             @Override public void delete(List<String> ids) {
-                try { ledgerActions.delete(trip, ids); }
-                catch (Exception error) { error(error); return; }
-                if (reviewPanel != null) reviewPanel.cancelRecordSelection();
-                afterSave(trip, false);
+                if (deletingRecords) return;
+                deletingRecords = true;
+                ledgerActions.submit(() -> ledgerActions.delete(trip, ids), () -> {
+                    deletingRecords = false;
+                    if (isDestroyed() || !trip.id.equals(currentTripId)) return;
+                    if (reviewPanel != null) reviewPanel.cancelRecordSelection();
+                    afterSave(trip, false);
+                }, failure -> {
+                    deletingRecords = false;
+                    if (!isDestroyed()) error(failure);
+                });
             }
         });
         renderedSeatNames = trip.seatNames;
@@ -633,27 +643,52 @@ public final class MainActivity extends Activity {
         new Thread(() -> {
             String status;
             try {
-                List<LedgerReview.Row> rows = records;
-                if (rows == null) {
+                boolean backup = LedgerBackup.isBackupName(exportFileName(destination));
+                if (backup) {
                     LedgerStore.Snapshot snapshot = store.snapshot(tripId);
                     if (snapshot.trip == null) throw new IOException("旅行不存在");
-                    rows = new LedgerReview(snapshot.trip, snapshot.totals()).records;
-                }
-                try (OutputStream stream = getContentResolver().openOutputStream(destination, "wt")) {
-                    if (stream == null) throw new IOException("无法打开文件");
-                    try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(stream, StandardCharsets.UTF_8))) {
-                        for (LedgerReview.Row row : rows) {
-                            writer.write(row.label);
-                            writer.newLine();
-                            writer.newLine();
-                        }
+                    try (OutputStream stream = getContentResolver().openOutputStream(destination, "wt")) {
+                        if (stream == null) throw new IOException("无法打开文件");
+                        LedgerBackup.write(stream, snapshot);
                     }
+                } else {
+                    writeRecordText(destination, tripId, records);
                 }
-                status = "旅行记录已导出";
+                status = backup ? "账本备份已保存" : "旅行记录已导出";
             } catch (Exception error) { status = "导出失败，请重试"; }
             String message = status;
             runOnUiThread(() -> { if (!isDestroyed()) toast(message); });
         }, "ledger-export").start();
+    }
+
+    private String exportFileName(Uri destination) {
+        try (Cursor cursor = getContentResolver().query(destination, new String[]{OpenableColumns.DISPLAY_NAME},
+                null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int name = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (name >= 0) return cursor.getString(name);
+            }
+        } catch (RuntimeException ignored) { }
+        return destination.getLastPathSegment();
+    }
+
+    private void writeRecordText(Uri destination, String tripId, List<LedgerReview.Row> records) throws IOException {
+        List<LedgerReview.Row> rows = records;
+        if (rows == null) {
+            LedgerStore.Snapshot snapshot = store.snapshot(tripId);
+            if (snapshot.trip == null) throw new IOException("旅行不存在");
+            rows = new LedgerReview(snapshot.trip, snapshot.totals()).records;
+        }
+        try (OutputStream stream = getContentResolver().openOutputStream(destination, "wt")) {
+            if (stream == null) throw new IOException("无法打开文件");
+            try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(stream, StandardCharsets.UTF_8))) {
+                for (LedgerReview.Row row : rows) {
+                    writer.write(row.label);
+                    writer.newLine();
+                    writer.newLine();
+                }
+            }
+        }
     }
 
     private void afterSave(LedgerStore.Trip trip, boolean resetQuickEntry) {

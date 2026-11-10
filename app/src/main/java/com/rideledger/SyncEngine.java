@@ -9,6 +9,8 @@ import java.util.List;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.function.Consumer;
 
 /** The service and the foreground both drive this scheduler on the main looper. */
@@ -52,6 +54,7 @@ final class SyncEngine {
     private final Handler main;
     private final PeerRoutePolicy routes = new PeerRoutePolicy(SystemClock::elapsedRealtime);
     private final Map<String, PeerRoutePolicy.Channel> lastChannel = new HashMap<>();
+    private final Map<PeerConnection, String> activeSessions = new HashMap<>();
     private final PeerPresence presence = new PeerPresence();
     private long searchUntil;
     private final Dial dial;
@@ -94,6 +97,11 @@ final class SyncEngine {
         if (routes.offer(endpoint)) schedule();
     }
 
+    void rosterChanged() {
+        pendingDirty = true;
+        schedule();
+    }
+
     void lost(String key) {
         routes.remove(key);
         presence.lost(key);
@@ -122,7 +130,9 @@ final class SyncEngine {
         request();
     }
 
-    void authenticated(PeerConnection session, String peer, PeerRoutePolicy.Channel channel, String route) {
+    void authenticated(PeerConnection session, String peer, PeerRoutePolicy.Channel channel, String route, boolean visible) {
+        activeSessions.put(session, TeamProtocol.routeId(trip.team, peer));
+        if (!visible) return;
         try {
             org.json.JSONObject seat = store.seat(trip.id, peer);
             if (seat == null || !trip.team.fingerprint.equals(seat.optString("team"))) return;
@@ -137,8 +147,16 @@ final class SyncEngine {
     }
 
     /** Null means a failed session. An empty route denotes a verified inbound-only peer. */
-    void sessionFinished(PeerConnection session, String verifiedRoute) {
+    void sessionFinished(PeerConnection session, String verifiedRoute, boolean stored, long captured) {
+        String source = activeSessions.remove(session);
         presence.finished(session, verifiedRoute, SystemClock.elapsedRealtime());
+        if (stored) {
+            boolean sourceHasRevision = verifiedRoute != null && source != null && captured == revision;
+            revision++;
+            pendingDirty = true;
+            // Concurrent local writes or data from another peer may still need to go back to the source.
+            if (sourceHasRevision) routes.markRelayedFrom(source, revision);
+        }
         schedule();
     }
 
@@ -179,10 +197,11 @@ final class SyncEngine {
     private void dispatch() {
         scheduled = false;
         if (!running) return;
-        List<PeerRoutePolicy.Endpoint> ready = routes.readyForRevision(revision, "");
+        Set<String> activePeers = new HashSet<>(activeSessions.values());
+        List<PeerRoutePolicy.Endpoint> ready = routes.readyForRevision(revision, "", activePeers);
         for (PeerRoutePolicy.Endpoint endpoint : ready) dial.start(endpoint, revision);
         publish();
-        long next = Math.min(routes.nextSyncRetry(revision), presence.nextExpiry());
+        long next = Math.min(routes.nextSyncRetry(revision, activePeers), presence.nextExpiry());
         if (status.searching) next = Math.min(next, searchUntil);
         if (!scheduled && next != Long.MAX_VALUE)
             main.postDelayed(retry, Math.max(1, next - SystemClock.elapsedRealtime()));
@@ -239,6 +258,7 @@ final class SyncEngine {
         main.removeCallbacks(retry);
         routes.clear();
         lastChannel.clear();
+        activeSessions.clear();
         presence.clear();
         searchUntil = 0;
         incoming = 0;

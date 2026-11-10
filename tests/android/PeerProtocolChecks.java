@@ -379,8 +379,12 @@ final class PeerProtocolChecks {
     };}
     static final class FaultOutput extends OutputStream {
         private final Socket socket; private final OutputStream out; private final String mode;
+        private final Runnable beforeSecondDelta;
         private final ByteArrayOutputStream buffered=new ByteArrayOutputStream(); private int deltas, frames;
-        FaultOutput(Socket socket,String mode)throws Exception{this.socket=socket;out=socket.getOutputStream();this.mode=mode;}
+        FaultOutput(Socket socket,String mode)throws Exception{this(socket,mode,null);}
+        FaultOutput(Socket socket,String mode,Runnable beforeSecondDelta)throws Exception{
+            this.socket=socket;out=socket.getOutputStream();this.mode=mode;this.beforeSecondDelta=beforeSecondDelta;
+        }
         @Override public void write(int value)throws IOException{write(new byte[]{(byte)value});}
         @Override public void write(byte[] data,int offset,int length)throws IOException{
             buffered.write(data,offset,length);
@@ -390,6 +394,11 @@ final class PeerProtocolChecks {
             try{
                 JSONObject value=new JSONObject(new String(bytes,4,size,java.nio.charset.StandardCharsets.UTF_8));
                 String kind=value.optString("kind");if("delta".equals(kind))deltas++;frames++;
+                if(beforeSecondDelta!=null&&"delta".equals(kind)&&deltas==2)beforeSecondDelta.run();
+                if(mode.equals("kill-before-confirm")&&kind.equals("confirm")){
+                    android.os.Process.killProcess(android.os.Process.myPid());
+                    throw new IOException("test process stopped before sending confirmation");
+                }
                 if(mode.equals("drop-second-frame")&&frames==2){socket.close();throw new IOException("simulated missing admission");}
                 if((mode.equals("drop-confirm")&&kind.equals("confirm"))||(mode.equals("drop-second-delta")&&kind.equals("delta")&&deltas==2)){
                     if(kind.equals("delta"))out.write(bytes,0,bytes.length/2);
@@ -414,8 +423,9 @@ final class PeerProtocolChecks {
         @Override public void close(){store.close();context.cleanup();}
     }
     static final class Ctx extends ContextWrapper {
-        final String prefix="peer_"+UUID.randomUUID()+"_";
-        Ctx(Context base){super(base);}
+        final String prefix;
+        Ctx(Context base){this(base, "peer_"+UUID.randomUUID()+"_");}
+        Ctx(Context base,String prefix){super(base);this.prefix=prefix;}
         @Override public Context getApplicationContext(){return this;}
         @Override public SharedPreferences getSharedPreferences(String name,int mode){return super.getSharedPreferences(prefix+name,mode);}
         @Override public File getDatabasePath(String name){return super.getDatabasePath(prefix+name);}

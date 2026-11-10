@@ -5,9 +5,30 @@ import org.json.JSONObject;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.function.Consumer;
+import android.os.Handler;
+import android.os.Looper;
 
 /** Converts user input to validated ledger events. UI preferences and navigation are separate. */
 final class LedgerActions {
+    interface Write { void run() throws Exception; }
+
+    private static final Executor WRITER = Executors.newSingleThreadExecutor();
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+
+    void submit(Write write, Runnable committed, Consumer<Exception> failed) {
+        WRITER.execute(() -> {
+            try {
+                write.run();
+                MAIN.post(committed);
+            } catch (Exception error) {
+                MAIN.post(() -> failed.accept(error));
+            }
+        });
+    }
+
     static final class CustomSplit {
         final String currency;
         final long total;

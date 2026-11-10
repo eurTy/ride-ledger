@@ -28,12 +28,10 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 /** Renders cash and split forms. LedgerActions is the only write entry point. */
 final class LedgerForms {
-    private static final Executor EDIT_WRITER = Executors.newSingleThreadExecutor();
     private final Activity activity;
     private final LedgerActions ledgerActions;
     private final CurrencyHistory currencyHistory;
@@ -355,11 +353,16 @@ final class LedgerForms {
         input.setText(Money.amountText(data.optLong(key), code));
     }
 
-    private interface EditInput { SaveAction capture() throws Exception; }
+    private interface EditInput { LedgerActions.Write capture() throws Exception; }
 
     private void showRecordForm(LedgerStore.Trip trip, LedgerReview.Row record, String title, View form, EditInput input) {
-        if (record == null) showForm(title, form, () -> { input.capture().run(); saved.accept(trip); });
-        else showEditor(trip, record, form, input);
+        if (record == null) {
+            openForm(title, form, "保存", dialog -> {
+                View confirm = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+                View cancel = dialog.getButton(AlertDialog.BUTTON_NEGATIVE);
+                confirm.setOnClickListener(button -> submitForm(trip, dialog, confirm, cancel, input, showError));
+            });
+        } else showEditor(trip, record, form, input);
     }
 
     private void showEditor(LedgerStore.Trip trip, LedgerReview.Row record, View form, EditInput input) {
@@ -409,31 +412,7 @@ final class LedgerForms {
         LinearLayout.LayoutParams confirmSize = new LinearLayout.LayoutParams(0, dp(48), 1);
         confirmSize.setMarginStart(dp(10));
         confirm.setLayoutParams(confirmSize);
-        confirm.setOnClickListener(view -> {
-            SaveAction save;
-            try { save = input.capture(); }
-            catch (Exception failure) { editError(error, failure); return; }
-            confirm.setEnabled(false);
-            confirm.setText("正在保存…");
-            cancel.setEnabled(false);
-            dialog.setCancelable(false);
-            EDIT_WRITER.execute(() -> {
-                Exception problem = null;
-                try { save.run(); } catch (Exception failure) { problem = failure; }
-                Exception failure = problem;
-                activity.runOnUiThread(() -> {
-                    if (activity.isDestroyed() || activeForm != dialog) return;
-                    if (failure == null) { dialog.dismiss(); saved.accept(trip); }
-                    else {
-                        confirm.setEnabled(true);
-                        confirm.setText("保存修改");
-                        cancel.setEnabled(true);
-                        dialog.setCancelable(true);
-                        editError(error, failure);
-                    }
-                });
-            });
-        });
+        confirm.setOnClickListener(view -> submitForm(trip, dialog, confirm, cancel, input, failure -> editError(error, failure)));
         dialog.setContentView(sheet);
         Window window = dialog.getWindow();
         window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -449,17 +428,41 @@ final class LedgerForms {
         form.requestFocus();
     }
 
+    private void submitForm(LedgerStore.Trip trip, Dialog dialog, View confirm, View cancel,
+                            EditInput input, Consumer<Exception> error) {
+        if (!confirm.isEnabled()) return;
+        LedgerActions.Write write;
+        try { write = input.capture(); }
+        catch (Exception failure) { error.accept(failure); return; }
+        confirm.setEnabled(false);
+        cancel.setEnabled(false);
+        dialog.setCancelable(false);
+        ledgerActions.submit(write, () -> {
+            if (activity.isDestroyed()) return;
+            if (activeForm == dialog) dialog.dismiss();
+            saved.accept(trip);
+        }, failure -> {
+            if (activity.isDestroyed() || activeForm != dialog) return;
+            confirm.setEnabled(true);
+            cancel.setEnabled(true);
+            dialog.setCancelable(true);
+            error.accept(failure);
+        });
+    }
+
     private static void editError(TextView error, Exception failure) {
         error.setText(failure.getMessage() == null ? "无法保存，请检查后重试" : failure.getMessage());
         error.setVisibility(View.VISIBLE);
     }
 
-    private interface SaveAction { void run() throws Exception; }
-    private void showForm(String title, View view, SaveAction save) {
-        showForm(title, view, "保存", save);
+    private void showForm(String title, View view, String confirmLabel, LedgerActions.Write save) {
+        openForm(title, view, confirmLabel, dialog -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(button -> {
+            try { save.run(); dialog.dismiss(); }
+            catch (Exception e) { showError.accept(e); }
+        }));
     }
 
-    private void showForm(String title, View view, String confirmLabel, SaveAction save) {
+    private void openForm(String title, View view, String confirmLabel, Consumer<AlertDialog> onShow) {
         dismissCurrencyMenu();
         ScrollView scroll = new ScrollView(activity);
         scroll.setScrollbarFadingEnabled(false);
@@ -468,10 +471,7 @@ final class LedgerForms {
                 .setNegativeButton("取消", null).setPositiveButton(confirmLabel, null).create();
         dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN |
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
-        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(button -> {
-            try { save.run(); dialog.dismiss(); }
-            catch (Exception e) { showError.accept(e); }
-        }));
+        dialog.setOnShowListener(ignored -> onShow.accept(dialog));
         activeForm = dialog;
         dialog.setOnDismissListener(ignored -> {
             if (activeForm != dialog) return;

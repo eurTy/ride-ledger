@@ -140,6 +140,22 @@ try {
   console.log('INTEROP_PASS Windows and Android team enrollment, nearby bidirectional records and deduplication');
   await writeFile(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
   assert.equal(report.failed.length, 0, 'Native sync checks failed; see build/android-sync-tests/report.json');
+  if (Number(report.environment.sdk) >= 29) {
+    const runId = randomUUID();
+    const instrument = 'com.rideledger.synctest/com.rideledger.SyncTestInstrumentation';
+    const crashArgs = phase => ['shell', 'am', 'instrument', '-w', '-e', 'journalCrash', phase, '-e', 'runId', runId, instrument];
+    const stopped = await adbRun(...crashArgs('prepare'));
+    assert.match(stopped.stdout, /shortMsg=Process crashed/i, 'isolated test process did not die before confirmation');
+    const { stdout: recovery } = await adbRun(...crashArgs('recover'));
+    const recovered = JSON.parse(recovery.match(/^INSTRUMENTATION_RESULT: report=(.*)$/m)?.[1] ?? 'null');
+    assert.ok(recovered, 'crash recovery run produced no report');
+    assert.deepEqual(recovered.failed, [], 'crash recovery did not preserve the journal and its cursor');
+    for (const name of recovered.passed) {
+      report.passed.push(name);
+      console.log('ANDROID_PASS ' + name);
+    }
+    await writeFile(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
+  }
   console.log('ANDROID_SYNC_OK checks=' + report.passed.length + ' tcp_frames=' + receivedFrames.length);
 } finally {
   await adbRun('uninstall', 'com.rideledger.synctest').catch(() => {});
