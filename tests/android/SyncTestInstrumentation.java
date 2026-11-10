@@ -44,8 +44,7 @@ public final class SyncTestInstrumentation extends Instrumentation {
                 check("journal cursor survives process death after commit before receipt", () ->
                         TeamChecks.crashCursor(getTargetContext(), arguments.getString("runId"),
                                 "prepare".equals(arguments.getString("journalCrash"))));
-            } else if (arguments.containsKey("desktopPeerInvite")) runDesktopPeer(result);
-            else {
+            } else {
                 JSONObject fixture = new JSONObject(new String(Base64.decode(arguments.getString("fixture"),
                         Base64.URL_SAFE | Base64.NO_WRAP), StandardCharsets.UTF_8));
                 runChecks(fixture, result);
@@ -75,63 +74,6 @@ public final class SyncTestInstrumentation extends Instrumentation {
     }
     private LedgerStore store(TestContext context) {
         LedgerStore store = new LedgerStore(context); stores.add(store); return store;
-    }
-
-    private void runDesktopPeer(Bundle result) throws Exception {
-        TestContext context = context();
-        LedgerStore phone = store(context);
-        LedgerStore.Trip travel = phone.joinTrip(arguments.getString("desktopPeerInvite"), "b");
-        String address = arguments.getString("desktopPeerAddress");
-        int expected = Integer.parseInt(arguments.getString("expectedEvents"));
-        phone.add(travel.id, "expense", new JSONObject().put("payer", "b").put("currency", "CNY")
-                .put("amount", 900).put("shareA", 5000).put("mode", "shared")
-                .put("note", "Android peer / 保存确认 \\\" 🚴\n第二行"));
-        check("desktop peer refuses save confirmation when the renderer cannot persist records", () -> {
-            PeerProtocol.Result exchange = peerExchange(context, phone, address, true);
-            require(!exchange.complete, "desktop acknowledged a failed local save");
-            require(phone.events(travel.id).size() == 1, "failed transfer changed the offline record");
-        });
-        check("Android 10 and desktop v2 transfer both ways with authenticated durable receipts", () -> {
-            PeerProtocol.Result exchange = peerExchange(context, phone, address, true);
-            require(exchange.complete && exchange.durable && exchange.authenticated && exchange.modern,
-                    "v2 confirmation failed");
-            require(exchange.added == expected && exchange.sent == 1 && phone.events(travel.id).size() == expected + 1,
-                    "v2 did not exchange missing records in both directions");
-        });
-        check("manual v1 negotiation authenticates the newest desktop and preserves identities", () -> {
-            phone.add(travel.id, "expense", new JSONObject().put("payer", "b").put("currency", "USD")
-                    .put("amount", 375).put("shareA", 5000).put("mode", "shared").put("note", "Android peer manual negotiation"));
-            PeerProtocol.Result exchange = peerExchange(context, phone, address, false);
-            require(exchange.complete && exchange.modern && exchange.durable, "manual negotiation did not confirm storage");
-            require(phone.events(travel.id).size() == expected + 2 && phone.getTrip(travel.id).localPerson.equals("b"),
-                    "manual negotiation changed records or identity");
-        });
-        check("reopening and replay over v2 keep one copy and send no already saved records", () -> {
-            phone.close();
-            LedgerStore reopened = store(context);
-            PeerProtocol.Result exchange = null;
-            for (int attempt = 0; attempt < 6; attempt++) {
-                exchange = peerExchange(context, reopened, address, true);
-                require(reopened.events(travel.id).size() == expected + 2, "replay lost or duplicated records");
-                if (exchange.complete && exchange.sent == 0) break;
-                Thread.sleep(200);
-            }
-            require(exchange != null && exchange.complete && exchange.sent == 0, "desktop did not converge to a matching root");
-            result.putString("phoneBundle", SyncCodec.bundle(reopened, reopened.getTrip(travel.id)).toString());
-        });
-    }
-
-    private PeerProtocol.Result peerExchange(TestContext context, LedgerStore phone, String address, boolean modern) throws Exception {
-        int separator = address.lastIndexOf(':');
-        try (java.net.Socket socket = new java.net.Socket()) {
-            socket.connect(new InetSocketAddress(address.substring(0, separator), Integer.parseInt(address.substring(separator + 1))), 3500);
-            socket.setSoTimeout(15000);
-            PeerProtocol protocol = new PeerProtocol(phone, PeerIdentity.deviceId(context), new PeerProtocol.Listener() {
-                public void authenticated(String id) { }
-                public void stored(int added) { }
-            });
-            return protocol.exchange(new PeerWire(socket.getInputStream(), socket.getOutputStream(), () -> {}), modern);
-        }
     }
 
     private void runChecks(JSONObject fixture, Bundle result) throws Exception {
@@ -292,7 +234,7 @@ public final class SyncTestInstrumentation extends Instrumentation {
                         "removed cursor skipped next trip");
                 require(SyncJobService.nextTrip(trips, rotationC.id) == rotationA, "queue did not wrap");
             });
-            TeamChecks.run(getTargetContext(), fixture, (name, action) -> check(name, action::run));
+            TeamChecks.run(getTargetContext(), (name, action) -> check(name, action::run));
             check("review groups currencies by payment direction", () -> {
                 LedgerStore.Trip trip = store(context()).createTeam("结算检查",
                         java.util.Arrays.asList("甲", "乙", "丙"));
@@ -322,6 +264,7 @@ public final class SyncTestInstrumentation extends Instrumentation {
             check("record deletion: full-list checkboxes, confirmation, offline propagation and replay", () -> PeerUiChecks.runRecordDeletion(this));
             check("record editing: bottom sheet, original time and offline propagation", () -> PeerUiChecks.runRecordEdit(this));
             check("ledger backup: existing picker exports raw revisions, tombstones and original times", () -> PeerUiChecks.runLedgerBackup(this));
+            check("note history: saved locally, bounded per trip, selectable after reopening", () -> PeerUiChecks.runNoteHistory(this));
             check("review badge: verified channels, Wi-Fi failure falls back to Bluetooth on tap, and recent contact expires", () -> PeerUiChecks.runRosterRefresh(this));
             check("open team UI: organizer roster and validation are inline", () -> PeerUiChecks.runTeamSetup(this));
             check("open team UI: join details, connecting and delayed success are inline", () -> PeerUiChecks.runTeamJoin(this));

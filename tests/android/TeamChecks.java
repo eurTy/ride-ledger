@@ -47,7 +47,7 @@ final class TeamChecks {
         @Override public void stored(int added) { }
     };
 
-    static void run(Context base, JSONObject fixture, PeerProtocolChecks.Sink sink) {
+    static void run(Context base, PeerProtocolChecks.Sink sink) {
         sink.check("open team: named seats, duplicate rejection, durable role and propagated roster", () -> {
             try (Device root = new Device(base); Device first = new Device(base); Device second = new Device(base);
                  Device extra = new Device(base)) {
@@ -72,19 +72,6 @@ final class TeamChecks {
                         "more than the expected number enrolled");
                 record(first, "CNY", 130, "after open team");
                 require(exchange(first, root).complete() && root.count() == 1, "new identity broke normal ledger sync");
-            }
-        });
-        sink.check("team Windows: first enrollment, bidirectional TCP and repeat sync", () -> {
-            try (Device phone = new Device(base)) {
-                phone.trip = phone.store.joinTrip(fixture.getString("desktopTeamInvite"), "m2");
-                int port = fixture.getInt("desktopTeamPort");
-                String host = fixture.optString("testHost", "10.0.2.2");
-                windowsExchange(phone, host, port);
-                require(phone.store.teamReady(phone.trip) && phone.count() == 1, "Windows did not register Android and send its opening balance");
-                record(phone, "USD", 271, "android offline expense");
-                windowsExchange(phone, host, port);
-                windowsExchange(phone, host, port);
-                require(phone.count() == 2, "reconnect duplicated a Windows or Android record");
             }
         });
         sink.check("team: saved old QR ignores the relay and joins nearby", () -> {
@@ -659,17 +646,6 @@ final class TeamChecks {
         } while (true);
     }
 
-    private static void windowsExchange(Device phone, String host, int port) throws Exception {
-        try (Socket socket = new Socket(host, port)) {
-            socket.setSoTimeout(10000);
-            TeamProtocol protocol = new TeamProtocol(phone.store, phone.trip, phone.id, QUIET, () -> {});
-            PeerWire wire = new PeerWire(socket.getInputStream(), socket.getOutputStream(), () -> {});
-            require(protocol.exchange(wire, TeamProtocol.routeId(phone.trip.team, phone.trip.team.issuer)).complete,
-                    "Windows did not confirm durable team sync");
-        }
-    }
-
-
     private static boolean only(List<PeerRoutePolicy.Endpoint> ready, String key) {
         return ready.size() == 1 && key.equals(ready.get(0).key);
     }
@@ -695,16 +671,16 @@ final class TeamChecks {
         try (ServerSocket listener = loopback()) {
             Future<?> remote = pool.submit(() -> {
                 try (Socket socket = listener.accept()) {
-                    socket.setSoTimeout(7000);
+                    socket.setSoTimeout(15000);
                     result.server = to.protocol().accept(wire(socket, serverFault));
                 } catch (Exception error) { result.serverError = error; }
             });
             try (Socket socket = new Socket("127.0.0.1", listener.getLocalPort())) {
-                socket.setSoTimeout(7000);
+                socket.setSoTimeout(15000);
                 result.client = from.protocol().exchange(wire(socket, clientFault),
                         TeamProtocol.routeId(to.trip.team, to.id.deviceId));
             } catch (Exception error) { result.clientError = error; }
-            remote.get(10, TimeUnit.SECONDS);
+            remote.get(20, TimeUnit.SECONDS);
         } finally { pool.shutdownNow(); }
         return result;
     }

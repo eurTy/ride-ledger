@@ -259,6 +259,78 @@ final class PeerUiChecks {
         }
     }
 
+    static void runNoteHistory(Instrumentation instrumentation) throws Exception {
+        Context context = instrumentation.getTargetContext();
+        android.content.SharedPreferences prefs = context.getSharedPreferences("ui", 0);
+        NoteHistory history = new NoteHistory(prefs);
+        String isolated = java.util.UUID.randomUUID().toString();
+        for (int i = 1; i <= 6; i++) history.remember(isolated, "备注" + i);
+        history.remember(isolated, " 备注3 ");
+        history.remember(isolated, "   ");
+        require(history.options(isolated).equals(Arrays.asList("备注3", "备注6", "备注5", "备注4", "备注2")),
+                "recent note limit, order, or deduplication failed");
+        android.content.SharedPreferences.Editor clear = prefs.edit();
+        history.clear(clear, isolated);
+        clear.apply();
+        require(history.options(isolated).isEmpty(), "trip note history was not cleared");
+
+        try (LedgerStore store = new LedgerStore(context)) {
+            LedgerStore.Trip trip = store.createTeam("备注历史检查", Arrays.asList("甲"));
+            require(history.options(trip.id).isEmpty(), "another trip inherited note history");
+            prefs.edit().putString("last_trip", trip.id).putBoolean(MainActivity.STARTUP_PERMISSIONS_REQUESTED, true).commit();
+            Intent launch = new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            Activity entry = instrumentation.startActivitySync(launch);
+            String note = "骑行午餐";
+            try {
+                instrumentation.runOnMainSync(() -> {
+                    View root = entry.getWindow().getDecorView();
+                    labeledInput(root, "备注（可选）").setText(note);
+                    require(history.options(trip.id).isEmpty(), "unsaved input entered note history");
+                    amount(root).setText("18");
+                    require(text(root, "保存这笔支出").performClick(), "quick save was missing");
+                });
+                long deadline = SystemClock.elapsedRealtime() + 5000;
+                while (history.options(trip.id).isEmpty() && SystemClock.elapsedRealtime() < deadline)
+                    SystemClock.sleep(40);
+                require(history.options(trip.id).equals(Arrays.asList(note)) &&
+                        note.equals(store.events(trip.id).get(0).data.getString("note")), "saved note was not remembered");
+            } finally {
+                instrumentation.runOnMainSync(entry::finish);
+                instrumentation.waitForIdleSync();
+            }
+
+            Activity reopened = instrumentation.startActivitySync(launch);
+            try {
+                instrumentation.runOnMainSync(() -> {
+                    EditText field = labeledInput(reopened.getWindow().getDecorView(), "备注（可选）");
+                    require(field.getText().length() == 0, "previous note was automatically applied");
+                    field.requestFocus();
+                    field.performClick();
+                });
+                instrumentation.waitForIdleSync();
+                instrumentation.runOnMainSync(() -> {
+                    View popup = windowWithText(note);
+                    require(popup != null, "reopened app did not show saved note");
+                    View row = text(popup, note);
+                    while (!(row.getParent() instanceof android.widget.ListView)) row = (View) row.getParent();
+                    android.widget.ListView list = (android.widget.ListView) row.getParent();
+                    int position = list.getPositionForView(row);
+                    require(list.performItemClick(row, position, list.getItemIdAtPosition(position)), "note was not selectable");
+                    EditText field = labeledInput(reopened.getWindow().getDecorView(), "备注（可选）");
+                    require(note.contentEquals(field.getText()) && field.getSelectionEnd() == note.length(),
+                            "selecting a note did not fill the editable field");
+                    field.append("补充");
+                    require((note + "补充").contentEquals(field.getText()), "selected note was no longer editable");
+                });
+                require(store.events(trip.id).size() == 1 && history.options(trip.id).equals(Arrays.asList(note)),
+                        "using a suggestion changed the ledger or history before save");
+            } finally {
+                instrumentation.runOnMainSync(reopened::finish);
+                instrumentation.waitForIdleSync();
+            }
+        }
+    }
+
     static void runLedgerBackup(Instrumentation instrumentation) throws Exception {
         Context context = instrumentation.getTargetContext();
         try (LedgerStore store = new LedgerStore(context)) {

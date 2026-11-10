@@ -8,17 +8,21 @@ import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.view.Gravity;
 import android.view.View;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ListPopupWindow;
 import android.widget.PopupMenu;
 import android.widget.TextView;
 
+import java.util.List;
 import java.util.function.Consumer;
 
 /** Owns the edited expense so a roster update never recreates the input fields. */
 final class QuickEntryPanel extends LinearLayout {
     private final LedgerForms forms;
+    private final NoteHistory noteHistory;
     private LedgerStore.Trip trip;
     private final PayerSpinner payer;
     private boolean committed;
@@ -28,6 +32,7 @@ final class QuickEntryPanel extends LinearLayout {
                     Consumer<LedgerStore.Trip> saved, Consumer<Exception> showError) {
         super(activity);
         this.forms = forms;
+        noteHistory = new NoteHistory(uiPrefs);
         this.trip = trip;
         LinearLayout card = this;
         card.setOrientation(LinearLayout.VERTICAL);
@@ -139,6 +144,35 @@ final class QuickEntryPanel extends LinearLayout {
         });
         card.addView(new View(activity), new LinearLayout.LayoutParams(-1, 0, 1));
         EditText note = forms.quickField(card, "备注（可选）", "例如：房费、饭费", false);
+        ListPopupWindow noteSuggestions = new ListPopupWindow(activity);
+        noteSuggestions.setAnchorView(note);
+        noteSuggestions.setModal(false);
+        Runnable showNoteHistory = () -> {
+            if (!note.hasFocus() || !note.isAttachedToWindow() || noteSuggestions.isShowing()) return;
+            List<String> notes = noteHistory.options(this.trip.id);
+            if (notes.isEmpty()) return;
+            noteSuggestions.setAdapter(new ArrayAdapter<>(activity, android.R.layout.simple_list_item_1, notes));
+            noteSuggestions.setWidth(note.getWidth());
+            noteSuggestions.setOnItemClickListener((parent, view, position, id) -> {
+                String selected = notes.get(position);
+                note.setText(selected);
+                note.setSelection(selected.length());
+                noteSuggestions.dismiss();
+            });
+            noteSuggestions.show();
+        };
+        note.setOnFocusChangeListener((view, focused) -> {
+            if (focused) note.post(showNoteHistory);
+            else noteSuggestions.dismiss();
+        });
+        note.setOnClickListener(view -> showNoteHistory.run());
+        note.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            @Override public void onViewAttachedToWindow(View view) { }
+            @Override public void onViewDetachedFromWindow(View view) {
+                note.removeCallbacks(showNoteHistory);
+                noteSuggestions.dismiss();
+            }
+        });
         FormInput.next(amount, currency);
         FormInput.next(currency, note);
         FormInput.done(note);
@@ -165,6 +199,7 @@ final class QuickEntryPanel extends LinearLayout {
                     else ledgerActions.expense(current, who, split, rawNote);
                 }, () -> {
                     currencyHistory.remember(current.id, code, code);
+                    noteHistory.remember(current.id, rawNote);
                     uiPrefs.edit().putString("payer:" + current.id, who)
                             .putString("mode:" + current.id, personal ? "personal" : "shared").apply();
                     if (!activity.isDestroyed()) saved.accept(current);

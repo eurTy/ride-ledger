@@ -409,6 +409,7 @@ public final class MainActivity extends Activity {
                             .remove("payer:" + trip.id).remove("mode:" + trip.id)
                             .remove("share:" + trip.id);
                     currencyHistory.clear(prefs, trip.id);
+                    new NoteHistory(uiPrefs).clear(prefs, trip.id);
                     if (trip.id.equals(currentTripId)) {
                         List<LedgerStore.Trip> remaining = store.trips();
                         currentTripId = remaining.isEmpty() ? null : remaining.get(0).id;

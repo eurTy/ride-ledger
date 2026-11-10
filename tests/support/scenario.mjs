@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { trip } from './web-client.mjs';
 
 export const expectedSummary = {
   cashA: { CNY: '89000', USD: '15000', JPY: '50000' },
@@ -8,7 +7,8 @@ export const expectedSummary = {
   debt: { CNY: '5000', USD: '2500', EUR: '-1500' }
 };
 export function fixture() {
-  const t = { ...trip(), name: '虚构跨国骑行', personA: '小明 🚴', personB: '朱桂江' };
+  const t = { id: randomUUID(), secret: Buffer.alloc(32, 7).toString('base64url'), localPerson: 'a',
+    name: '虚构跨国骑行', personA: '小明 🚴', personB: '朱桂江' };
   let sequence = 0;
   const entry = (kind, data) => ({ id: randomUUID(), tripId: t.id, kind,
     at: 1700000000000 + (sequence++ % 2 ? -3600000 : 3600000) + sequence, data });

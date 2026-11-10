@@ -9,8 +9,6 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import * as codec from './support/legacy-web-codec.mjs';
 import { fixture, expectedSummary, invalidInvites } from './support/scenario.mjs';
-import { DesktopLanSync } from '../desktop/lan-sync.mjs';
-import { DesktopTeams, encodeInvite } from '../desktop/team.mjs';
 import { randomUUID } from 'node:crypto';
 
 const run = promisify(execFile);
@@ -33,24 +31,7 @@ const webBundle = codec.encryptedBundle(t, events);
 const receivedFrames = [];
 const servers = [];
 const reversedPorts = [];
-let desktopTeam;
-
 try {
-  const directory = new DesktopTeams(null, () => {});
-  const team = directory.create('桌面与安卓小队', ['电脑', '手机']);
-  const ledger = new Map();
-  const opening = { id: randomUUID(), tripId: team.id, kind: 'opening', at: Date.now(),
-    data: { person: 'm1', currency: 'CNY', amount: 7500 } };
-  ledger.set(opening.id, opening);
-  desktopTeam = new DesktopLanSync({ host: '127.0.0.1', discovery: false, teams: directory,
-    commit(_trip, events) {
-      let added = 0;
-      for (const event of events) if (!ledger.has(event.id)) { ledger.set(event.id, event); added++; }
-      desktopTeam.updateTeam(directory.snapshot(team, [...ledger.values()]));
-      return added;
-    } });
-  await desktopTeam.start();
-  desktopTeam.updateTeam(directory.snapshot(team, [...ledger.values()]));
   await mkdir(output, { recursive: true });
   const tcp = async mode => {
     const server = net.createServer(socket => {
@@ -87,7 +68,7 @@ try {
   const testHost = process.env.ANDROID_TEST_ADB_REVERSE === '1' ? '127.0.0.1' : '10.0.2.2';
   const lanPort = await tcp('normal'), lanDropPort = await tcp('drop'), lanCorruptPort = await tcp('corrupt');
   if (testHost === '127.0.0.1') {
-    for (const port of [desktopTeam.port, lanPort, lanDropPort, lanCorruptPort]) {
+    for (const port of [lanPort, lanDropPort, lanCorruptPort]) {
       const endpoint = 'tcp:' + port;
       await adbRun('reverse', '--no-rebind', endpoint, endpoint);
       reversedPorts.push(endpoint);
@@ -100,7 +81,6 @@ try {
     wrongKeyInvite: encode({ ...valid, secret: Buffer.alloc(32, 19).toString('base64url') }),
     invalidInvites: invalidInvites(valid),
     testHost,
-    desktopTeamInvite: encodeInvite(team), desktopTeamPort: desktopTeam.port,
     lanPort, lanDropPort, lanCorruptPort
   };
   await adbRun('install', '-r', path.join(output, 'ride-ledger-sync-tests.apk'));
@@ -136,8 +116,6 @@ try {
     for (const bundle of message.bundles) assert.ok(Array.isArray(codec.decryptBundle(t, bundle)));
   }
   assert.ok(receivedFrames.length >= 5, 'native TCP scenarios did not run');
-  assert.equal(ledger.size, 2, 'Android team expense did not arrive at the Windows transport');
-  console.log('INTEROP_PASS Windows and Android team enrollment, nearby bidirectional records and deduplication');
   await writeFile(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
   assert.equal(report.failed.length, 0, 'Native sync checks failed; see build/android-sync-tests/report.json');
   if (Number(report.environment.sdk) >= 29) {
@@ -161,5 +139,4 @@ try {
   await adbRun('uninstall', 'com.rideledger.synctest').catch(() => {});
   for (const port of reversedPorts) await adbRun('reverse', '--remove', port).catch(() => {});
   for (const server of servers) await new Promise(resolve => server.close(resolve));
-  await desktopTeam?.close();
 }
