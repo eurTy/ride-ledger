@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="18 18 72 72"
+     role="img" aria-labelledby="title description">
+  <title id="title">旅行账本</title>
+  <desc id="description">深绿色圆角方底上，两片米白色折页之间留有阶梯形空隙。</desc>
+  <rect x="18" y="18" width="72" height="72" rx="16.2" fill="#123D31"/>
+  <path fill="#FFF3D5"
+        d="M30,36 Q30,30 36,30 H73 L62,43 H45 V61 L30,70 Z M35,78 L53,67 V51 H66 L78,37 V72 Q78,78 72,78 Z"/>
+</svg>
