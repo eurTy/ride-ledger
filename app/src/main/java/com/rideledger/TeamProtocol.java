@@ -107,7 +107,9 @@ final class TeamProtocol {
             return null; // A discovery request carries no ledger traffic.
         }
         Remote remote = inspect(offer, "offer", "");
-        if (!store.teamReady(trip)) throw new Admission("正在等待首次登记");
+        // A peer can dial us before our own enrollment request reaches the organizer.
+        // Close this inbound session without aborting the outbound enrollment.
+        if (!store.teamReady(trip)) return null;
         KeyPair keys = ephemeral();
         JSONObject challenge = hello("responder", keys);
         JSONObject transcript = transcript(offer, challenge);

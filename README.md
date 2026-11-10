@@ -4,9 +4,9 @@
 
 为旅行设计的离线账本。一次旅行一个账本，随手记下谁付了钱、各自带了多少现金、换了多少外币。队友在附近时，账目自动补齐。
 
-[下载 Android 0.2.8 APK](https://github.com/eurTy/ride-ledger/releases/download/v0.2.8/ride-ledger-0.2.8-android.apk) · [版本记录](CHANGELOG.md) · [历次安卓测试版](CHANGELOG.md#安卓测试版本历史) · [连接与真机测试](docs/android-peer-sync.md)
+[下载 Android 0.2.9 APK](https://github.com/eurTy/ride-ledger/releases/download/v0.2.9/ride-ledger-0.2.9-android.apk) · [版本记录](CHANGELOG.md) · [历次安卓测试版](CHANGELOG.md#安卓测试版本历史) · [连接与真机测试](docs/android-peer-sync.md)
 
-## 0.2.8 功能
+## 0.2.9 功能
 
 - **旅行与邀请**　支持 1–5 人，创建时设定人数。队友用相机或相册读取二维码，自行填写名字。备用令牌按需展开并可复制。每个成员登记一台设备，身份保存在本机。可切换旅行，删除旅行前需确认。
 - **快速记账**　重新打开应用时进入上次使用的旅行。首页直接填写金额、货币、付款人和备注。支出可由全员平摊、仅付款人承担，或按成员输入具体金额。自定义分摊弹窗集中填写金额并实时汇总，付款人在主表单选择。

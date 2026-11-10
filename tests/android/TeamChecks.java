@@ -117,6 +117,20 @@ final class TeamChecks {
             String invite = "RLTEAM2." + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(data);
             require(invite.equals(rotatedCameraScan(invite)), "rotation fallback did not recover the QR text");
         });
+        sink.check("team: early inbound sync does not reject a pending enrollment", () -> {
+            try (Device root = new Device(base); Device guest = new Device(base)) {
+                root.trip = root.store.createOpenTeam("首次登记", "组织者", 2);
+                record(root, "CNY", 305, "before enrollment");
+                guest.trip = guest.store.joinTrip(root.store.inviteCode(root.trip), "同行者");
+                Pair early = exchange(root, guest);
+                require(early.server == null && early.serverError == null && early.clientError instanceof java.io.EOFException,
+                        "an early inbound connection should close quietly: " + early);
+                require(!guest.store.teamReady(guest.trip) && guest.count() == 0, "inbound sync bypassed enrollment");
+                Pair joined = exchange(guest, root);
+                require(joined.complete() && guest.store.teamReady(guest.trip) && guest.count() == 1,
+                        "the guest could not finish enrollment and receive history: " + joined);
+            }
+        });
         sink.check("team: offline QR decodes the invite and enrolls the selected member", () -> {
             try (Device root = new Device(base); Device guest = new Device(base)) {
                 root.create();

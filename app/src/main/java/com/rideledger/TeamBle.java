@@ -247,7 +247,8 @@ final class TeamBle {
                     continue;
                 }
                 sockets.add(socket);
-                events.incoming(connection(socket));
+                // The initiator address on an accepted socket may differ from the address it advertises.
+                events.incoming(connection(socket, null));
             } catch (Exception error) {
                 if (socket != null) sockets.remove(socket);
                 close(socket);
@@ -267,7 +268,7 @@ final class TeamBle {
             try { socket.connect(); }
             finally { deadline.cancel(false); }
             if (!active) throw new IOException("蓝牙连接已停止");
-            return connection(socket);
+            return connection(socket, device);
         } catch (Exception error) {
             sockets.remove(socket);
             close(socket);
@@ -275,12 +276,11 @@ final class TeamBle {
         }
     }
 
-    private PeerConnection connection(BluetoothSocket socket) throws Exception {
+    private PeerConnection connection(BluetoothSocket socket, BluetoothDevice advertisedDevice) throws Exception {
         BluetoothServerSocket listening = server;
         int port = listening == null ? 0 : listening.getPsm();
-        BluetoothDevice remote = socket.getRemoteDevice();
         return new PeerConnection(socket.getInputStream(), socket.getOutputStream(), socket, () -> sockets.remove(socket),
-                port, (peer, callback) -> endpoint(remote, callback, peer));
+                port, advertisedDevice == null ? null : (peer, callback) -> endpoint(advertisedDevice, callback, peer));
     }
 
     private void stopScan() {
