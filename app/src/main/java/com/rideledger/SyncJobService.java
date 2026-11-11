@@ -21,7 +21,7 @@ import java.util.ArrayDeque;
 
 /** Brief discovery lease. Data is transferred only after the team handshake. */
 public final class SyncJobService extends JobService {
-    private static final long DISCOVERY_WINDOW = 12000, SOFT_WINDOW = 45000;
+    private static final long DISCOVERY_WINDOW = 30000, SOFT_WINDOW = 45000;
     private static final long PROGRESS_GRACE = 15000, TRIP_BUDGET = 120000, JOB_BUDGET = 180000;
     private static final int TRIPS_PER_JOB = 3;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -38,11 +38,13 @@ public final class SyncJobService extends JobService {
         try {
             SyncLog.maintain(this);
             SyncTriggerReceiver.install(getApplicationContext());
+            SyncBleWake.start(getApplicationContext());
             if (!hasLocalNetwork() && !hasBluetooth()) { stop(); return false; }
             store = LedgerStore.application(this);
             List<LedgerStore.Trip> eligibleTrips = new ArrayList<>();
             for (LedgerStore.Trip trip : store.trips()) if (eligible(trip)) eligibleTrips.add(trip);
             if (eligibleTrips.isEmpty()) { stop(); return false; }
+            SyncBackground.jobStarted();
             android.content.SharedPreferences cursor = getSharedPreferences("background_sync", MODE_PRIVATE);
             LedgerStore.Trip trip = nextTrip(eligibleTrips, cursor.getString("last_attempt", ""));
             int first = eligibleTrips.indexOf(trip);
@@ -100,7 +102,8 @@ public final class SyncJobService extends JobService {
     }
 
     private boolean eligible(LedgerStore.Trip trip) {
-        return trip != null && trip.team != null && trip.people() > 1 && store.teamReady(trip);
+        return trip != null && trip.team != null && trip.people() > 1 && store.teamReady(trip) &&
+                SyncBackground.tripAllowed(this, trip.id) && !trip.id.equals(SyncBackground.activeTrip());
     }
 
     private boolean hasBluetooth() {

@@ -119,7 +119,7 @@ final class SyncEngine {
     long revision() { return revision; }
     Status status() { return status; }
     boolean hasContact() {
-        return incoming > 0 || !routes.onlinePeers().isEmpty() || routes.nextSyncRetry(revision) != Long.MAX_VALUE;
+        return incoming > 0 || !routes.onlinePeers().isEmpty() || routes.hasShortSyncRetry(revision);
     }
 
     void incoming(boolean started) {
@@ -153,7 +153,8 @@ final class SyncEngine {
     }
 
     /** Null means a failed session. An empty route denotes a verified inbound-only peer. */
-    void sessionFinished(PeerConnection session, String verifiedRoute, boolean stored, long captured) {
+    void sessionFinished(PeerConnection session, PeerRoutePolicy.Channel channel,
+                         String verifiedRoute, boolean stored, long captured) {
         String source = activeSessions.remove(session);
         presence.finished(session, verifiedRoute, SystemClock.elapsedRealtime());
         if (stored) {
@@ -161,7 +162,7 @@ final class SyncEngine {
             revision++;
             pendingDirty = true;
             // Concurrent local writes or data from another peer may still need to go back to the source.
-            if (sourceHasRevision) routes.markRelayedFrom(source, revision);
+            if (sourceHasRevision) routes.markRelayedFrom(source, channel, revision);
         }
         schedule();
     }

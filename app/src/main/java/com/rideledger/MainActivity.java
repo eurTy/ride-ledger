@@ -96,6 +96,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onStart() {
         super.onStart();
+        SyncBackground.beginMainSession(this);
         SyncBackground.foregroundEntered(this);
         if (currentTripId != null && screen != QUICK && recordsOverlay == null && exportTripId == null) {
             deletingTrips = false;
@@ -112,7 +113,7 @@ public final class MainActivity extends Activity {
         cancelReviewLoad();
         forms.dismissCurrencyMenu();
         teamTransport.stop();
-        SyncBackground.foregroundLeft();
+        SyncBackground.foregroundLeft(this);
         super.onStop();
     }
 
@@ -140,6 +141,9 @@ public final class MainActivity extends Activity {
         }
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
             missing.add(Manifest.permission.CAMERA);
+        if (Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            missing.add(Manifest.permission.POST_NOTIFICATIONS);
 
         uiPrefs.edit().putBoolean(STARTUP_PERMISSIONS_REQUESTED, true).apply();
         if (missing.isEmpty()) {
@@ -167,8 +171,8 @@ public final class MainActivity extends Activity {
     private void requestBackgroundBluetoothOnce() {
         if (Build.VERSION.SDK_INT < 29 || Build.VERSION.SDK_INT > 30 ||
                 uiPrefs.getBoolean(BACKGROUND_BLUETOOTH_PROMPTED, false)) return;
-        uiPrefs.edit().putBoolean(BACKGROUND_BLUETOOTH_PROMPTED, true).apply();
         if (!TeamBle.hasPermissions(this) || TeamBle.canScan(this, true)) return;
+        uiPrefs.edit().putBoolean(BACKGROUND_BLUETOOTH_PROMPTED, true).apply();
         if (Build.VERSION.SDK_INT == 29) {
             requestPermissions(new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION}, REQUEST_BACKGROUND_BLUETOOTH);
         } else {
@@ -309,8 +313,11 @@ public final class MainActivity extends Activity {
     }
 
     private void startSelectedSync() {
-        if (started && Build.VERSION.SDK_INT >= 29)
-            teamTransport.select(currentTripId == null ? null : store.getTrip(currentTripId));
+        if (started && Build.VERSION.SDK_INT >= 29) {
+            LedgerStore.Trip trip = currentTripId == null ? null : store.getTrip(currentTripId);
+            teamTransport.select(trip);
+            NearbySyncService.select(this, trip);
+        }
     }
 
     private void openTeam(String mode, String tripId) {

@@ -1,5 +1,6 @@
 package com.rideledger;
 
+import android.bluetooth.le.ScanResult;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
@@ -26,6 +27,7 @@ final class PeerSync {
     private final Listener listener;
     private final boolean startRadios;
     private final boolean background;
+    private final boolean windowedDiscovery;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final PeerRoutePolicy routes = new PeerRoutePolicy(SystemClock::elapsedRealtime);
     private final SyncEngine engine;
@@ -62,10 +64,15 @@ final class PeerSync {
     }
     PeerSync(Context context, LedgerStore store, Listener listener, boolean startRadios, LedgerStore.Trip team,
              boolean background) {
+        this(context, store, listener, startRadios, team, background, false);
+    }
+    PeerSync(Context context, LedgerStore store, Listener listener, boolean startRadios, LedgerStore.Trip team,
+             boolean background, boolean windowedDiscovery) {
         this.context = context.getApplicationContext();
         this.store = store; this.listener = listener; this.startRadios = startRadios;
         this.team = team;
         this.background = background;
+        this.windowedDiscovery = windowedDiscovery;
         deviceId = PeerIdentity.deviceId(context);
         engine = team == null ? null : new SyncEngine(context, store, team, deviceId, main,
                 (endpoint, captured) -> outgoing(endpoint, captured, true), state -> notifyChange(0));
@@ -94,7 +101,7 @@ final class PeerSync {
         if (team != null) incomingWorkers = new ThreadPoolExecutor(4, 4, 30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(8));
         timer = Executors.newSingleThreadScheduledExecutor();
         if (engine != null && enrolled) engine.start();
-        if (startRadios) radios.start(timer, background);
+        if (startRadios) radios.start(timer, background, windowedDiscovery);
         if (engine == null || !enrolled) main.post(tick);
     }
     private final Runnable tick = new Runnable() {
@@ -129,6 +136,10 @@ final class PeerSync {
             if (engine != null) engine.offer(endpoint);
             if ((engine == null || !enrolled) && routes.offer(endpoint)) request(team != null);
         });
+    }
+
+    boolean discoveredBluetooth(List<ScanResult> results) {
+        return running && startRadios && radios.discoveredBluetooth(results);
     }
     private void lose(String key) {
         onMain(epoch, () -> {
@@ -229,7 +240,7 @@ final class PeerSync {
                         PeerConnection closed = connection;
                         connections.remove(closed);
                         closed.close();
-                        finishTransfer(generation, closed, transfer, ledgerSync ? captured : -1);
+                        finishTransfer(generation, closed, endpoint.channel, transfer, ledgerSync ? captured : -1);
                     }
                 }
             });
@@ -280,7 +291,7 @@ final class PeerSync {
                     onMain(generation, () -> failed(channel, error, added));
                 } finally {
                     connections.remove(connection);
-                    finishTransfer(generation, connection, transfer, ledgerSync ? captured : -1);
+                    finishTransfer(generation, connection, channel, transfer, ledgerSync ? captured : -1);
                     if (counted[0]) onMain(generation, () -> engine.incoming(false));
                 }
             });
@@ -290,9 +301,10 @@ final class PeerSync {
         }
     }
 
-    private void finishTransfer(int generation, PeerConnection connection, Transfer transfer, long captured) {
+    private void finishTransfer(int generation, PeerConnection connection, PeerRoutePolicy.Channel channel,
+                                Transfer transfer, long captured) {
         onMain(generation, () -> {
-            if (engine != null) engine.sessionFinished(connection, transfer.verifiedRoute, transfer.stored, captured);
+            if (engine != null) engine.sessionFinished(connection, channel, transfer.verifiedRoute, transfer.stored, captured);
             else if (transfer.stored) request(false);
         });
     }

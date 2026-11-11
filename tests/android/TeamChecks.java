@@ -476,26 +476,79 @@ final class TeamChecks {
             require(routes.readyForRevision(2, "").size() == 2, "new revision was not sent to every peer");
         });
 
-        sink.check("team routes: three retries then idle until a new request", () -> {
+        sink.check("team routes: recover at a limited rate after three retries", () -> {
             AtomicLong clock = new AtomicLong(100);
             PeerRoutePolicy routes = new PeerRoutePolicy(clock::get);
             String peer = java.util.UUID.randomUUID().toString();
-            PeerRoutePolicy.Endpoint endpoint = new PeerRoutePolicy.Endpoint("wifi", PeerRoutePolicy.Channel.WIFI, peer, true, null);
+            PeerRoutePolicy.Endpoint endpoint = new PeerRoutePolicy.Endpoint("ble", PeerRoutePolicy.Channel.BLUETOOTH, peer, true, null);
             routes.offer(endpoint);
             for (long delay : new long[]{2000, 4000, 8000}) {
-                require(only(routes.readyForRevision(1, ""), "wifi"), "attempt did not run");
+                require(only(routes.readyForRevision(1, ""), "ble"), "attempt did not run");
                 routes.syncFailure(endpoint);
                 require(routes.readyForRevision(1, "").isEmpty() && routes.nextSyncRetry(1) == clock.get() + delay,
                         "unexpected retry deadline");
+                require(routes.hasShortSyncRetry(1), "short retry should count as background contact");
                 clock.addAndGet(delay);
             }
-            require(only(routes.readyForRevision(1, ""), "wifi"), "last retry did not run");
+            require(only(routes.readyForRevision(1, ""), "ble"), "last retry did not run");
             routes.syncFailure(endpoint);
-            clock.addAndGet(60000);
-            require(routes.readyForRevision(1, "").isEmpty() && routes.nextSyncRetry(1) == Long.MAX_VALUE,
-                    "retry budget did not stop the engine");
+            long recovery = clock.get() + PeerRoutePolicy.RECOVERY_RETRY_MILLIS;
+            require(!routes.hasShortSyncRetry(1) && routes.nextSyncRetry(1) == recovery,
+                    "slow recovery should not extend background discovery");
+            clock.set(recovery - 1);
+            require(routes.readyForRevision(1, "").isEmpty(), "recovery ran too early");
+            clock.set(recovery);
+            require(only(routes.readyForRevision(1, ""), "ble"), "continuously visible endpoint did not recover");
+            routes.syncFailure(endpoint);
+            require(routes.readyForRevision(1, "").isEmpty() &&
+                    routes.nextSyncRetry(1) == recovery + PeerRoutePolicy.RECOVERY_RETRY_MILLIS,
+                    "repeated failure did not retain slow backoff");
+            clock.addAndGet(PeerRoutePolicy.RECOVERY_RETRY_MILLIS);
+            require(only(routes.readyForRevision(1, ""), "ble"), "second recovery did not run");
+            routes.syncSuccess(endpoint, 1);
+            require(routes.nextSyncRetry(1) == Long.MAX_VALUE && routes.readyForRevision(1, "").isEmpty(),
+                    "successful recovery should settle the revision");
             routes.newSyncRequest();
-            require(only(routes.readyForRevision(2, ""), "wifi"), "new work should reactivate the route");
+            require(only(routes.readyForRevision(2, ""), "ble"), "new work should reactivate the route");
+        });
+
+        sink.check("team routes: slow recovery tries Wi-Fi then falls back to Bluetooth", () -> {
+            AtomicLong clock = new AtomicLong(100);
+            PeerRoutePolicy routes = new PeerRoutePolicy(clock::get);
+            String peer = java.util.UUID.randomUUID().toString();
+            PeerRoutePolicy.Endpoint wifi = new PeerRoutePolicy.Endpoint("wifi", PeerRoutePolicy.Channel.WIFI, peer, true, null);
+            PeerRoutePolicy.Endpoint ble = new PeerRoutePolicy.Endpoint("ble", PeerRoutePolicy.Channel.BLUETOOTH, peer, true, null);
+            routes.offer(wifi);
+            routes.offer(ble);
+            for (int i = 0; i < 4; i++) {
+                List<PeerRoutePolicy.Endpoint> ready = routes.readyForRevision(1, "");
+                require(ready.size() == 1, "expected exactly one route for peer");
+                routes.syncFailure(ready.get(0));
+                if (i < 3) clock.set(Math.max(clock.get(), routes.nextSyncRetry(1)));
+            }
+            long recovery = clock.get() + PeerRoutePolicy.RECOVERY_RETRY_MILLIS;
+            require(routes.nextSyncRetry(1) == recovery && routes.readyForRevision(1, "").isEmpty(),
+                    "alternate route bypassed peer recovery backoff");
+            require(routes.nextSyncRetry(1, Collections.singleton(peer)) == Long.MAX_VALUE,
+                    "active peer should not schedule recovery");
+            clock.set(recovery);
+            require(only(routes.readyForRevision(1, ""), "wifi"), "recovery did not prefer Wi-Fi");
+            routes.syncFailure(wifi);
+            require(only(routes.readyForRevision(1, ""), "ble"), "broken Wi-Fi blocked Bluetooth recovery");
+            routes.syncFailure(ble);
+            require(routes.nextSyncRetry(1) == recovery + PeerRoutePolicy.RECOVERY_RETRY_MILLIS,
+                    "two broken paths should both cool down");
+            clock.addAndGet(PeerRoutePolicy.RECOVERY_RETRY_MILLIS);
+            require(only(routes.readyForRevision(1, ""), "wifi"), "Wi-Fi did not get another chance");
+            routes.syncFailure(wifi);
+            require(only(routes.readyForRevision(1, ""), "ble"), "recovered Bluetooth never got another chance");
+            routes.syncSuccess(ble, 1);
+            require(routes.nextSyncRetry(1) == clock.get() + PeerRoutePolicy.RECOVERY_RETRY_MILLIS,
+                    "Wi-Fi recovery should remain scheduled after Bluetooth success");
+            routes.remove("wifi");
+            require(routes.nextSyncRetry(1) == Long.MAX_VALUE, "synced Bluetooth should not be polled");
+            routes.remove("ble");
+            require(routes.nextSyncRetry(1) == Long.MAX_VALUE, "lost routes should not keep scheduling recovery");
         });
 
         sink.check("team routes: relay preserves another peer's retry deadline and excludes active peers", () -> {
@@ -509,11 +562,33 @@ final class TeamChecks {
             require(only(routes.readyForRevision(1, "", Collections.singleton(source)), "other"), "active source was dialed");
             routes.syncFailure(b);
             long retry = routes.nextSyncRetry(1, Collections.singleton(source));
-            routes.markRelayedFrom(source, 2);
+            routes.markRelayedFrom(source, PeerRoutePolicy.Channel.WIFI, 2);
             require(routes.readyForRevision(2, "").isEmpty() && retry == 2100 && routes.nextSyncRetry(2) == retry,
                     "relay cleared another peer's backoff or dialed the source");
             clock.set(retry);
             require(only(routes.readyForRevision(2, ""), "other"), "relay was lost after the existing backoff");
+        });
+
+        sink.check("team routes: receiving over Bluetooth leaves a delayed Wi-Fi recovery probe", () -> {
+            AtomicLong clock = new AtomicLong(100);
+            PeerRoutePolicy routes = new PeerRoutePolicy(clock::get);
+            String peer = java.util.UUID.randomUUID().toString();
+            PeerRoutePolicy.Endpoint wifi = new PeerRoutePolicy.Endpoint("wifi", PeerRoutePolicy.Channel.WIFI, peer, true, null);
+            PeerRoutePolicy.Endpoint ble = new PeerRoutePolicy.Endpoint("ble", PeerRoutePolicy.Channel.BLUETOOTH, peer, true, null);
+            routes.offer(wifi);
+            routes.offer(ble);
+            routes.received(peer, PeerRoutePolicy.Channel.BLUETOOTH, 1);
+            routes.markRelayedFrom(peer, PeerRoutePolicy.Channel.BLUETOOTH, 2);
+            long probe = clock.get() + PeerRoutePolicy.RECOVERY_RETRY_MILLIS;
+            require(routes.readyForRevision(2, "").isEmpty() && routes.nextSyncRetry(2) == probe &&
+                    !routes.hasShortSyncRetry(2), "receiving an operation should not redial the sender immediately");
+            clock.addAndGet(30000);
+            routes.markRelayedFrom(peer, PeerRoutePolicy.Channel.BLUETOOTH, 3);
+            require(routes.nextSyncRetry(3) == probe, "another Bluetooth batch postponed the Wi-Fi recovery probe");
+            clock.set(probe);
+            require(only(routes.readyForRevision(3, ""), "wifi"), "Wi-Fi recovery depended on a new operation");
+            routes.syncSuccess(wifi, 3);
+            require(routes.nextSyncRetry(3) == Long.MAX_VALUE, "healthy Wi-Fi should not be polled");
         });
 
         sink.check("team sync engine: offline queue and authenticated checkpoint survive a reopen", () -> {
