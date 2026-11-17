@@ -17,6 +17,7 @@ final class PeerProtocol {
     interface Listener {
         void authenticated(String remoteId);
         void stored(int added);
+        default void receiptsChanged(boolean contentChanged) { }
     }
     static final class Result {
         String remoteId = "";
@@ -24,6 +25,7 @@ final class PeerProtocol {
         boolean complete, authenticated, durable, modern;
         long bytesRead, bytesWritten;
         LedgerStore.SyncPoint syncPoint;
+        Exception receiptError;
     }
     private static final int VERSION = 2, LEGACY_LIMIT = 10000, INDEX_PAGE = 512, BATCH_BYTES = 48000;
     private final LedgerStore store;

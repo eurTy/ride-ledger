@@ -26,11 +26,14 @@ final class PeerWire {
     }
     JSONObject read() throws Exception { return read(MAX_FRAME); }
     JSONObject read(int maxBytes) throws Exception {
+        return new JSONObject(new String(readBytes(maxBytes), StandardCharsets.UTF_8));
+    }
+    byte[] readBytes(int maxBytes) throws Exception {
         byte[] header = exact(4);
         int length = ((header[0] & 255) << 24) | ((header[1] & 255) << 16) |
                 ((header[2] & 255) << 8) | (header[3] & 255);
         if (length < 1 || length > maxBytes) throw new IllegalArgumentException("同步帧大小无效");
-        return new JSONObject(new String(exact(length), StandardCharsets.UTF_8));
+        return exact(length);
     }
     private byte[] exact(int count) throws Exception {
         byte[] bytes = new byte[count]; int offset = 0;
@@ -43,8 +46,10 @@ final class PeerWire {
         return bytes;
     }
     void write(JSONObject frame) throws Exception {
-        byte[] data = frame.toString().getBytes(StandardCharsets.UTF_8);
-        if (data.length > MAX_FRAME) throw new IllegalArgumentException("同步帧过大");
+        writeBytes(frame.toString().getBytes(StandardCharsets.UTF_8));
+    }
+    void writeBytes(byte[] data) throws Exception {
+        if (data.length == 0 || data.length > MAX_FRAME) throw new IllegalArgumentException("同步帧大小无效");
         DataOutputStream stream = new DataOutputStream(out);
         stream.writeInt(data.length); bytesWritten += 4; progress.moved();
         for (int offset = 0; offset < data.length; offset += 16384) {

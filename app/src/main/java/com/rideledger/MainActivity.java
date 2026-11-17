@@ -18,6 +18,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -27,8 +28,11 @@ import android.widget.Toast;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -49,6 +53,7 @@ public final class MainActivity extends Activity {
     private FrameLayout reviewContent;
     private View recordsOverlay;
     private String exportTripId;
+    private boolean exportArchive;
     private List<LedgerReview.Row> pendingExport;
     private boolean deletingRecords;
     private ReviewPanel reviewPanel;
@@ -58,7 +63,9 @@ public final class MainActivity extends Activity {
     private SharedPreferences uiPrefs;
     private CurrencyHistory currencyHistory;
     private LedgerForms forms;
+    private ReceiptUi receipts;
     private QuickEntryPanel quickEntry;
+    private Bundle quickDraft;
     private String currentTripId;
     private String recordFilter = "all";
     private boolean deletingTrips;
@@ -78,26 +85,37 @@ public final class MainActivity extends Activity {
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         store = LedgerStore.application(this);
         ledgerActions = new LedgerActions(store);
-        teamTransport = new TeamTransportAdapter(this, store, this::onSyncChanged);
+        receipts = new ReceiptUi(this, store, ledgerActions, state, trip -> afterSave(trip, false), this::error);
+        teamTransport = new TeamTransportAdapter(this, store, new PeerSync.Listener() {
+            @Override public void changed(int count) { onSyncChanged(count); }
+            @Override public void receiptsChanged() {
+                if (reviewContent != null && currentTripId != null) refreshReview(currentTripId);
+            }
+        });
         uiPrefs = getSharedPreferences("ui", MODE_PRIVATE);
         currencyHistory = new CurrencyHistory(uiPrefs, store);
-        forms = new LedgerForms(this, ledgerActions, currencyHistory, reviewReader,
+        forms = new LedgerForms(this, ledgerActions, currencyHistory, receipts, reviewReader,
                 trip -> afterSave(trip, false), this::error);
         startupPermissionsInFlight = state != null && state.getBoolean("startupPermissionsInFlight");
         exportTripId = state == null ? null : state.getString("exportTripId");
+        exportArchive = state != null && state.getBoolean("exportArchive");
+        quickDraft = state == null ? null : state.getBundle("quickDraft");
         currentTripId = uiPrefs.getString("last_trip", null);
         if (currentTripId == null || store.getTrip(currentTripId) == null) {
             List<LedgerStore.Trip> trips = store.trips();
             currentTripId = trips.isEmpty() ? null : trips.get(0).id;
         }
         screen = currentTripId == null ? TRIPS : QUICK;
+        if (state != null && currentTripId != null && receipts.picking()) screen = state.getInt("screen", QUICK);
         render();
     }
 
     @Override public void onStart() {
         super.onStart();
+        SyncBackground.beginMainSession(this);
         SyncBackground.foregroundEntered(this);
-        if (currentTripId != null && screen != QUICK && recordsOverlay == null && exportTripId == null) {
+        boolean returningFromReceipt = receipts.returningToForm();
+        if (currentTripId != null && screen != QUICK && recordsOverlay == null && exportTripId == null && !returningFromReceipt) {
             deletingTrips = false;
             screen = QUICK;
             render();
@@ -112,13 +130,14 @@ public final class MainActivity extends Activity {
         cancelReviewLoad();
         forms.dismissCurrencyMenu();
         teamTransport.stop();
-        SyncBackground.foregroundLeft();
+        SyncBackground.foregroundLeft(this);
         super.onStop();
     }
 
     @Override protected void onDestroy() {
         cancelReviewLoad();
         forms.close();
+        receipts.close();
         reviewReader.shutdownNow();
         super.onDestroy();
     }
@@ -140,6 +159,9 @@ public final class MainActivity extends Activity {
         }
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
             missing.add(Manifest.permission.CAMERA);
+        if (Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            missing.add(Manifest.permission.POST_NOTIFICATIONS);
 
         uiPrefs.edit().putBoolean(STARTUP_PERMISSIONS_REQUESTED, true).apply();
         if (missing.isEmpty()) {
@@ -152,6 +174,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(request, permissions, results);
+        if (receipts.permissionResult(request)) return;
         if (request == REQUEST_STARTUP_PERMISSIONS) {
             startupPermissionsInFlight = false;
             teamTransport.permissionsChanged();
@@ -162,13 +185,17 @@ public final class MainActivity extends Activity {
         super.onSaveInstanceState(state);
         state.putBoolean("startupPermissionsInFlight", startupPermissionsInFlight);
         state.putString("exportTripId", exportTripId);
+        state.putBoolean("exportArchive", exportArchive);
+        state.putInt("screen", screen);
+        state.putBundle("quickDraft", quickEntry != null ? quickEntry.saveDraft() : quickDraft);
+        receipts.saveState(state);
     }
 
     private void requestBackgroundBluetoothOnce() {
         if (Build.VERSION.SDK_INT < 29 || Build.VERSION.SDK_INT > 30 ||
                 uiPrefs.getBoolean(BACKGROUND_BLUETOOTH_PROMPTED, false)) return;
-        uiPrefs.edit().putBoolean(BACKGROUND_BLUETOOTH_PROMPTED, true).apply();
         if (!TeamBle.hasPermissions(this) || TeamBle.canScan(this, true)) return;
+        uiPrefs.edit().putBoolean(BACKGROUND_BLUETOOTH_PROMPTED, true).apply();
         if (Build.VERSION.SDK_INT == 29) {
             requestPermissions(new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION}, REQUEST_BACKGROUND_BLUETOOTH);
         } else {
@@ -250,6 +277,8 @@ public final class MainActivity extends Activity {
     private void displayPage(View content) {
         cancelReviewLoad();
         reviewContent = null;
+        if (quickEntry != null && currentTripId != null && receipts.holdingQuickPhoto(currentTripId))
+            quickDraft = quickEntry.saveDraft();
         quickEntry = null;
         recordsOverlay = null;
         reviewPanel = null;
@@ -309,8 +338,11 @@ public final class MainActivity extends Activity {
     }
 
     private void startSelectedSync() {
-        if (started && Build.VERSION.SDK_INT >= 29)
-            teamTransport.select(currentTripId == null ? null : store.getTrip(currentTripId));
+        if (started && Build.VERSION.SDK_INT >= 29) {
+            LedgerStore.Trip trip = currentTripId == null ? null : store.getTrip(currentTripId);
+            teamTransport.select(trip);
+            NearbySyncService.select(this, trip);
+        }
     }
 
     private void openTeam(String mode, String tripId) {
@@ -405,6 +437,7 @@ public final class MainActivity extends Activity {
                 .setNegativeButton("取消", null)
                 .setPositiveButton("删除旅行", (dialog, which) -> {
                     if (!store.deleteTrip(trip.id)) return;
+                    receipts.clearDraft(trip.id, receipts.draft(trip.id));
                     SharedPreferences.Editor prefs = uiPrefs.edit()
                             .remove("payer:" + trip.id).remove("mode:" + trip.id)
                             .remove("share:" + trip.id);
@@ -457,11 +490,12 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        quickEntry = new QuickEntryPanel(this, trip, uiPrefs, currencyHistory, ledgerActions, forms,
+        quickEntry = new QuickEntryPanel(this, trip, uiPrefs, currencyHistory, ledgerActions, forms, receipts, quickDraft,
                 saved -> {
                     afterSave(saved, true);
                     toast("已记账");
                 }, this::error);
+        quickDraft = null;
         body.addView(quickEntry, new LinearLayout.LayoutParams(-1, -2, 1));
         addCashActions(sections, trip);
     }
@@ -536,9 +570,9 @@ public final class MainActivity extends Activity {
         long generation = reviewGeneration;
         reviewLoad = reviewReader.submit(() -> {
             try {
-                LedgerStore.Snapshot snapshot = store.snapshot(tripId);
+                LedgerStore.Snapshot snapshot = store.snapshotWithReceipts(tripId);
                 if (snapshot.trip == null) throw new IllegalStateException("旅行不存在");
-                LedgerReview review = new LedgerReview(snapshot.trip, snapshot.totals());
+                LedgerReview review = new LedgerReview(snapshot.trip, snapshot.totals(), snapshot.receipts);
                 long confirmed = SyncEngine.confirmedThrough(this, store, snapshot.trip);
                 runOnUiThread(() -> {
                     if (!acceptReview(generation)) return;
@@ -591,6 +625,10 @@ public final class MainActivity extends Activity {
                 updateSync();
             }
             @Override public void edit(LedgerReview.Row row) { forms.editRecord(trip, row); }
+            @Override public void thumbnail(LedgerReview.Row row, ImageView view) {
+                receipts.bindThumbnail(trip.id, row.receipt, view);
+            }
+            @Override public void openReceipt(LedgerReview.Row row) { receipts.view(trip.id, row.receipt); }
             @Override public void delete(List<String> ids) {
                 if (deletingRecords) return;
                 deletingRecords = true;
@@ -619,7 +657,7 @@ public final class MainActivity extends Activity {
 
     private void openRecords(LedgerStore.Trip trip, LedgerReview review) {
         if (reviewContent == null || recordsOverlay != null) return;
-        recordsOverlay = reviewPanel.allRecords(this::closeRecords, () -> chooseExportFile(trip, review.records));
+        recordsOverlay = reviewPanel.allRecords(this::closeRecords, () -> chooseExportFormat(trip, review));
         reviewPanel.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         reviewContent.addView(recordsOverlay, new FrameLayout.LayoutParams(-1, -1));
     }
@@ -631,39 +669,71 @@ public final class MainActivity extends Activity {
         reviewPanel.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
     }
 
-    private void chooseExportFile(LedgerStore.Trip trip, List<LedgerReview.Row> records) {
+    private void chooseExportFormat(LedgerStore.Trip trip, LedgerReview review) {
+        if (review.hasReceipts) {
+            new AlertDialog.Builder(this).setTitle("导出")
+                    .setItems(new String[]{"旅行记录（文本）", "账本备份（含小票）"},
+                            (dialog, choice) -> chooseExportFile(trip, review.records, choice == 1)).show();
+        } else chooseExportFile(trip, review.records, false);
+    }
+
+    private void chooseExportFile(LedgerStore.Trip trip, List<LedgerReview.Row> records, boolean archive) {
+        String name = trip.name.replace('/', '_').replace('\\', '_');
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
-                .setType("text/plain").putExtra(Intent.EXTRA_TITLE, trip.name.replace('/', '_').replace('\\', '_') + "-旅行记录.txt");
+                .setType(archive ? "application/zip" : "text/plain")
+                .putExtra(Intent.EXTRA_TITLE, name + (archive ? ".rlbackup.zip" : "-旅行记录.txt"));
         exportTripId = trip.id;
+        exportArchive = archive;
         pendingExport = records;
         try { startActivityForResult(intent, REQUEST_EXPORT); }
         catch (android.content.ActivityNotFoundException error) {
             exportTripId = null;
+            exportArchive = false;
             pendingExport = null;
             toast("系统文件选择器不可用");
         }
     }
 
-    private void exportRecords(Uri destination, String tripId, List<LedgerReview.Row> records) {
+    private void exportRecords(Uri destination, String tripId, List<LedgerReview.Row> records, boolean archiveSelected) {
         new Thread(() -> {
             String status;
             try {
-                boolean backup = LedgerBackup.isBackupName(exportFileName(destination));
-                if (backup) {
+                String name = exportFileName(destination);
+                boolean archive = archiveSelected || LedgerBackup.isArchiveName(name);
+                boolean backup = archive || LedgerBackup.isBackupName(name);
+                if (archive) {
+                    LedgerStore.Snapshot snapshot = store.snapshotWithReceipts(tripId);
+                    if (snapshot.trip == null) throw new IOException("旅行不存在");
+                    writeReceiptBackup(destination, snapshot);
+                    status = snapshot.receipts.stream().anyMatch(entry -> !entry.digest.isEmpty() && !entry.available)
+                            ? "已备份，部分图片待同步" : "账本备份已保存";
+                } else if (backup) {
                     LedgerStore.Snapshot snapshot = store.snapshot(tripId);
                     if (snapshot.trip == null) throw new IOException("旅行不存在");
                     try (OutputStream stream = getContentResolver().openOutputStream(destination, "wt")) {
                         if (stream == null) throw new IOException("无法打开文件");
                         LedgerBackup.write(stream, snapshot);
                     }
+                    status = "账本备份已保存";
                 } else {
                     writeRecordText(destination, tripId, records);
+                    status = "旅行记录已导出";
                 }
-                status = backup ? "账本备份已保存" : "旅行记录已导出";
             } catch (Exception error) { status = "导出失败，请重试"; }
             String message = status;
             runOnUiThread(() -> { if (!isDestroyed()) toast(message); });
         }, "ledger-export").start();
+    }
+
+    private void writeReceiptBackup(Uri destination, LedgerStore.Snapshot snapshot) throws Exception {
+        File archive = File.createTempFile("ledger-backup-", ".zip", getCacheDir());
+        try {
+            LedgerBackup.writeArchive(new FileOutputStream(archive), snapshot, store.receipts);
+            try (OutputStream stream = getContentResolver().openOutputStream(destination, "wt")) {
+                if (stream == null) throw new IOException("无法打开文件");
+                Files.copy(archive.toPath(), stream);
+            }
+        } finally { archive.delete(); }
     }
 
     private String exportFileName(Uri destination) {
@@ -711,13 +781,16 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (receipts.activityResult(request, result, data)) return;
         if (request == REQUEST_EXPORT) {
             String tripId = exportTripId;
+            boolean archive = exportArchive;
             List<LedgerReview.Row> records = pendingExport;
             exportTripId = null;
+            exportArchive = false;
             pendingExport = null;
             if (tripId != null && result == RESULT_OK && data != null && data.getData() != null)
-                exportRecords(data.getData(), tripId, records);
+                exportRecords(data.getData(), tripId, records, archive);
             return;
         }
         if (request != REQUEST_TEAM) return;

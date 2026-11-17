@@ -33,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -51,6 +52,7 @@ final class TeamBle {
     }
 
     private static final long ADVERTISEMENT_AGE = 35000;
+    private static final long SCAN_INTERVAL = 60000, SCAN_WINDOW = 12000;
     private final Context context;
     private final BluetoothAdapter adapter;
     private final ParcelUuid scope;
@@ -67,17 +69,20 @@ final class TeamBle {
     private ScanCallback scan;
     private long retryScan, retryAdvertise;
     private int scanFailures, advertiseFailures;
-    private boolean background, receiverRegistered;
+    private boolean background, receiverRegistered, windowedDiscovery, scanWindowOpen;
     private volatile ScheduledExecutorService timer;
     private final Runnable expire = this::refresh;
     private final Runnable retryRadio = this::refresh;
+    private final Runnable beginWindow = this::beginDiscoveryWindow;
+    private final Runnable endWindow = this::endDiscoveryWindow;
     private final BroadcastReceiver radio = new BroadcastReceiver() {
         @Override public void onReceive(Context ignored, Intent intent) {
             int state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR);
             if (state != BluetoothAdapter.STATE_ON && state != BluetoothAdapter.STATE_OFF) return;
             scanFailures = advertiseFailures = 0;
             retryScan = retryAdvertise = 0;
-            refresh();
+            if (state == BluetoothAdapter.STATE_ON && windowedDiscovery) beginDiscoveryWindow();
+            else refresh();
         }
     };
 
@@ -85,9 +90,13 @@ final class TeamBle {
         this.context = context.getApplicationContext();
         this.events = events;
         hint = TeamProtocol.routeHint(trip.team, deviceId);
-        scope = new ParcelUuid(UUID.nameUUIDFromBytes(("ride-ledger-ble-1:" + trip.secret).getBytes(StandardCharsets.UTF_8)));
+        scope = scope(trip);
         BluetoothManager manager = this.context.getSystemService(BluetoothManager.class);
         adapter = manager == null ? null : manager.getAdapter();
+    }
+
+    static ParcelUuid scope(LedgerStore.Trip trip) {
+        return new ParcelUuid(UUID.nameUUIDFromBytes(("ride-ledger-ble-1:" + trip.secret).getBytes(StandardCharsets.UTF_8)));
     }
 
     static String[] permissions() {
@@ -103,9 +112,10 @@ final class TeamBle {
         return true;
     }
 
-    void start(ScheduledExecutorService timer, boolean background) {
+    void start(ScheduledExecutorService timer, boolean background, boolean windowedDiscovery) {
         this.timer = timer;
         this.background = background;
+        this.windowedDiscovery = windowedDiscovery;
         active = true;
         scanFailures = advertiseFailures = 0;
         retryScan = 0;
@@ -116,7 +126,31 @@ final class TeamBle {
             else context.registerReceiver(radio, filter);
             receiverRegistered = true;
         } catch (RuntimeException error) { SyncLog.write(context, SyncLog.Event.BLE_RECEIVER, error); }
+        if (windowedDiscovery) beginDiscoveryWindow();
+        else refresh();
+    }
+
+    private void beginDiscoveryWindow() {
+        main.removeCallbacks(beginWindow);
+        main.removeCallbacks(endWindow);
+        scanWindowOpen = active && adapter != null && radioEnabled() && scanAllowed();
+        if (scanWindowOpen) {
+            main.postDelayed(endWindow, SCAN_WINDOW);
+        }
         refresh();
+    }
+
+    private void endDiscoveryWindow() {
+        scanWindowOpen = false;
+        stopScan();
+        if (active && retryScan != Long.MAX_VALUE)
+            main.postDelayed(beginWindow, SCAN_INTERVAL - SCAN_WINDOW);
+    }
+
+    void permissionsChanged() {
+        if (windowedDiscovery && !scanWindowOpen && !main.hasCallbacks(beginWindow) && retryScan != Long.MAX_VALUE)
+            beginDiscoveryWindow();
+        else refresh();
     }
 
     void rediscover() {
@@ -129,7 +163,7 @@ final class TeamBle {
     void refresh() {
         if (!active || Build.VERSION.SDK_INT < 29 || adapter == null) return;
         if (!radioEnabled()) {
-            if (scan != null || server != null || !seen.isEmpty()) {
+            if (scanWindowOpen || scan != null || server != null || !seen.isEmpty()) {
                 resetRadio();
                 events.reset();
             }
@@ -140,14 +174,14 @@ final class TeamBle {
         Iterator<Map.Entry<String, Long>> iterator = seen.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<String, Long> entry = iterator.next();
-            long deadline = entry.getValue() + ADVERTISEMENT_AGE;
+            long deadline = entry.getValue() + advertisementAge();
             if (now < deadline) { next = Math.min(next, deadline); continue; }
             events.lost(entry.getKey());
             iterator.remove();
         }
         main.removeCallbacks(expire);
         if (next != Long.MAX_VALUE) main.postDelayed(expire, next - now);
-        if (scan == null && now >= retryScan && scanAllowed()) startScan();
+        if (scan == null && now >= retryScan && canDiscover()) startScan();
         if (server == null && now >= retryAdvertise) startAdvertising();
     }
 
@@ -157,6 +191,10 @@ final class TeamBle {
     }
 
     private boolean scanAllowed() { return canScan(context, background); }
+
+    private boolean canDiscover() { return (!windowedDiscovery || scanWindowOpen) && scanAllowed(); }
+
+    private long advertisementAge() { return ADVERTISEMENT_AGE + (windowedDiscovery ? 2 * SCAN_INTERVAL : 0); }
 
     private boolean radioEnabled() {
         try { return hasPermissions(context) && adapter.isEnabled(); }
@@ -170,7 +208,9 @@ final class TeamBle {
             if (scanner == null) { radioFailed(true, "Unavailable"); return; }
             scan = new ScanCallback() {
                 @Override public void onScanResult(int type, ScanResult result) {
-                    main.post(() -> { if (active && scan == this) found(result); });
+                    main.post(() -> {
+                        if (active && scan == this && found(result, false)) scanFailures = 0;
+                    });
                 }
                 @Override public void onScanFailed(int errorCode) {
                     main.post(() -> { if (scan == this) radioFailed(true, Integer.toString(errorCode)); });
@@ -183,27 +223,43 @@ final class TeamBle {
         } catch (Exception error) { radioFailed(true, error.getClass().getSimpleName()); }
     }
 
-    private void found(ScanResult result) {
+    boolean discovered(List<ScanResult> results) {
+        if (!active || !windowedDiscovery || adapter == null || !radioEnabled() || !scanAllowed()) return false;
+        boolean accepted = false;
+        for (ScanResult result : results) if (found(result, true)) accepted = true;
+        return accepted;
+    }
+
+    private boolean found(ScanResult result, boolean firstMatch) {
+        if (result == null) return false;
         ScanRecord record = result.getScanRecord();
         byte[] data = record == null ? null : record.getServiceData(scope);
-        if (data == null || data.length != 8 || !result.isConnectable()) return;
+        if (data == null || data.length != 8 || !result.isConnectable()) return false;
         StringBuilder value = new StringBuilder(12);
         for (int i = 2; i < data.length; i++) {
             value.append(Character.forDigit((data[i] >>> 4) & 15, 16)).append(Character.forDigit(data[i] & 15, 16));
         }
         String other = value.toString();
         int psm = (data[0] & 255) << 8 | (data[1] & 255);
-        if (psm == 0 || hint.equals(other)) return;
+        if (psm == 0 || hint.equals(other)) return false;
         BluetoothDevice device = result.getDevice();
+        if (device == null) return false;
         String route = TeamProtocol.fromHint(other);
         PeerRoutePolicy.Endpoint endpoint = endpoint(device, psm, route);
         String key = endpoint.key;
-        if (seen.size() >= 16 && !seen.containsKey(key)) return;
+        if (seen.size() >= 16 && !seen.containsKey(key)) return false;
         boolean first = seen.isEmpty();
-        if (seen.put(key, SystemClock.elapsedRealtime()) == null) {
+        long now = SystemClock.elapsedRealtime();
+        Long previous = seen.put(key, now);
+        if (previous == null) {
             events.found(endpoint);
-            if (first) main.postDelayed(expire, ADVERTISEMENT_AGE);
+            if (first) main.postDelayed(expire, advertisementAge());
+        } else if (firstMatch && now - previous >= ADVERTISEMENT_AGE) {
+            // The controller saw a peer return during the gap between discovery windows.
+            events.lost(key);
+            events.found(endpoint);
         }
+        return true;
     }
     private PeerRoutePolicy.Endpoint endpoint(BluetoothDevice device, int psm, String route) {
         String key = "bluetooth:" + route + ":" + device.getAddress() + ":" + psm;
@@ -303,6 +359,9 @@ final class TeamBle {
     private void resetRadio() {
         main.removeCallbacks(expire);
         main.removeCallbacks(retryRadio);
+        main.removeCallbacks(beginWindow);
+        main.removeCallbacks(endWindow);
+        scanWindowOpen = false;
         stopScan();
         stopAdvertising();
         for (BluetoothSocket socket : sockets) close(socket);
@@ -325,7 +384,7 @@ final class TeamBle {
         long retryAt = failures <= 3 ? SystemClock.elapsedRealtime() + (5000L << (failures - 1)) : Long.MAX_VALUE;
         if (scanning) retryScan = retryAt; else retryAdvertise = retryAt;
         main.removeCallbacks(retryRadio);
-        long next = Math.min(scan == null && scanAllowed() ? retryScan : Long.MAX_VALUE,
+        long next = Math.min(scan == null && canDiscover() ? retryScan : Long.MAX_VALUE,
                 server == null ? retryAdvertise : Long.MAX_VALUE);
         if (active && next != Long.MAX_VALUE)
             main.postDelayed(retryRadio, Math.max(1, next - SystemClock.elapsedRealtime()));

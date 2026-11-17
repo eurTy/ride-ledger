@@ -14,9 +14,12 @@ import android.os.SystemClock;
 import org.json.JSONObject;
 import org.json.JSONArray;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -28,6 +31,8 @@ import java.security.spec.ECGenParameterSpec;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.time.LocalDate;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -37,6 +42,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 
 /** Real SQLite and encrypted streams, with a simulated proximity graph for the radio routes. */
@@ -48,6 +55,88 @@ final class TeamChecks {
     };
 
     static void run(Context base, PeerProtocolChecks.Sink sink) {
+        sink.check("receipts: offline save, Bluetooth reference, interrupted LAN photo, retry and deduplication", () -> {
+            try (Device root = new Device(base); Device guest = new Device(base)) {
+                root.trip = root.store.createOpenTeam("小票测试", "组织者", 2);
+                guest.trip = guest.store.joinTrip(root.store.inviteCode(root.trip), "同行者");
+                require(exchange(guest, root).complete(), "could not enroll the second device");
+                root.reopen(); guest.reopen();
+                ReceiptImage image = receiptPhoto(1);
+                new LedgerActions(root.store).expense(root.trip, root.trip.localPerson, "CNY", "36.50", false, "午餐", image);
+                LedgerStore.Event original = root.store.summary(root.trip.id).visible.get(0);
+                LedgerReceipts.Entry stored = root.store.receipts.get(root.trip.id, original.id);
+                require(stored.available && stored.confirmed == 0 && image.digest.equals(stored.digest) &&
+                        !original.data.toString().contains(image.digest), "receipt was not stored separately with the expense");
+
+                Pair bluetooth = exchange(root, guest);
+                require(bluetooth.complete() && bluetooth.client.receiptError == null && bluetooth.server.receiptError == null,
+                        "reference-only transfer failed: " + bluetooth);
+                LedgerReceipts.Entry pending = guest.store.receipts.get(guest.trip.id, original.id);
+                require(guest.count() == 1 && pending != null && !pending.available && stored.matches(pending) &&
+                        guest.store.receipts.bytes(guest.trip.id, pending, false) == null, "Bluetooth carried photo bytes or lost the reference");
+
+                Pair interrupted = exchange(root, guest, true, true, "drop-photo", "");
+                require(interrupted.complete() && interrupted.client.receiptError != null && interrupted.server.receiptError != null,
+                        "an interrupted photo must preserve the journal confirmation: " + interrupted);
+                guest.reopen();
+                require(guest.count() == 1 && !guest.store.receipts.get(guest.trip.id, original.id).available,
+                        "partial image was saved as complete");
+
+                Pair resumed = exchange(guest, root, true, true, "", "");
+                require(resumed.complete() && resumed.client.receiptError == null && resumed.server.receiptError == null,
+                        "reconnection did not finish the photo: " + resumed);
+                Pair replay = exchange(root, guest, true, true, "drop-photo", "drop-photo");
+                LedgerReceipts.Entry received = guest.store.receipts.get(guest.trip.id, original.id);
+                require(replay.complete() && replay.client.receiptError == null && replay.server.receiptError == null &&
+                        guest.count() == 1 && received.available && received.confirmed == 1 &&
+                        root.store.receipts.get(root.trip.id, original.id).confirmed == 1 &&
+                        Arrays.equals(guest.store.receipts.bytes(guest.trip.id, received, false), image.photo) &&
+                        guest.store.receipts.bytes(guest.trip.id, received, true).length > 0 &&
+                        guest.store.summary(guest.trip.id).visible.get(0).at == original.at, "retry lost or resent a confirmed picture or changed the expense");
+
+                ByteArrayOutputStream archive = new ByteArrayOutputStream();
+                LedgerBackup.writeArchive(archive, guest.store.snapshotWithReceipts(guest.trip.id), guest.store.receipts);
+                Map<String, byte[]> files = new LinkedHashMap<>();
+                try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(archive.toByteArray()))) {
+                    ZipEntry file;
+                    byte[] buffer = new byte[8192];
+                    while ((file = zip.getNextEntry()) != null) {
+                        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                        for (int n; (n = zip.read(buffer)) >= 0;) bytes.write(buffer, 0, n);
+                        files.put(file.getName(), bytes.toByteArray());
+                    }
+                }
+                JSONObject manifest = new JSONObject(new String(files.get("receipts.json"), StandardCharsets.UTF_8));
+                JSONObject item = manifest.getJSONArray("receipts").getJSONObject(0);
+                require(manifest.getInt("version") == 2 && item.getString("id").equals(original.id) &&
+                        item.getString("sha256").equals(image.digest) && Arrays.equals(files.get(item.getString("path")), image.photo) &&
+                        new String(files.get("ledger.jsonl"), StandardCharsets.UTF_8).contains(original.id), "backup did not contain the journal and its receipt");
+            }
+        });
+        sink.check("receipts: offline replacement versus removal, expense deletion, and no resurrection", () -> {
+            try (Device root = new Device(base); Device guest = new Device(base)) {
+                root.create(); guest.enroll(root, 1);
+                record(root, "CNY", 5900, "餐费");
+                String id = root.store.summary(root.trip.id).visible.get(0).id;
+                new LedgerActions(root.store).receipt(root.trip, id, receiptPhoto(8));
+                Pair initial = exchange(root, guest, true, true, "", "");
+                require(initial.complete() && initial.server.receiptError == null, "could not deliver first receipt");
+                ReceiptImage other = receiptPhoto(9);
+                new LedgerActions(root.store).receipt(root.trip, id, other);
+                new LedgerActions(guest.store).receipt(guest.trip, id, null);
+                Pair removal = exchange(root, guest, true, true, "", "");
+                require(removal.complete() && removal.client.receiptError == null && removal.server.receiptError == null &&
+                        root.store.receipts.get(root.trip.id, id).digest.isEmpty() && guest.store.receipts.get(guest.trip.id, id).digest.isEmpty(),
+                        "a concurrent replacement defeated removal");
+                new LedgerActions(guest.store).receipt(guest.trip, id, other);
+                new LedgerActions(root.store).delete(root.trip, Collections.singletonList(id));
+                Pair deleted = exchange(guest, root, true, true, "", "");
+                require(deleted.complete() && deleted.client.receiptError == null && deleted.server.receiptError == null &&
+                        root.store.receipts.get(root.trip.id, id) == null && guest.store.receipts.get(guest.trip.id, id) == null &&
+                        root.store.summary(root.trip.id).visible.isEmpty() && guest.store.summary(guest.trip.id).visible.isEmpty(),
+                        "deleted expense or attached bytes resurfaced");
+            }
+        });
         sink.check("open team: named seats, duplicate rejection, durable role and propagated roster", () -> {
             try (Device root = new Device(base); Device first = new Device(base); Device second = new Device(base);
                  Device extra = new Device(base)) {
@@ -476,26 +565,79 @@ final class TeamChecks {
             require(routes.readyForRevision(2, "").size() == 2, "new revision was not sent to every peer");
         });
 
-        sink.check("team routes: three retries then idle until a new request", () -> {
+        sink.check("team routes: recover at a limited rate after three retries", () -> {
             AtomicLong clock = new AtomicLong(100);
             PeerRoutePolicy routes = new PeerRoutePolicy(clock::get);
             String peer = java.util.UUID.randomUUID().toString();
-            PeerRoutePolicy.Endpoint endpoint = new PeerRoutePolicy.Endpoint("wifi", PeerRoutePolicy.Channel.WIFI, peer, true, null);
+            PeerRoutePolicy.Endpoint endpoint = new PeerRoutePolicy.Endpoint("ble", PeerRoutePolicy.Channel.BLUETOOTH, peer, true, null);
             routes.offer(endpoint);
             for (long delay : new long[]{2000, 4000, 8000}) {
-                require(only(routes.readyForRevision(1, ""), "wifi"), "attempt did not run");
+                require(only(routes.readyForRevision(1, ""), "ble"), "attempt did not run");
                 routes.syncFailure(endpoint);
                 require(routes.readyForRevision(1, "").isEmpty() && routes.nextSyncRetry(1) == clock.get() + delay,
                         "unexpected retry deadline");
+                require(routes.hasShortSyncRetry(1), "short retry should count as background contact");
                 clock.addAndGet(delay);
             }
-            require(only(routes.readyForRevision(1, ""), "wifi"), "last retry did not run");
+            require(only(routes.readyForRevision(1, ""), "ble"), "last retry did not run");
             routes.syncFailure(endpoint);
-            clock.addAndGet(60000);
-            require(routes.readyForRevision(1, "").isEmpty() && routes.nextSyncRetry(1) == Long.MAX_VALUE,
-                    "retry budget did not stop the engine");
+            long recovery = clock.get() + PeerRoutePolicy.RECOVERY_RETRY_MILLIS;
+            require(!routes.hasShortSyncRetry(1) && routes.nextSyncRetry(1) == recovery,
+                    "slow recovery should not extend background discovery");
+            clock.set(recovery - 1);
+            require(routes.readyForRevision(1, "").isEmpty(), "recovery ran too early");
+            clock.set(recovery);
+            require(only(routes.readyForRevision(1, ""), "ble"), "continuously visible endpoint did not recover");
+            routes.syncFailure(endpoint);
+            require(routes.readyForRevision(1, "").isEmpty() &&
+                    routes.nextSyncRetry(1) == recovery + PeerRoutePolicy.RECOVERY_RETRY_MILLIS,
+                    "repeated failure did not retain slow backoff");
+            clock.addAndGet(PeerRoutePolicy.RECOVERY_RETRY_MILLIS);
+            require(only(routes.readyForRevision(1, ""), "ble"), "second recovery did not run");
+            routes.syncSuccess(endpoint, 1);
+            require(routes.nextSyncRetry(1) == Long.MAX_VALUE && routes.readyForRevision(1, "").isEmpty(),
+                    "successful recovery should settle the revision");
             routes.newSyncRequest();
-            require(only(routes.readyForRevision(2, ""), "wifi"), "new work should reactivate the route");
+            require(only(routes.readyForRevision(2, ""), "ble"), "new work should reactivate the route");
+        });
+
+        sink.check("team routes: slow recovery tries Wi-Fi then falls back to Bluetooth", () -> {
+            AtomicLong clock = new AtomicLong(100);
+            PeerRoutePolicy routes = new PeerRoutePolicy(clock::get);
+            String peer = java.util.UUID.randomUUID().toString();
+            PeerRoutePolicy.Endpoint wifi = new PeerRoutePolicy.Endpoint("wifi", PeerRoutePolicy.Channel.WIFI, peer, true, null);
+            PeerRoutePolicy.Endpoint ble = new PeerRoutePolicy.Endpoint("ble", PeerRoutePolicy.Channel.BLUETOOTH, peer, true, null);
+            routes.offer(wifi);
+            routes.offer(ble);
+            for (int i = 0; i < 4; i++) {
+                List<PeerRoutePolicy.Endpoint> ready = routes.readyForRevision(1, "");
+                require(ready.size() == 1, "expected exactly one route for peer");
+                routes.syncFailure(ready.get(0));
+                if (i < 3) clock.set(Math.max(clock.get(), routes.nextSyncRetry(1)));
+            }
+            long recovery = clock.get() + PeerRoutePolicy.RECOVERY_RETRY_MILLIS;
+            require(routes.nextSyncRetry(1) == recovery && routes.readyForRevision(1, "").isEmpty(),
+                    "alternate route bypassed peer recovery backoff");
+            require(routes.nextSyncRetry(1, Collections.singleton(peer)) == Long.MAX_VALUE,
+                    "active peer should not schedule recovery");
+            clock.set(recovery);
+            require(only(routes.readyForRevision(1, ""), "wifi"), "recovery did not prefer Wi-Fi");
+            routes.syncFailure(wifi);
+            require(only(routes.readyForRevision(1, ""), "ble"), "broken Wi-Fi blocked Bluetooth recovery");
+            routes.syncFailure(ble);
+            require(routes.nextSyncRetry(1) == recovery + PeerRoutePolicy.RECOVERY_RETRY_MILLIS,
+                    "two broken paths should both cool down");
+            clock.addAndGet(PeerRoutePolicy.RECOVERY_RETRY_MILLIS);
+            require(only(routes.readyForRevision(1, ""), "wifi"), "Wi-Fi did not get another chance");
+            routes.syncFailure(wifi);
+            require(only(routes.readyForRevision(1, ""), "ble"), "recovered Bluetooth never got another chance");
+            routes.syncSuccess(ble, 1);
+            require(routes.nextSyncRetry(1) == clock.get() + PeerRoutePolicy.RECOVERY_RETRY_MILLIS,
+                    "Wi-Fi recovery should remain scheduled after Bluetooth success");
+            routes.remove("wifi");
+            require(routes.nextSyncRetry(1) == Long.MAX_VALUE, "synced Bluetooth should not be polled");
+            routes.remove("ble");
+            require(routes.nextSyncRetry(1) == Long.MAX_VALUE, "lost routes should not keep scheduling recovery");
         });
 
         sink.check("team routes: relay preserves another peer's retry deadline and excludes active peers", () -> {
@@ -509,11 +651,33 @@ final class TeamChecks {
             require(only(routes.readyForRevision(1, "", Collections.singleton(source)), "other"), "active source was dialed");
             routes.syncFailure(b);
             long retry = routes.nextSyncRetry(1, Collections.singleton(source));
-            routes.markRelayedFrom(source, 2);
+            routes.markRelayedFrom(source, PeerRoutePolicy.Channel.WIFI, 2);
             require(routes.readyForRevision(2, "").isEmpty() && retry == 2100 && routes.nextSyncRetry(2) == retry,
                     "relay cleared another peer's backoff or dialed the source");
             clock.set(retry);
             require(only(routes.readyForRevision(2, ""), "other"), "relay was lost after the existing backoff");
+        });
+
+        sink.check("team routes: receiving over Bluetooth leaves a delayed Wi-Fi recovery probe", () -> {
+            AtomicLong clock = new AtomicLong(100);
+            PeerRoutePolicy routes = new PeerRoutePolicy(clock::get);
+            String peer = java.util.UUID.randomUUID().toString();
+            PeerRoutePolicy.Endpoint wifi = new PeerRoutePolicy.Endpoint("wifi", PeerRoutePolicy.Channel.WIFI, peer, true, null);
+            PeerRoutePolicy.Endpoint ble = new PeerRoutePolicy.Endpoint("ble", PeerRoutePolicy.Channel.BLUETOOTH, peer, true, null);
+            routes.offer(wifi);
+            routes.offer(ble);
+            routes.received(peer, PeerRoutePolicy.Channel.BLUETOOTH, 1);
+            routes.markRelayedFrom(peer, PeerRoutePolicy.Channel.BLUETOOTH, 2);
+            long probe = clock.get() + PeerRoutePolicy.RECOVERY_RETRY_MILLIS;
+            require(routes.readyForRevision(2, "").isEmpty() && routes.nextSyncRetry(2) == probe &&
+                    !routes.hasShortSyncRetry(2), "receiving an operation should not redial the sender immediately");
+            clock.addAndGet(30000);
+            routes.markRelayedFrom(peer, PeerRoutePolicy.Channel.BLUETOOTH, 3);
+            require(routes.nextSyncRetry(3) == probe, "another Bluetooth batch postponed the Wi-Fi recovery probe");
+            clock.set(probe);
+            require(only(routes.readyForRevision(3, ""), "wifi"), "Wi-Fi recovery depended on a new operation");
+            routes.syncSuccess(wifi, 3);
+            require(routes.nextSyncRetry(3) == Long.MAX_VALUE, "healthy Wi-Fi should not be polled");
         });
 
         sink.check("team sync engine: offline queue and authenticated checkpoint survive a reopen", () -> {
@@ -680,18 +844,23 @@ final class TeamChecks {
 
     private static Pair exchange(Device from, Device to) throws Exception { return exchange(from, to, "", ""); }
     private static Pair exchange(Device from, Device to, String clientFault, String serverFault) throws Exception {
+        return exchange(from, to, false, false, clientFault, serverFault);
+    }
+
+    private static Pair exchange(Device from, Device to, boolean fromPhotos, boolean toPhotos,
+                                 String clientFault, String serverFault) throws Exception {
         Pair result = new Pair();
         ExecutorService pool = Executors.newSingleThreadExecutor();
         try (ServerSocket listener = loopback()) {
             Future<?> remote = pool.submit(() -> {
                 try (Socket socket = listener.accept()) {
                     socket.setSoTimeout(15000);
-                    result.server = to.protocol().accept(wire(socket, serverFault));
+                    result.server = to.protocol(toPhotos).accept(wire(socket, serverFault));
                 } catch (Exception error) { result.serverError = error; }
             });
             try (Socket socket = new Socket("127.0.0.1", listener.getLocalPort())) {
                 socket.setSoTimeout(15000);
-                result.client = from.protocol().exchange(wire(socket, clientFault),
+                result.client = from.protocol(fromPhotos).exchange(wire(socket, clientFault),
                         TeamProtocol.routeId(to.trip.team, to.id.deviceId));
             } catch (Exception error) { result.clientError = error; }
             remote.get(20, TimeUnit.SECONDS);
@@ -700,8 +869,63 @@ final class TeamChecks {
     }
 
     private static PeerWire wire(Socket socket, String fault) throws Exception {
-        return new PeerWire(PeerProtocolChecks.fragment(socket.getInputStream()),
-                new PeerProtocolChecks.FaultOutput(socket, fault), () -> { });
+        OutputStream wire = socket.getOutputStream();
+        if ("drop-photo".equals(fault)) {
+            OutputStream target = wire;
+            wire = new OutputStream() {
+                private final byte[] header = new byte[Integer.BYTES];
+                private int headerBytes, frameBytes;
+                private boolean dropping;
+
+                @Override public void write(int value) throws IOException { write(new byte[]{(byte) value}, 0, 1); }
+
+                @Override public void write(byte[] bytes, int start, int count) throws IOException {
+                    while (count > 0) {
+                        if (frameBytes == 0) {
+                            int step = Math.min(header.length - headerBytes, count);
+                            System.arraycopy(bytes, start, header, headerBytes, step);
+                            headerBytes += step;
+                            start += step;
+                            count -= step;
+                            if (headerBytes == header.length) {
+                                frameBytes = java.nio.ByteBuffer.wrap(header).getInt();
+                                dropping = frameBytes > 32768;
+                                target.write(header);
+                                headerBytes = 0;
+                            }
+                        } else {
+                            int step = Math.min(frameBytes, count);
+                            target.write(bytes, start, dropping ? Math.min(1024, step) : step);
+                            if (dropping) {
+                                target.flush();
+                                socket.close();
+                                throw new IOException("interrupted image frame");
+                            }
+                            frameBytes -= step;
+                            start += step;
+                            count -= step;
+                        }
+                    }
+                }
+
+                @Override public void flush() throws IOException { target.flush(); }
+            };
+        } else if (!fault.isEmpty()) wire = new PeerProtocolChecks.FaultOutput(socket, fault);
+        return new PeerWire(PeerProtocolChecks.fragment(socket.getInputStream()), wire, () -> { });
+    }
+
+    private static ReceiptImage receiptPhoto(int seed) throws IOException {
+        int side = 320;
+        int[] pixels = new int[side * side];
+        java.util.Random random = new java.util.Random(seed);
+        for (int i = 0; i < pixels.length; i++) pixels[i] = random.nextInt() | 0xff000000;
+        Bitmap image = Bitmap.createBitmap(pixels, side, side, Bitmap.Config.ARGB_8888);
+        try {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            if (!image.compress(Bitmap.CompressFormat.JPEG, 90, bytes)) throw new IOException("fixture compression failed");
+            require(bytes.size() > 32768, "photo fixture must be larger than a control frame");
+            return ReceiptImage.fromJpeg(bytes.toByteArray());
+        } finally { image.recycle(); }
     }
 
     private static ServerSocket loopback() throws Exception {
@@ -735,7 +959,8 @@ final class TeamChecks {
         }
         void reopen() { store.close(); store = new LedgerStore(context); trip = store.getTrip(trip.id); }
         int count() { return store.events(trip.id).size(); }
-        TeamProtocol protocol() { return new TeamProtocol(store, trip, id, QUIET, () -> { }); }
+        TeamProtocol protocol() { return protocol(false); }
+        TeamProtocol protocol(boolean photos) { return new TeamProtocol(store, trip, id, QUIET, () -> { }, 0, photos); }
         void openCoordinator() throws Exception {
             sync = new PeerSync(context, store, ignored -> { }, false, trip);
             onMain(sync::start);

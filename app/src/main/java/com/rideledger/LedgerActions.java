@@ -52,10 +52,15 @@ final class LedgerActions {
 
     void expense(LedgerStore.Trip trip, String payer, String rawCurrency, String rawAmount,
                  boolean personal, String note) throws Exception {
+        expense(trip, payer, rawCurrency, rawAmount, personal, note, null);
+    }
+
+    void expense(LedgerStore.Trip trip, String payer, String rawCurrency, String rawAmount,
+                 boolean personal, String note, ReceiptImage receipt) throws Exception {
         String code = Money.code(rawCurrency);
         long amount = Money.parse(rawAmount, code);
         saveExpense(trip, payer, code, amount, personal ? "personal" : "shared", note,
-                trip.team.shares(amount, payer, personal));
+                trip.team.shares(amount, payer, personal), receipt);
     }
 
     static CustomSplit customSplit(LedgerStore.Trip trip, String code, String[] inputs) throws Exception {
@@ -79,15 +84,23 @@ final class LedgerActions {
     }
 
     void expense(LedgerStore.Trip trip, String payer, CustomSplit split, String note) throws Exception {
+        expense(trip, payer, split, note, null);
+    }
+
+    void expense(LedgerStore.Trip trip, String payer, CustomSplit split, String note, ReceiptImage receipt) throws Exception {
         if (!trip.id.equals(split.tripId) || !trip.team.fingerprint.equals(split.team))
             throw new IllegalArgumentException("分摊属于另一趟旅行，请重新填写");
         if (split.total <= 0) throw new IllegalArgumentException("分摊合计必须大于零");
-        saveExpense(trip, payer, split.currency, split.total, "custom", note, split.shares);
+        saveExpense(trip, payer, split.currency, split.total, "custom", note, split.shares, receipt);
     }
 
     private void saveExpense(LedgerStore.Trip trip, String payer, String code, long amount,
-                             String mode, String note, JSONObject shares) throws Exception {
-        store.add(trip.id, "expense", expenseData(payer, code, amount, mode, note, shares));
+                             String mode, String note, JSONObject shares, ReceiptImage receipt) throws Exception {
+        store.addExpense(trip.id, expenseData(payer, code, amount, mode, note, shares), receipt);
+    }
+
+    void receipt(LedgerStore.Trip trip, String eventId, ReceiptImage image) {
+        store.receipts.change(trip.id, eventId, image);
     }
 
     private static JSONObject expenseData(String payer, String code, long amount, String mode,

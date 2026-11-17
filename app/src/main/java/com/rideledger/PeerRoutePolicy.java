@@ -14,6 +14,7 @@ import java.util.function.LongSupplier;
 final class PeerRoutePolicy {
     static final long ENROLLMENT_STAGE_MILLIS = 1500;
     private static final long REDISCOVERY_QUIET = 30000;
+    static final long RECOVERY_RETRY_MILLIS = 60000;
     enum Channel { WIFI, BLUETOOTH, HOTSPOT }
     private enum Phase { LEGACY, ENROLLMENT, LEDGER }
     static final class Endpoint {
@@ -37,6 +38,7 @@ final class PeerRoutePolicy {
     private final LongSupplier clock;
     private final Map<String, State> states = new LinkedHashMap<>();
     private final Map<String, Integer> syncFailures = new HashMap<>();
+    private final Map<String, Long> recoveryAt = new HashMap<>();
     PeerRoutePolicy(LongSupplier clock) { this.clock = clock; }
     synchronized boolean offer(Endpoint endpoint) {
         long now = clock.getAsLong();
@@ -48,11 +50,13 @@ final class PeerRoutePolicy {
                     !endpoint.peerId.equals(old.endpoint.peerId)) {
                 states.put(endpoint.key, new State(endpoint, now));
                 syncFailures.remove(group(endpoint));
+                recoveryAt.remove(group(endpoint));
                 return true;
             }
             if (endpoint.channel != old.endpoint.channel && !old.busy) {
                 states.put(endpoint.key, new State(endpoint, now));
                 syncFailures.remove(group(endpoint));
+                recoveryAt.remove(group(endpoint));
                 return true;
             }
             if (endpoint.channel != old.endpoint.channel) return false;
@@ -64,6 +68,7 @@ final class PeerRoutePolicy {
             old.lastSeen = now;
             if (rediscovered) {
                 syncFailures.remove(group(endpoint));
+                recoveryAt.remove(group(endpoint));
                 old.retryAt = 0;
             }
             return rediscovered;
@@ -75,18 +80,26 @@ final class PeerRoutePolicy {
         states.put(endpoint.key, new State(endpoint, now));
         // A newly advertised address can be a recovered link with a different port.
         syncFailures.remove(group(endpoint));
+        recoveryAt.remove(group(endpoint));
         return true;
     }
     synchronized void remove(String key) {
         State removed = states.remove(key);
-        if (removed != null) syncFailures.remove(group(removed.endpoint));
+        if (removed != null) forgetAbsentGroup(group(removed.endpoint));
     }
     synchronized void removeChannel(Channel channel) {
+        Set<String> removed = new HashSet<>();
         states.entrySet().removeIf(value -> {
             if (value.getValue().endpoint.channel != channel) return false;
-            syncFailures.remove(group(value.getValue().endpoint));
+            removed.add(group(value.getValue().endpoint));
             return true;
         });
+        for (String peer : removed) forgetAbsentGroup(peer);
+    }
+    private void forgetAbsentGroup(String peer) {
+        for (State state : states.values()) if (peer.equals(group(state.endpoint))) return;
+        syncFailures.remove(peer);
+        recoveryAt.remove(peer);
     }
     synchronized void remember(String key, String peerId, boolean modern) {
         if (!PeerIdentity.valid(peerId)) return;
@@ -102,7 +115,7 @@ final class PeerRoutePolicy {
     synchronized List<Endpoint> readyForRevision(long revision, String onlyPeer, Set<String> activePeers) {
         List<Endpoint> result = new ArrayList<>();
         for (State state : syncCandidates(revision, onlyPeer, activePeers).values()) {
-            if (clock.getAsLong() < state.retryAt) continue;
+            if (clock.getAsLong() < syncRetryAt(state)) continue;
             state.busy = true;
             state.attempt = state.endpoint;
             result.add(state.endpoint);
@@ -114,8 +127,14 @@ final class PeerRoutePolicy {
     }
     synchronized long nextSyncRetry(long revision, Set<String> activePeers) {
         long next = Long.MAX_VALUE;
-        for (State state : syncCandidates(revision, "", activePeers).values()) next = Math.min(next, state.retryAt);
+        for (State state : syncCandidates(revision, "", activePeers).values()) next = Math.min(next, syncRetryAt(state));
         return next;
+    }
+    synchronized boolean hasShortSyncRetry(long revision) {
+        long deadline = clock.getAsLong() + 8000;
+        for (State state : syncCandidates(revision, "", java.util.Collections.emptySet()).values())
+            if (syncFailures.getOrDefault(group(state.endpoint), 0) < 4 && syncRetryAt(state) <= deadline) return true;
+        return false;
     }
     synchronized void syncFailure(Endpoint endpoint) {
         State state = states.get(endpoint.key);
@@ -123,19 +142,27 @@ final class PeerRoutePolicy {
         state.busy = false;
         state.attempt = null;
         String peer = group(endpoint);
-        int failures = syncFailures.getOrDefault(peer, 0) + 1;
+        int failures = Math.min(4, syncFailures.getOrDefault(peer, 0) + 1);
         syncFailures.put(peer, failures);
-        state.retryAt = clock.getAsLong() + (2000L << Math.min(2, failures - 1));
+        long now = clock.getAsLong();
+        if (failures >= 4) {
+            state.retryAt = now + RECOVERY_RETRY_MILLIS;
+            // Pause once for the peer, then cool down each failed path independently.
+            // Otherwise a broken Wi-Fi path wins every recovery round and starves Bluetooth.
+            recoveryAt.putIfAbsent(peer, state.retryAt);
+        } else state.retryAt = now + (2000L << (failures - 1));
     }
     synchronized void syncSuccess(Endpoint endpoint, long revision) {
         State state = states.get(endpoint.key);
         if (state != null && state.attempt == endpoint) {
             syncFailures.remove(group(endpoint));
+            recoveryAt.remove(group(endpoint));
             success(endpoint.key, revision);
         }
     }
     synchronized void newSyncRequest() {
         syncFailures.clear();
+        recoveryAt.clear();
         resetBackoff();
     }
     synchronized int syncing() {
@@ -166,16 +193,20 @@ final class PeerRoutePolicy {
             String peer = group(state.endpoint);
             int rank = rank(state.endpoint.channel, Phase.LEDGER);
             if ((!onlyPeer.isEmpty() && !onlyPeer.equals(peer)) || busy.containsKey(peer) || activePeers.contains(peer) ||
-                    syncFailures.getOrDefault(peer, 0) >= 4 || completed.getOrDefault(peer, 2) <= rank) continue;
+                    completed.getOrDefault(peer, 2) <= rank) continue;
             State previous = candidates.get(peer);
             if (previous == null || prefer(state, previous, now)) candidates.put(peer, state);
         }
         return candidates;
     }
-    private static boolean prefer(State candidate, State previous, long now) {
-        boolean available = candidate.retryAt <= now, previousAvailable = previous.retryAt <= now;
+    private long syncRetryAt(State state) {
+        return Math.max(state.retryAt, recoveryAt.getOrDefault(group(state.endpoint), 0L));
+    }
+    private boolean prefer(State candidate, State previous, long now) {
+        long candidateRetry = syncRetryAt(candidate), previousRetry = syncRetryAt(previous);
+        boolean available = candidateRetry <= now, previousAvailable = previousRetry <= now;
         if (available != previousAvailable) return available;
-        if (!available && candidate.retryAt != previous.retryAt) return candidate.retryAt < previous.retryAt;
+        if (!available && candidateRetry != previousRetry) return candidateRetry < previousRetry;
         return rank(candidate.endpoint.channel, Phase.LEDGER) < rank(previous.endpoint.channel, Phase.LEDGER);
     }
     synchronized List<Endpoint> readyForEnrollment(long revision, String issuer, int maximumRank) {
@@ -243,6 +274,7 @@ final class PeerRoutePolicy {
     }
     synchronized void received(String peer, Channel channel, long revision) {
         syncFailures.remove(peer);
+        recoveryAt.remove(peer);
         for (State state : states.values()) {
             if (!group(state.endpoint).equals(peer) || state.endpoint.channel != channel) continue;
             state.succeededAt = clock.getAsLong();
@@ -250,9 +282,16 @@ final class PeerRoutePolicy {
             state.retryAt = 0;
         }
     }
-    synchronized void markRelayedFrom(String peer, long revision) {
-        for (State state : states.values())
-            if (group(state.endpoint).equals(peer)) state.revision = Math.max(state.revision, revision);
+    synchronized void markRelayedFrom(String peer, Channel channel, long revision) {
+        int usedRank = rank(channel, Phase.LEDGER);
+        long nextProbe = clock.getAsLong() + RECOVERY_RETRY_MILLIS;
+        for (State state : states.values()) {
+            if (!group(state.endpoint).equals(peer)) continue;
+            if (rank(state.endpoint.channel, Phase.LEDGER) >= usedRank)
+                state.revision = Math.max(state.revision, revision);
+            else if (state.retryAt == 0)
+                state.retryAt = nextProbe;
+        }
     }
     synchronized void failure(String key) {
         State state = states.get(key);
@@ -262,6 +301,6 @@ final class PeerRoutePolicy {
         }
     }
     synchronized void resetBackoff() { for (State state : states.values()) state.retryAt = 0; }
-    synchronized void clear() { states.clear(); syncFailures.clear(); }
+    synchronized void clear() { states.clear(); syncFailures.clear(); recoveryAt.clear(); }
     private String group(Endpoint endpoint) { return PeerIdentity.valid(endpoint.peerId) ? endpoint.peerId : endpoint.key; }
 }

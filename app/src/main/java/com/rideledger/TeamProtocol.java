@@ -26,6 +26,7 @@ final class TeamProtocol {
     private final PeerProtocol.Listener listener;
     private final Runnable enrolled;
     private final int listenerPort;
+    private final boolean receiptPhotos;
 
     TeamProtocol(LedgerStore store, LedgerStore.Trip trip, Team.Identity local, PeerProtocol.Listener listener,
                  Runnable enrolled) {
@@ -34,12 +35,18 @@ final class TeamProtocol {
 
     TeamProtocol(LedgerStore store, LedgerStore.Trip trip, Team.Identity local, PeerProtocol.Listener listener,
                  Runnable enrolled, int listenerPort) {
+        this(store, trip, local, listener, enrolled, listenerPort, false);
+    }
+
+    TeamProtocol(LedgerStore store, LedgerStore.Trip trip, Team.Identity local, PeerProtocol.Listener listener,
+                 Runnable enrolled, int listenerPort, boolean receiptPhotos) {
         this.store = store;
         this.trip = trip;
         this.local = local;
         this.listener = listener;
         this.enrolled = enrolled;
         this.listenerPort = listenerPort;
+        this.receiptPhotos = receiptPhotos;
     }
 
     // The discovery hint is scoped to one trip. It is used for routing, never as proof of identity.
@@ -93,6 +100,7 @@ final class TeamProtocol {
                 ? new JournalSync(store, trip, session.secret, remote.device, wire, listener).exchange(true)
                 : new PeerProtocol(store, local.deviceId, listener, trip, remote.device, session.secret).exchange(wire, true);
         result.callbackPort = remote.callbackPort;
+        exchangeReceipts(wire, session, remote, result, true);
         return result;
     }
 
@@ -139,7 +147,20 @@ final class TeamProtocol {
                 ? new JournalSync(store, trip, session.secret, remote.device, wire, listener).exchange(false)
                 : new PeerProtocol(store, local.deviceId, listener, trip, remote.device, session.secret).accept(wire);
         result.callbackPort = remote.callbackPort;
+        exchangeReceipts(wire, session, remote, result, false);
         return result;
+    }
+
+    private void exchangeReceipts(PeerWire wire, LedgerStore.Trip key, Remote remote,
+                                  PeerProtocol.Result result, boolean initiator) {
+        if (!result.complete || !result.authenticated || remote.receipts == 0) return;
+        try {
+            new ReceiptSync(store.receipts, key, wire, remote.device, receiptPhotos && remote.receipts == 2, listener)
+                    .exchange(initiator);
+        } catch (Exception incomplete) {
+            // The ledger has already committed and confirmed. Only the attachments need a retry.
+            result.receiptError = incomplete;
+        }
     }
 
     private JSONObject hello(String kind, KeyPair keys) throws Exception {
@@ -149,7 +170,7 @@ final class TeamProtocol {
                 .put("nonce", UUID.randomUUID().toString()).put("device", local.deviceId)
                 .put("key", local.key).put("member", member)
                 .put("ephemeral", Team.encode(keys.getPublic().getEncoded()))
-                .put("grant", grant).put("journalCursor", 1);
+                .put("grant", grant).put("journalCursor", 1).put("receipts", receiptPhotos ? 2 : 1);
         if (listenerPort > 0) hello.put("callbackPort", listenerPort);
         if (trip.team.openSeats) {
             if (grant == null) hello.put("name", trip.joinName);
@@ -176,7 +197,7 @@ final class TeamProtocol {
     private static final class Remote {
         final String device, key, member, ephemeral, name;
         final JSONObject grant;
-        final int callbackPort;
+        final int callbackPort, receipts;
         final boolean journalCursor;
         Remote(JSONObject message) throws Exception {
             device = message.getString("device");
@@ -187,6 +208,8 @@ final class TeamProtocol {
             grant = message.optJSONObject("grant");
             callbackPort = message.optInt("callbackPort");
             journalCursor = message.optInt("journalCursor") == 1;
+            int receiptCapability = message.optInt("receipts");
+            receipts = receiptCapability == 1 || receiptCapability == 2 ? receiptCapability : 0;
         }
     }
 

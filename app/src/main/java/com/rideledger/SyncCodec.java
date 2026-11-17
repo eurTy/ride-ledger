@@ -8,6 +8,7 @@ import org.json.JSONObject;
 
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.util.Arrays;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
@@ -31,6 +32,29 @@ final class SyncCodec {
         if (iv.length != 12 || data.length < 16 || data.length > 8_000_000)
             throw new IllegalArgumentException("加密数据大小无效");
         return new JSONObject(new String(peerCipher(Cipher.DECRYPT_MODE, trip, iv).doFinal(data), StandardCharsets.UTF_8));
+    }
+
+    static byte[] sealReceipt(LedgerStore.Trip key, String digest, byte[] photo) throws Exception {
+        byte[] iv = new byte[12];
+        new SecureRandom().nextBytes(iv);
+        Cipher cipher = receiptCipher(Cipher.ENCRYPT_MODE, key, digest, iv);
+        byte[] encrypted = cipher.doFinal(photo);
+        byte[] frame = Arrays.copyOf(iv, iv.length + encrypted.length);
+        System.arraycopy(encrypted, 0, frame, iv.length, encrypted.length);
+        return frame;
+    }
+
+    static byte[] openReceipt(LedgerStore.Trip key, String digest, byte[] frame) throws Exception {
+        if (frame.length < 28 || frame.length > ReceiptImage.MAX_BYTES + 28)
+            throw new IllegalArgumentException("小票同步帧大小无效");
+        Cipher cipher = receiptCipher(Cipher.DECRYPT_MODE, key, digest, Arrays.copyOf(frame, 12));
+        return cipher.doFinal(frame, 12, frame.length - 12);
+    }
+
+    private static Cipher receiptCipher(int mode, LedgerStore.Trip key, String digest, byte[] iv) throws Exception {
+        Cipher cipher = peerCipher(mode, key, iv);
+        cipher.updateAAD(("receipt-v1:" + digest).getBytes(StandardCharsets.US_ASCII));
+        return cipher;
     }
 
     static String receipt(LedgerStore.Trip trip, String session, String sender, String receiver, JSONArray hashes) throws Exception {

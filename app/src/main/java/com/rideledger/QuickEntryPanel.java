@@ -6,11 +6,13 @@ import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ListPopupWindow;
 import android.widget.PopupMenu;
@@ -25,15 +27,19 @@ final class QuickEntryPanel extends LinearLayout {
     private final NoteHistory noteHistory;
     private LedgerStore.Trip trip;
     private final PayerSpinner payer;
+    private final EditText amount, currency, note;
+    private boolean personal;
+    private LedgerActions.CustomSplit custom;
     private boolean committed;
 
     QuickEntryPanel(Activity activity, LedgerStore.Trip trip, SharedPreferences uiPrefs,
                     CurrencyHistory currencyHistory, LedgerActions ledgerActions, LedgerForms forms,
-                    Consumer<LedgerStore.Trip> saved, Consumer<Exception> showError) {
+                    ReceiptUi receipts, Bundle state, Consumer<LedgerStore.Trip> saved, Consumer<Exception> showError) {
         super(activity);
         this.forms = forms;
         noteHistory = new NoteHistory(uiPrefs);
         this.trip = trip;
+        if (state != null && !trip.id.equals(state.getString("trip"))) state = null;
         LinearLayout card = this;
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(14), dp(8), dp(14), dp(10));
@@ -47,10 +53,14 @@ final class QuickEntryPanel extends LinearLayout {
         amountRow.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout amountBox = new LinearLayout(activity);
         amountBox.setOrientation(LinearLayout.VERTICAL);
-        EditText amount = forms.quickField(amountBox, "支付金额", "0.00", true);
+        amount = forms.quickField(amountBox, "支付金额", "0.00", true);
         amount.setTextSize(26);
         LinearLayout currencyBox = forms.addAmountColumns(amountRow, amountBox);
-        EditText currency = forms.currencyField(currencyBox, trip.id, "货币", currencyHistory.quickDefault(trip.id), true);
+        currency = forms.currencyField(currencyBox, trip.id, "货币", currencyHistory.quickDefault(trip.id), true);
+        if (state != null) {
+            amount.setText(state.getString("amount"));
+            currency.setText(state.getString("currency"));
+        }
         card.addView(amountRow, fullMargin());
         card.addView(new View(activity), new LinearLayout.LayoutParams(-1, 0, 1));
 
@@ -73,7 +83,7 @@ final class QuickEntryPanel extends LinearLayout {
         LinearLayout.LayoutParams payerLabelWidth = new LinearLayout.LayoutParams(-2, -2);
         payerLabelWidth.setMarginEnd(dp(8));
         payerRow.addView(payerLabel, payerLabelWidth);
-        String savedPayer = uiPrefs.getString("payer:" + trip.id, trip.localPerson);
+        String savedPayer = state == null ? uiPrefs.getString("payer:" + trip.id, trip.localPerson) : state.getString("payer");
         payer = new PayerSpinner(activity);
         payer.setRoster(trip, savedPayer);
         payerLabel.setLabelFor(payer.getId());
@@ -95,47 +105,49 @@ final class QuickEntryPanel extends LinearLayout {
         modeRow.addView(modeLabel, new LinearLayout.LayoutParams(0, -2, 1));
         String savedMode = uiPrefs.getString("mode:" + trip.id, "shared");
         String sharedLabel = "全员平摊";
-        boolean[] personalMode = {"personal".equals(savedMode)};
-        LedgerActions.CustomSplit[] custom = {null};
+        personal = state == null ? "personal".equals(savedMode) : state.getBoolean("personal");
+        if (state != null && state.getStringArray("shares") != null) {
+            try { custom = LedgerActions.customSplit(trip, state.getString("shareCurrency"), state.getStringArray("shares")); }
+            catch (Exception invalid) { showError.accept(invalid); }
+        }
         TextView modeButton = new TextView(activity);
-        modeButton.setText((personalMode[0] ? "仅付款人" : sharedLabel) + "  ⌄");
         modeButton.setTextSize(14);
         modeButton.setTextColor(Color.rgb(25, 93, 61));
         modeButton.setGravity(Gravity.CENTER);
         modeButton.setMinWidth(dp(122));
         modeButton.setMinHeight(dp(44));
         modeButton.setPadding(dp(10), 0, dp(10), 0);
-        modeButton.setContentDescription("怎么分摊，" + (personalMode[0] ? "仅付款人" : sharedLabel));
         modeButton.setBackground(forms.chip(Color.WHITE, Color.rgb(220, 232, 223), false));
         modeRow.addView(modeButton, new LinearLayout.LayoutParams(-2, dp(44)));
         routing.addView(modeRow, fullMargin());
 
         Runnable updateMode = () -> {
-            String label = custom[0] != null ? "自定义分摊" : personalMode[0] ? "仅付款人" : sharedLabel;
+            String label = custom != null ? "自定义分摊" : personal ? "仅付款人" : sharedLabel;
             modeButton.setText(label + "  ⌄");
             modeButton.setContentDescription("怎么分摊，" + label);
-            amount.setEnabled(custom[0] == null);
+            amount.setEnabled(custom == null);
         };
+        updateMode.run();
         modeButton.setOnClickListener(v -> {
             PopupMenu menu = new PopupMenu(activity, modeButton);
             menu.getMenu().add(0, 0, 0, sharedLabel);
             menu.getMenu().add(0, 1, 1, "仅付款人");
             menu.getMenu().add(0, 2, 2, "自定义分摊");
             menu.getMenu().setGroupCheckable(0, true, true);
-            menu.getMenu().findItem(custom[0] != null ? 2 : personalMode[0] ? 1 : 0).setChecked(true);
+            menu.getMenu().findItem(custom != null ? 2 : personal ? 1 : 0).setChecked(true);
             menu.setOnMenuItemClickListener(item -> {
                 if (item.getItemId() == 2) {
                     try {
                         String code = Money.code(currency.getText().toString());
-                        forms.showCustomSplit(this.trip, code, custom[0], split -> {
-                            custom[0] = split;
+                        forms.showCustomSplit(this.trip, code, custom, split -> {
+                            custom = split;
                             amount.setText(Money.amountText(split.total, split.currency));
                             updateMode.run();
                         });
                     } catch (IllegalArgumentException invalid) { showError.accept(invalid); }
                 } else {
-                    personalMode[0] = item.getItemId() == 1;
-                    custom[0] = null;
+                    personal = item.getItemId() == 1;
+                    custom = null;
                     updateMode.run();
                 }
                 return true;
@@ -143,7 +155,9 @@ final class QuickEntryPanel extends LinearLayout {
             menu.show();
         });
         card.addView(new View(activity), new LinearLayout.LayoutParams(-1, 0, 1));
-        EditText note = forms.quickField(card, "备注（可选）", "例如：房费、饭费", false);
+        note = forms.quickField(card, "备注（可选）", "例如：房费、饭费", false);
+        if (state != null) note.setText(state.getString("note"));
+        ImageButton attach = receipts.besideNote(note, trip, null, false);
         ListPopupWindow noteSuggestions = new ListPopupWindow(activity);
         noteSuggestions.setAnchorView(note);
         noteSuggestions.setModal(false);
@@ -187,25 +201,31 @@ final class QuickEntryPanel extends LinearLayout {
             try {
                 String code = Money.code(currency.getText().toString());
                 String who = current.member(payer.getSelectedItemPosition());
-                boolean personal = personalMode[0];
-                LedgerActions.CustomSplit split = custom[0];
+                boolean personalMode = personal;
+                LedgerActions.CustomSplit split = custom;
                 String rawAmount = amount.getText().toString(), rawNote = note.getText().toString();
+                if (receipts.picking()) throw new IllegalStateException("正在读取小票，请稍候");
                 if (split != null && !code.equals(split.currency))
                     throw new IllegalArgumentException("货币已更改，请重新确认自定义分摊");
+                String draft = receipts.draft(current.id);
                 committed = true;
                 save.setEnabled(false);
+                attach.setEnabled(false);
                 ledgerActions.submit(() -> {
-                    if (split == null) ledgerActions.expense(current, who, code, rawAmount, personal, rawNote);
-                    else ledgerActions.expense(current, who, split, rawNote);
+                    ReceiptImage image = receipts.draftImage(draft);
+                    if (split == null) ledgerActions.expense(current, who, code, rawAmount, personalMode, rawNote, image);
+                    else ledgerActions.expense(current, who, split, rawNote, image);
                 }, () -> {
+                    receipts.clearDraft(current.id, draft);
                     currencyHistory.remember(current.id, code, code);
                     noteHistory.remember(current.id, rawNote);
                     uiPrefs.edit().putString("payer:" + current.id, who)
-                            .putString("mode:" + current.id, personal ? "personal" : "shared").apply();
+                            .putString("mode:" + current.id, personalMode ? "personal" : "shared").apply();
                     if (!activity.isDestroyed()) saved.accept(current);
                 }, error -> {
                     committed = false;
                     save.setEnabled(true);
+                    attach.setEnabled(true);
                     if (!activity.isDestroyed()) showError.accept(error);
                 });
             } catch (Exception e) { showError.accept(e); }
@@ -223,6 +243,25 @@ final class QuickEntryPanel extends LinearLayout {
         save.setStateListAnimator(null);
         save.setElevation(0);
         card.addView(save, fullMargin());
+    }
+
+    Bundle saveDraft() {
+        if (committed) return null;
+        Bundle state = new Bundle();
+        state.putString("trip", trip.id);
+        state.putString("amount", amount.getText().toString());
+        state.putString("currency", currency.getText().toString());
+        state.putString("note", note.getText().toString());
+        state.putString("payer", trip.member(payer.getSelectedItemPosition()));
+        state.putBoolean("personal", personal);
+        if (custom != null) {
+            String[] shares = new String[trip.people()];
+            for (int i = 0; i < shares.length; i++)
+                shares[i] = Money.amountText(custom.share(trip.member(i)), custom.currency);
+            state.putString("shareCurrency", custom.currency);
+            state.putStringArray("shares", shares);
+        }
+        return state;
     }
 
     void updateRoster(LedgerStore.Trip latest) {

@@ -5,6 +5,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -19,9 +20,12 @@ final class LedgerReview {
         final String id, filter, label;
         final String time, type, people, amount, received, split, note;
         final long localRow;
+        final LedgerReceipts.Entry receipt;
+        final boolean receiptPending;
 
         Row(LedgerStore.Event event, String filter, String time, String type, String people,
-            String amount, String received, String split, String note, String exportLine) {
+            String amount, String received, String split, String note, String exportLine,
+            LedgerReceipts.Entry receipt, boolean receiptPending) {
             this.event = event;
             id = event.id;
             this.filter = filter;
@@ -32,6 +36,8 @@ final class LedgerReview {
             this.received = received;
             this.split = split;
             this.note = note;
+            this.receipt = receipt;
+            this.receiptPending = receiptPending;
             localRow = event.localRow;
             label = time + "  " + exportLine + (split.isEmpty() ? "" : "\n分摊：" + split) +
                     (note.isEmpty() ? "" : "\n" + note);
@@ -54,8 +60,13 @@ final class LedgerReview {
     final boolean hasSpending, incomplete;
     final List<String> balances;
     final List<Row> records;
+    final boolean hasReceipts;
 
     LedgerReview(LedgerStore.Trip trip, LedgerStore.Summary summary) {
+        this(trip, summary, Collections.emptyList());
+    }
+
+    LedgerReview(LedgerStore.Trip trip, LedgerStore.Summary summary, List<LedgerReceipts.Entry> receipts) {
         hasSpending = !summary.spent.isEmpty();
         spending = hasSpending ? formatBalances(summary.spent) : "暂无支出";
         settlement = teamDebts(trip, summary.teamNet);
@@ -69,15 +80,23 @@ final class LedgerReview {
         }
         balances = Collections.unmodifiableList(balanceRows);
         List<Row> recordRows = new ArrayList<>();
+        Map<String, LedgerReceipts.Entry> byExpense = new HashMap<>();
+        for (LedgerReceipts.Entry receipt : receipts)
+            if (!receipt.digest.isEmpty()) byExpense.put(receipt.eventId, receipt);
+        boolean includesReceipts = false;
         SimpleDateFormat clock = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA);
         for (LedgerStore.Event event : summary.visible) {
             boolean shared = "expense".equals(event.kind) && !"personal".equals(event.data.optString("mode"));
             String filter = event.kind;
             if (shared) filter = "shared";
             if ("opening".equals(filter) || "topup".equals(filter)) filter = CASH_FILTER;
-            recordRows.add(describe(trip, event, filter, clock));
+            LedgerReceipts.Entry receipt = byExpense.get(event.id);
+            boolean pending = receipt != null && (!receipt.available || receipt.confirmed < trip.people() - 1);
+            recordRows.add(describe(trip, event, filter, clock, receipt, pending));
+            includesReceipts |= receipt != null;
         }
         records = Collections.unmodifiableList(recordRows);
+        hasReceipts = includesReceipts;
     }
 
     private static String formatBalances(Map<String, Long> balances) {
@@ -123,10 +142,11 @@ final class LedgerReview {
     static Row withFields(LedgerStore.Trip trip, Row source, JSONObject fields) {
         LedgerStore.Event event = source.event;
         return describe(trip, new LedgerStore.Event(event.id, event.tripId, event.kind, event.at, fields, event.localRow),
-                source.filter, new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA));
+                source.filter, new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA), source.receipt, source.receiptPending);
     }
 
-    private static Row describe(LedgerStore.Trip trip, LedgerStore.Event event, String filter, SimpleDateFormat clock) {
+    private static Row describe(LedgerStore.Trip trip, LedgerStore.Event event, String filter, SimpleDateFormat clock,
+                                LedgerReceipts.Entry receipt, boolean receiptPending) {
         JSONObject d = event.data;
         String time = clock.format(new Date(event.at));
         String note = d.optString("note", "");
@@ -181,7 +201,7 @@ final class LedgerReview {
             type = export = "记录有误";
             people = amount = received = split = "";
         }
-        return new Row(event, filter, time, type, people, amount, received, split, note, export);
+        return new Row(event, filter, time, type, people, amount, received, split, note, export, receipt, receiptPending);
     }
 
 }

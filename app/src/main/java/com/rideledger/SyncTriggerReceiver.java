@@ -1,7 +1,6 @@
 package com.rideledger;
 
 import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothDevice;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -20,8 +19,6 @@ final class SyncTriggerReceiver extends BroadcastReceiver {
         filter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
         filter.addAction(HOTSPOT_STATE);
         filter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
-        filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
-        filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
         try {
             SyncTriggerReceiver receiver = new SyncTriggerReceiver();
             if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
@@ -35,6 +32,14 @@ final class SyncTriggerReceiver extends BroadcastReceiver {
     @Override public void onReceive(Context context, Intent intent) {
         String action = intent.getAction();
         if (HOTSPOT_STATE.equals(action)) hotspot = intent.getIntExtra(WifiManager.EXTRA_WIFI_STATE, -1) == 13;
-        if (!isInitialStickyBroadcast()) SyncBackground.radioChanged(context);
+        if (BluetoothAdapter.ACTION_STATE_CHANGED.equals(action) &&
+                intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) == BluetoothAdapter.STATE_OFF)
+            SyncBleWake.radioOff();
+        if (BluetoothAdapter.ACTION_STATE_CHANGED.equals(action) &&
+                intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) == BluetoothAdapter.STATE_ON &&
+                !SyncBackground.isForeground()) SyncBleWake.start(context);
+        if (!isInitialStickyBroadcast() && (!BluetoothAdapter.ACTION_STATE_CHANGED.equals(action) ||
+                intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR) == BluetoothAdapter.STATE_ON))
+            SyncBackground.radioChanged(context);
     }
 }

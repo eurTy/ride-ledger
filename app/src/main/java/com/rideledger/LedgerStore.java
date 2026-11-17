@@ -119,6 +119,7 @@ final class LedgerStore extends SQLiteOpenHelper {
     private static final String TRIP_COLUMNS = "id,name,person_a,person_b,secret,local_person,team,join_name";
     private static LedgerStore applicationStore;
     private final Context context;
+    final LedgerReceipts receipts = new LedgerReceipts(this);
 
     static synchronized LedgerStore application(Context context) {
         if (applicationStore == null) applicationStore = new LedgerStore(context.getApplicationContext());
@@ -126,7 +127,7 @@ final class LedgerStore extends SQLiteOpenHelper {
     }
 
     LedgerStore(Context context) {
-        super(context, "ride_ledger.db", null, 8);
+        super(context, "ride_ledger.db", null, 9);
         this.context = context;
     }
 
@@ -138,6 +139,7 @@ final class LedgerStore extends SQLiteOpenHelper {
         createEventIndexes(db);
         createJournalMetadata(db);
         createSeats(db);
+        LedgerReceipts.createTables(db);
     }
 
     @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
@@ -202,6 +204,7 @@ final class LedgerStore extends SQLiteOpenHelper {
             }
             createJournalMetadata(db);
         }
+        if (oldVersion < 9) LedgerReceipts.createTables(db);
     }
 
     private void createEvents(SQLiteDatabase db) {
@@ -727,6 +730,7 @@ final class LedgerStore extends SQLiteOpenHelper {
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
+            LedgerReceipts.deleteForTrip(db, id);
             db.delete("events", "trip_id=?", new String[]{id});
             db.delete("journal_cursors", "trip_id=?", new String[]{id});
             db.delete("journal_epochs", "trip_id=?", new String[]{id});
@@ -759,7 +763,30 @@ final class LedgerStore extends SQLiteOpenHelper {
     synchronized Event add(String tripId, String kind, JSONObject data) {
         Trip trip = getTrip(tripId);
         if (trip == null) throw new IllegalArgumentException("旅行不存在");
+        if ("delete".equals(kind)) {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                Event event = appendLocal(db, trip, kind, data);
+                db.setTransactionSuccessful();
+                return event;
+            } finally { db.endTransaction(); }
+        }
         return appendLocal(getWritableDatabase(), trip, kind, data);
+    }
+
+    synchronized Event addExpense(String tripId, JSONObject data, ReceiptImage receipt) {
+        if (receipt == null) return add(tripId, "expense", data);
+        Trip trip = getTrip(tripId);
+        if (trip == null) throw new IllegalArgumentException("旅行不存在");
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            Event event = appendLocal(db, trip, "expense", data);
+            receipts.change(db, tripId, event.id, receipt);
+            db.setTransactionSuccessful();
+            return event;
+        } finally { db.endTransaction(); }
     }
 
     private Event appendLocal(SQLiteDatabase db, Trip trip, String kind, JSONObject data) {
@@ -838,6 +865,8 @@ final class LedgerStore extends SQLiteOpenHelper {
         }
         boolean inserted = db.insertWithOnConflict("events", null, values, SQLiteDatabase.CONFLICT_IGNORE) != -1;
         if (!inserted && mode == WriteMode.STRICT) throw new JSONException("流水批次未完整保存");
+        if (inserted && "delete".equals(event.kind))
+            LedgerReceipts.deleteForExpense(db, trip.id, event.data.optString("target"));
         return inserted;
     }
 
@@ -960,11 +989,17 @@ final class LedgerStore extends SQLiteOpenHelper {
     static final class Snapshot {
         final Trip trip;
         final List<Event> events;
+        final List<LedgerReceipts.Entry> receipts;
         final SyncPoint syncPoint;
 
         Snapshot(Trip trip, List<Event> events) {
+            this(trip, events, Collections.emptyList());
+        }
+
+        Snapshot(Trip trip, List<Event> events, List<LedgerReceipts.Entry> receipts) {
             this.trip = trip;
             this.events = Collections.unmodifiableList(events);
+            this.receipts = Collections.unmodifiableList(receipts);
             long row = 0;
             String id = "";
             for (Event event : events) if (event.localRow > row) { row = event.localRow; id = event.id; }
@@ -975,13 +1010,23 @@ final class LedgerStore extends SQLiteOpenHelper {
     }
 
     Snapshot snapshot(String tripId) {
+        return snapshot(tripId, false);
+    }
+
+    Snapshot snapshotWithReceipts(String tripId) {
+        return snapshot(tripId, true);
+    }
+
+    private Snapshot snapshot(String tripId, boolean includeReceipts) {
         Trip trip;
         List<StoredEvent> rows;
+        List<LedgerReceipts.Entry> attachments;
         synchronized (this) {
             trip = getTrip(tripId);
             rows = readEvents(tripId, false);
+            attachments = includeReceipts ? receipts.list(tripId) : Collections.emptyList();
         }
-        return new Snapshot(trip, decodeEvents(tripId, rows));
+        return new Snapshot(trip, decodeEvents(tripId, rows), attachments);
     }
 
     Summary summary(String tripId) {

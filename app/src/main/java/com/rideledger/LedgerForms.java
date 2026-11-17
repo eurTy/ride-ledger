@@ -35,6 +35,7 @@ final class LedgerForms {
     private final Activity activity;
     private final LedgerActions ledgerActions;
     private final CurrencyHistory currencyHistory;
+    private final ReceiptUi receipts;
     private final Executor readExecutor;
     private final Consumer<LedgerStore.Trip> saved;
     private final Consumer<Exception> showError;
@@ -42,11 +43,12 @@ final class LedgerForms {
     private Dialog activeForm;
     private PopupWindow historyPopup;
 
-    LedgerForms(Activity activity, LedgerActions ledgerActions, CurrencyHistory currencyHistory,
+    LedgerForms(Activity activity, LedgerActions ledgerActions, CurrencyHistory currencyHistory, ReceiptUi receipts,
                 Executor readExecutor, Consumer<LedgerStore.Trip> saved, Consumer<Exception> showError) {
         this.activity = activity;
         this.ledgerActions = ledgerActions;
         this.currencyHistory = currencyHistory;
+        this.receipts = receipts;
         this.readExecutor = readExecutor;
         this.saved = saved;
         this.showError = showError;
@@ -202,7 +204,12 @@ final class LedgerForms {
         }
         TextView total = text(shares, "", 15, 0xff154b3c);
         EditText note = quickField(form, "备注（可选）", "", false);
+        note.setSingleLine(false);
+        note.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        note.setMinLines(1);
+        note.setMaxLines(5);
         note.setText(data.optString("note"));
+        receipts.besideNote(note, trip, record.id, record.receipt != null);
         FormInput.next(amount, currency);
         FormInput.next(inputs[inputs.length - 1], note);
         FormInput.done(note);

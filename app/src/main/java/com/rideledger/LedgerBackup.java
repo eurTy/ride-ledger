@@ -1,12 +1,16 @@
 package com.rideledger;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedOutputStream;
+import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Locale;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /** Portable archive of one ledger snapshot, independent of device enrollment. */
 final class LedgerBackup {
@@ -15,7 +19,37 @@ final class LedgerBackup {
     static boolean isBackupName(String displayName) {
         if (displayName == null) return false;
         String name = displayName.toLowerCase(Locale.ROOT);
-        return name.endsWith(".rlbackup") || name.endsWith(".rlbackup.txt");
+        return name.endsWith(".rlbackup") || name.endsWith(".rlbackup.txt") || isArchiveName(name);
+    }
+
+    static boolean isArchiveName(String displayName) {
+        return displayName != null && displayName.toLowerCase(Locale.ROOT).endsWith(".rlbackup.zip");
+    }
+
+    static void writeArchive(OutputStream destination, LedgerStore.Snapshot snapshot, LedgerReceipts receipts) throws Exception {
+        try (ZipOutputStream zip = new ZipOutputStream(new BufferedOutputStream(destination))) {
+            zip.putNextEntry(new ZipEntry("ledger.jsonl"));
+            write(zip, snapshot);
+            zip.closeEntry();
+            JSONArray entries = new JSONArray();
+            for (LedgerReceipts.Entry entry : snapshot.receipts) {
+                JSONObject item = entry.json();
+                if (entry.available) {
+                    String path = "receipts/" + entry.eventId + ".jpg";
+                    byte[] photo = receipts.bytes(snapshot.trip.id, entry, false);
+                    if (photo == null) throw new IOException("备份期间小票有变动");
+                    zip.putNextEntry(new ZipEntry(path));
+                    zip.write(photo);
+                    zip.closeEntry();
+                    item.put("path", path);
+                }
+                entries.put(item);
+            }
+            zip.putNextEntry(new ZipEntry("receipts.json"));
+            zip.write(line(new JSONObject().put("format", "ride-ledger-backup").put("version", 2)
+                    .put("tripId", snapshot.trip.id).put("receipts", entries)));
+            zip.closeEntry();
+        }
     }
 
     static void write(OutputStream destination, LedgerStore.Snapshot snapshot) throws Exception {

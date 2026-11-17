@@ -25,6 +25,7 @@ import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
@@ -40,6 +41,8 @@ final class ReviewPanel extends ListView {
         void filter(String key);
         void delete(List<String> ids);
         void edit(LedgerReview.Row row);
+        void thumbnail(LedgerReview.Row row, ImageView view);
+        void openReceipt(LedgerReview.Row row);
         void openAll();
         void reconnect();
     }
@@ -370,7 +373,9 @@ final class ReviewPanel extends ListView {
     }
 
     private final class RecordCard extends LinearLayout {
-        final TextView type, time, details, arrow;
+        final TextView type, time, details, arrow, note, receiptStatus;
+        final LinearLayout receipt;
+        final ImageView thumbnail;
 
         RecordCard() {
             super(ReviewPanel.this.getContext());
@@ -401,13 +406,42 @@ final class ReviewPanel extends ListView {
             LinearLayout.LayoutParams arrowSize = new LinearLayout.LayoutParams(-2, -2);
             arrowSize.setMarginStart(dp(8));
             meta.addView(arrow, arrowSize);
+            LinearLayout body = new LinearLayout(getContext());
+            body.setGravity(Gravity.CENTER_VERTICAL);
+            addView(body, new LinearLayout.LayoutParams(-1, -2));
+            LinearLayout copy = column();
+            body.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
             details = new TextView(getContext());
             details.setTextSize(15);
             details.setLineSpacing(dp(2), 1f);
-            addView(details, new LinearLayout.LayoutParams(-1, -2));
+            copy.addView(details, new LinearLayout.LayoutParams(-1, -2));
+            note = new TextView(getContext());
+            note.setTextSize(13);
+            note.setTextColor(Color.BLACK);
+            note.setMaxLines(2);
+            note.setEllipsize(TextUtils.TruncateAt.END);
+            copy.addView(note, new LinearLayout.LayoutParams(-1, -2));
+            receipt = column();
+            receipt.setGravity(Gravity.CENTER);
+            receipt.setMinimumWidth(dp(48));
+            receipt.setMinimumHeight(dp(48));
+            LinearLayout.LayoutParams receiptSize = new LinearLayout.LayoutParams(-2, -2);
+            receiptSize.setMarginStart(dp(10));
+            body.addView(receipt, receiptSize);
+            thumbnail = new ImageView(getContext());
+            thumbnail.setBackground(surface(0xffdce9df, 0, 7));
+            thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            thumbnail.setClipToOutline(true);
+            receipt.addView(thumbnail, new LinearLayout.LayoutParams(dp(36), dp(36)));
+            receiptStatus = new TextView(getContext());
+            receiptStatus.setText("图片待同步");
+            receiptStatus.setTextSize(10);
+            receiptStatus.setTextColor(0xff586b61);
+            receiptStatus.setGravity(Gravity.CENTER);
+            receipt.addView(receiptStatus, new LinearLayout.LayoutParams(-2, -2));
             setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
             meta.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-            details.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+            copy.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         }
 
         @Override public boolean onTouchEvent(MotionEvent event) {
@@ -427,6 +461,19 @@ final class ReviewPanel extends ListView {
         CharSequence body = recordText(record);
         card.details.setText(body);
         card.details.setVisibility(body.length() == 0 ? GONE : VISIBLE);
+        card.note.setText(record.note);
+        card.note.setVisibility(record.note.isEmpty() ? GONE : VISIBLE);
+        card.receipt.setVisibility(record.receipt == null ? GONE : VISIBLE);
+        card.thumbnail.setTag(null);
+        boolean canViewReceipt = editing && record.receipt != null;
+        card.receipt.setOnClickListener(canViewReceipt ? view -> actions.openReceipt(record) : null);
+        card.receipt.setClickable(canViewReceipt);
+        card.receipt.setFocusable(canViewReceipt);
+        if (record.receipt != null) {
+            card.receiptStatus.setVisibility(record.receiptPending ? VISIBLE : GONE);
+            card.receipt.setContentDescription(record.receipt.available ? "查看小票" : "小票图片待同步");
+            actions.thumbnail(record, card.thumbnail);
+        }
         card.setTag(record);
         boolean editable = editing && LedgerRules.editable(record.event.kind);
         card.arrow.setVisibility(editable ? VISIBLE : GONE);
@@ -455,10 +502,6 @@ final class ReviewPanel extends ListView {
             if (line.length() > 0) line.append('\n');
             append(line, "分摊  ", 12, 0xff586b61, true);
             append(line, record.split, 13, 0xff43594e, false);
-        }
-        if (!record.note.isEmpty()) {
-            if (line.length() > 0) line.append('\n');
-            append(line, record.note, 13, Color.BLACK, false);
         }
         if (record.event.conflicted()) {
             if (line.length() > 0) line.append('\n');

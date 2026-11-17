@@ -1,8 +1,10 @@
 package com.rideledger;
 
+import android.bluetooth.le.ScanResult;
 import android.content.Context;
 
 import java.net.InetAddress;
+import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 
 /** Builds nearby transports and normalizes radio callbacks for the coordinator. */
@@ -56,9 +58,9 @@ final class PeerRadios {
         return PeerRoutePolicy.Channel.WIFI;
     }
 
-    void start(ScheduledExecutorService timer, boolean background) {
+    void start(ScheduledExecutorService timer, boolean background, boolean windowedDiscovery) {
         lan.start(background);
-        if (teamBluetooth != null) teamBluetooth.start(timer, background);
+        if (teamBluetooth != null) teamBluetooth.start(timer, background, windowedDiscovery);
         else legacyBluetooth.start();
     }
 
@@ -74,7 +76,10 @@ final class PeerRadios {
         if (teamBluetooth != null) teamBluetooth.rediscover();
     }
     void refreshLegacyBluetooth() { legacyBluetooth.refresh(); }
-    void refreshTeamBluetooth() { if (teamBluetooth != null) teamBluetooth.refresh(); }
+    void refreshTeamBluetooth() { if (teamBluetooth != null) teamBluetooth.permissionsChanged(); }
+    boolean discoveredBluetooth(List<ScanResult> results) {
+        return teamBluetooth != null && teamBluetooth.discovered(results);
+    }
     boolean legacyBluetoothEnabled() { return legacyBluetooth.enabled(); }
     void rememberBluetooth(String address, String peer) {
         if (legacyBluetooth != null) legacyBluetooth.rememberAuthenticated(address, peer);

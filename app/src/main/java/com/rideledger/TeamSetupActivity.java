@@ -125,7 +125,7 @@ public final class TeamSetupActivity extends Activity {
         started = false;
         main.removeCallbacks(tick);
         transport.stop();
-        SyncBackground.foregroundLeft();
+        SyncBackground.foregroundLeft(this);
         super.onStop();
     }
 
