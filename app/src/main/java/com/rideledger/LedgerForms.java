@@ -105,6 +105,7 @@ final class LedgerForms {
 
     EditText compactAmount(LinearLayout form, String label, String hint, int captionSize) {
         TextView caption = text(form, label, captionSize, style.muted);
+        if (captionSize == LedgerStyle.CAPTION) caption.setIncludeFontPadding(false);
         caption.setPadding(0, dp(3), 0, 0);
         EditText input = field(caption, hint, true);
         form.addView(input, fullMargin());
@@ -369,7 +370,7 @@ final class LedgerForms {
     }
 
     private interface EditInput { LedgerActions.Write capture() throws Exception; }
-    private interface SheetAction { void perform(Dialog dialog, Button confirm, Button cancel, TextView error); }
+    interface SheetAction { void perform(Dialog dialog, Button confirm, Button cancel, TextView error); }
 
     private void showRecordForm(LedgerStore.Trip trip, LedgerReview.Row record, String title, View form, EditInput input) {
         String subtitle = record == null ? null : record.type + "  ·  " + record.time;
@@ -378,7 +379,7 @@ final class LedgerForms {
                         failure -> editError(error, failure)));
     }
 
-    private void showSheet(String title, String subtitle, View form, String confirmLabel, SheetAction action) {
+    Dialog showSheet(String title, String subtitle, View form, String confirmLabel, SheetAction action) {
         dismissCurrencyMenu();
         Dialog dialog = new Dialog(activity);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -442,6 +443,7 @@ final class LedgerForms {
         dialog.show();
         window.setLayout(-1, -2);
         form.requestFocus();
+        return dialog;
     }
 
     private void submitForm(LedgerStore.Trip trip, Dialog dialog, View confirm, View cancel,
@@ -512,7 +514,13 @@ final class LedgerForms {
 
     NoteInput expenseNote(LinearLayout form, String tripId, String value, boolean multipleLines) {
         TextView caption = style.text("备注（可选）", multipleLines ? LedgerStyle.LABEL : LedgerStyle.CAPTION, style.muted);
+        if (!multipleLines) caption.setIncludeFontPadding(false);
         EditText field = field(caption, "", false);
+        android.content.res.Configuration configuration = activity.getResources().getConfiguration();
+        if (!multipleLines && configuration.screenWidthDp <= 320 && configuration.fontScale >= 1.2f) {
+            caption.setVisibility(View.GONE);
+            field.setHint(caption.getText());
+        }
         if (multipleLines) {
             field.setSingleLine(false);
             field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
@@ -585,6 +593,7 @@ final class LedgerForms {
     private EditText currencyField(LinearLayout box, String tripId, String label, String initial,
                                    boolean quick, boolean rememberTyping) {
         TextView caption = text(box, label, quick ? LedgerStyle.CAPTION : LedgerStyle.LABEL, style.muted);
+        if (quick) caption.setIncludeFontPadding(false);
         caption.setPadding(0, dp(3), 0, 0);
         LinearLayout row = new LinearLayout(activity);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -597,19 +606,27 @@ final class LedgerForms {
         currency.setFilters(new InputFilter[]{new InputFilter.AllCaps(), new InputFilter.LengthFilter(3)});
         style.input(currency);
         currency.setTextSize(quick ? 16 : 18);
+        if (quick) {
+            row.setBackground(style.rounded(style.surface, 0, LedgerStyle.CONTROL_RADIUS));
+            currency.setTextColor(style.title);
+            currency.setTypeface(LedgerStyle.MEDIUM);
+            currency.setPaddingRelative(dp(8), currency.getPaddingTop(), 0, currency.getPaddingBottom());
+            style.inputUnderline(currency, Color.TRANSPARENT);
+        }
         currency.setSelectAllOnFocus(true);
         currency.setText(initial);
         row.addView(currency, new LinearLayout.LayoutParams(0, -2, 1));
 
-        TextView historyButton = style.text("▾", 16, style.primary);
+        TextView historyButton = style.text(quick ? "⌄" : "▾", 16, quick ? style.muted : style.primary);
         historyButton.setIncludeFontPadding(false);
         historyButton.setGravity(Gravity.CENTER);
         historyButton.setContentDescription("选择曾用" + label);
         historyButton.setFocusable(true);
-        historyButton.setBackground(style.ripple(style.rounded(style.selected, 0, LedgerStyle.CONTROL_RADIUS), LedgerStyle.CONTROL_RADIUS));
+        historyButton.setBackground(style.ripple(quick ? null : style.rounded(style.selected, 0, LedgerStyle.CONTROL_RADIUS),
+                LedgerStyle.CONTROL_RADIUS));
         int control = dp(LedgerStyle.COMPACT_HEIGHT);
         LinearLayout.LayoutParams historySize = new LinearLayout.LayoutParams(control, control);
-        historySize.setMarginStart(dp(LedgerStyle.ITEM_GAP));
+        if (!quick) historySize.setMarginStart(dp(LedgerStyle.ITEM_GAP));
         row.addView(historyButton, historySize);
         box.addView(row, fullMargin());
 

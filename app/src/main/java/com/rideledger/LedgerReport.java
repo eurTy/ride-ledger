@@ -8,6 +8,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
@@ -16,16 +17,36 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.SortedMap;
 import java.util.TreeMap;
 
 /** Aggregates a ledger snapshot for statistics and formats the full travel log export. */
 final class LedgerReport {
     static final class Entry {
         final String label, value;
+        final List<AmountColumn> amountColumns;
+        final String amountNote;
 
         Entry(String label, String value) {
+            this(label, value, "");
+        }
+
+        Entry(String label, String value, String amountNote, AmountColumn... amountColumns) {
             this.label = label;
             this.value = value;
+            this.amountNote = amountNote;
+            this.amountColumns = Collections.unmodifiableList(new ArrayList<>(Arrays.asList(amountColumns)));
+        }
+    }
+
+    /** Display data kept separate from the original text export. */
+    static final class AmountColumn {
+        final String label;
+        final SortedMap<String, BigInteger> values;
+
+        AmountColumn(String label, Map<String, BigInteger> values) {
+            this.label = label;
+            this.values = Collections.unmodifiableSortedMap(new TreeMap<>(values));
         }
     }
 
@@ -120,7 +141,8 @@ final class LedgerReport {
 
         List<Entry> totals = new ArrayList<>();
         totals.add(new Entry("支出笔数", spending.count + " 笔"));
-        spending.values.forEach((code, amount) -> totals.add(new Entry(code, decimal(amount, code))));
+        spending.values.forEach((code, amount) -> totals.add(new Entry(code, decimal(amount, code), "",
+                new AmountColumn("", Collections.singletonMap(code, amount)))));
         sections.add(new Section("支出总计", totals));
 
         List<Entry> byType = new ArrayList<>(), byCategory = new ArrayList<>(), byDay = new ArrayList<>();
@@ -142,7 +164,8 @@ final class LedgerReport {
             String name = trip.nameOf(member);
             memberNames.add(name);
             if (memberPaid != null || memberShares != null) {
-                memberSpending.add(new Entry(name, "已付 " + subtotal(memberPaid) + "\n应承担 " + subtotal(memberShares)));
+                memberSpending.add(new Entry(name, "已付 " + subtotal(memberPaid) + "\n应承担 " + subtotal(memberShares), "",
+                        column("已付", memberPaid), column("分摊", memberShares)));
             }
             if (!summary.incomplete && !cash.isEmpty()) {
                 List<String> amounts = new ArrayList<>();
@@ -155,10 +178,11 @@ final class LedgerReport {
 
         List<Entry> movements = new ArrayList<>();
         movements.add(new Entry("统计口径", "支出总计只计消费，金额按原币种汇总。"));
-        movements.add(new Entry("现金入账", movement(funds)));
-        movements.add(new Entry("还款", movement(repayments)));
+        movements.add(new Entry("现金入账", movement(funds), funds.count + " 笔", column("", funds)));
+        movements.add(new Entry("还款", movement(repayments), repayments.count + " 笔", column("", repayments)));
         movements.add(new Entry("换汇", exchangedOut.count == 0 ? "0 笔" : exchangedOut.count + " 笔\n换出 " +
-                exchangedOut.format() + "\n换入 " + exchangedIn.format()));
+                exchangedOut.format() + "\n换入 " + exchangedIn.format(), exchangedOut.count + " 笔",
+                column("换出", exchangedOut), column("换入", exchangedIn)));
         sections.add(new Section("资金往来", movements));
         sections.add(section("当前现金", balances, summary.incomplete ? "金额超出汇总范围" : "暂无现金记录"));
         sections.add(section("当前结算", settlement(trip, summary, review),
@@ -234,7 +258,11 @@ final class LedgerReport {
     }
 
     private static void addSubtotal(List<Entry> entries, String label, Amounts amounts) {
-        if (amounts != null) entries.add(new Entry(label, amounts.format()));
+        if (amounts != null) entries.add(new Entry(label, amounts.format(), "", column("", amounts)));
+    }
+
+    private static AmountColumn column(String label, Amounts amounts) {
+        return new AmountColumn(label, amounts == null ? Collections.emptyMap() : amounts.values);
     }
 
     private static String subtotal(Amounts amounts) { return amounts == null ? "0" : amounts.format(); }

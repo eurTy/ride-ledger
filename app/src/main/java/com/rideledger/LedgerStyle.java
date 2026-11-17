@@ -146,10 +146,14 @@ final class LedgerStyle {
         input.setHintTextColor(hint);
         input.setTextSize(16);
         input.setMinimumHeight(dp(COMPACT_HEIGHT));
+        inputUnderline(input, fieldLine);
+        input.setPadding(dp(3), dp(6), dp(3), dp(7));
+    }
+
+    void inputUnderline(EditText input, int idleColor) {
         input.setBackgroundTintList(new ColorStateList(
                 new int[][]{{android.R.attr.state_focused}, {-android.R.attr.state_enabled}, {}},
-                new int[]{primary, divider, fieldLine}));
-        input.setPadding(dp(3), dp(6), dp(3), dp(7));
+                new int[]{primary, divider, idleColor}));
     }
 
     LinearLayout topBar(String title, Runnable back) {

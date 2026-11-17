@@ -17,6 +17,7 @@ import android.view.inspector.WindowInspector;
 import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
+import android.widget.Spinner;
 import android.widget.TextView;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -87,13 +88,15 @@ final class PeerUiChecks {
                 });
                 instrumentation.runOnMainSync(() -> {
                     View root = activity.getWindow().getDecorView();
-                    require(text(root, "快速记账") != null && text(root, "全员平摊  ⌄") != null, "group quick entry missing");
+                    require(text(root, "快速记账") != null && paymentControl(root) != null, "group quick entry missing");
                     View save = text(root, "保存这笔支出");
                     View cash = text(root, "现金管理");
                     require(fullyVisible(labeledInput(root, "支付金额")) && fullyVisible(labeledInput(root, "货币")) &&
                             fullyVisible(labeledInput(root, "备注（可选）")) && fullyVisible(save) &&
                             containingScroll(save).getScrollY() == 0, "quick entry requires scrolling on the first screen");
-                    require(cash != null && !cash.getGlobalVisibleRect(new Rect()), "cash actions entered the first screen");
+                    require(fullyVisible((View) save.getParent()) && fullyVisible(cash) && cash.getParent() == save.getParent() &&
+                            fullyVisible(text(root, "现金入账")) && fullyVisible(text(root, "成员还款")) &&
+                            fullyVisible(text(root, "换汇")), "cash actions did not fit in the quick-entry card");
                     requireNext(labeledInput(root, "支付金额"), labeledInput(root, "货币"));
                     requireNext(labeledInput(root, "货币"), labeledInput(root, "备注（可选）"));
                     amount(root).setText("1.01");
@@ -290,32 +293,59 @@ final class PeerUiChecks {
             try {
                 instrumentation.runOnMainSync(() -> {
                     View root = activity.getWindow().getDecorView();
-                    ViewGroup payerRow = (ViewGroup) text(root, "谁付款").getParent();
-                    ((android.widget.Spinner) payerRow.getChildAt(1)).setSelection(1);
-                    require(text(root, "全员平摊  ⌄").performClick(), "split menu did not open");
+                    require(paymentControl(root).performClick(), "payment settings did not open");
                 });
                 instrumentation.waitForIdleSync();
                 instrumentation.runOnMainSync(() -> {
-                    View popup = windowWithText("自定义分摊");
-                    require(popup != null, "custom split entry missing");
-                    View row = text(popup, "自定义分摊");
-                    while (!(row.getParent() instanceof android.widget.ListView)) row = (View) row.getParent();
-                    android.widget.ListView menu = (android.widget.ListView) row.getParent();
-                    int position = menu.getPositionForView(row);
-                    require(menu.performItemClick(row, position, menu.getItemIdAtPosition(position)),
-                            "custom split entry could not be selected");
+                    View dialog = windowWithText("完成");
+                    require(dialog != null, "payment settings are missing");
+                    Spinner payer = paymentPayer(dialog);
+                    require(payer.getCount() == 2, "payer dropdown did not include all members");
+                    payer.setSelection(1);
+                    View equal = description(dialog, "分摊规则，全员平摊");
+                    View personal = description(dialog, "分摊规则，仅付款人");
+                    View custom = description(dialog, "分摊规则，自定义分摊");
+                    require(fullyVisible(equal) && fullyVisible(personal) && fullyVisible(custom) && equal.isSelected()
+                            && !personal.isSelected() && !custom.isSelected(), "direct split choices are missing or inconsistent");
+                    require(personal.performClick() && personal.isSelected() && !equal.isSelected(),
+                            "personal split did not switch directly");
+                    require(custom.performClick(), "custom split fields did not open");
                 });
                 instrumentation.waitForIdleSync();
                 instrumentation.runOnMainSync(() -> {
-                    View dialog = windowWithText("应用分摊");
+                    View dialog = windowWithText("完成");
+                    require(dialog != null && labeledInput(dialog, "甲（我）") != null, "custom split inputs are missing");
+                    text(dialog, "取消").performClick();
+                    View root = activity.getWindow().getDecorView();
+                    require(paymentControl(root).getContentDescription().toString().contains("甲（我），全员平摊") &&
+                            amount(root).isEnabled() && amount(root).length() == 0,
+                            "cancelling payment settings changed the payer, rule or amount");
+                    paymentControl(root).performClick();
+                });
+                instrumentation.waitForIdleSync();
+                instrumentation.runOnMainSync(() -> {
+                    View dialog = windowWithText("完成");
                     require(text(dialog, "实际付款人") == null, "payer was repeated inside the split dialog");
+                    paymentPayer(dialog).setSelection(1);
+                    description(dialog, "分摊规则，自定义分摊").performClick();
                     labeledInput(dialog, "甲（我）").setText("36");
                     labeledInput(dialog, "乙").setText("23");
                     require(text(dialog, "合计 59.00 CNY") != null, "incorrect live total");
-                    text(dialog, "应用分摊").performClick();
+                    text(dialog, "完成").performClick();
                     View root = activity.getWindow().getDecorView();
                     require("59.00".contentEquals(amount(root).getText()) && !amount(root).isEnabled(),
                             "split did not populate the quick-entry amount");
+                    require(paymentControl(root).getContentDescription().toString().contains("乙，自定义分摊"),
+                            "payment summary did not update the payer and rule");
+                    text(root, "复盘").performClick();
+                });
+                instrumentation.waitForIdleSync();
+                instrumentation.runOnMainSync(() -> {
+                    text(activity.getWindow().getDecorView(), "记账").performClick();
+                    View root = activity.getWindow().getDecorView();
+                    require("59.00".contentEquals(amount(root).getText()) && !amount(root).isEnabled() &&
+                            paymentControl(root).getContentDescription().toString().contains("乙，自定义分摊"),
+                            "custom split draft was lost after switching tabs");
                     text(root, "保存这笔支出").performClick();
                     text(activity.getWindow().getDecorView(), "复盘").performClick();
                 });
@@ -732,15 +762,32 @@ final class PeerUiChecks {
                     View root = activity.getWindow().getDecorView();
                     amount(root).setText("36.23");
                     labeledInput(root, "备注（可选）").setText("路上的午饭");
-                    payerSpinner(root).setSelection(1);
+                    paymentControl(root).performClick();
+                });
+                instrumentation.waitForIdleSync();
+                instrumentation.runOnMainSync(() -> {
+                    View dialog = windowWithText("完成");
+                    paymentPayer(dialog).setSelection(1);
                 });
                 teamExchange(transport(activity).nearby, companion, peer, other);
-                waitForText(instrumentation, activity, teammate);
+                long rosterDeadline = SystemClock.elapsedRealtime() + 5000;
+                java.util.concurrent.atomic.AtomicBoolean rosterUpdated = new java.util.concurrent.atomic.AtomicBoolean();
+                do {
+                    instrumentation.runOnMainSync(() -> {
+                        View dialog = windowWithText("完成");
+                        Spinner payer = paymentPayer(dialog);
+                        rosterUpdated.set(payer.getSelectedItemPosition() == 1 &&
+                                teammate.contentEquals((String) payer.getSelectedItem()));
+                    });
+                    if (!rosterUpdated.get()) SystemClock.sleep(40);
+                } while (!rosterUpdated.get() && SystemClock.elapsedRealtime() < rosterDeadline);
                 instrumentation.runOnMainSync(() -> {
+                    require(rosterUpdated.get(), "roster refresh reset the open payer dropdown or left its old name");
+                    text(windowWithText("完成"), "完成").performClick();
                     View root = activity.getWindow().getDecorView();
                     require("36.23".contentEquals(amount(root).getText()) &&
                             "路上的午饭".contentEquals(labeledInput(root, "备注（可选）").getText()) &&
-                            payerSpinner(root).getSelectedItemPosition() == 1,
+                            paymentControl(root).getContentDescription().toString().contains(teammate + "，全员平摊"),
                             "roster refresh reset the draft or selected member");
                     text(root, "复盘").performClick();
                 });
@@ -863,8 +910,21 @@ final class PeerUiChecks {
         throw new AssertionError("connection badge did not show " + expected);
     }
 
-    private static android.widget.Spinner payerSpinner(View root) {
-        return (android.widget.Spinner) ((ViewGroup) text(root, "谁付款").getParent()).getChildAt(1);
+    private static Spinner paymentPayer(View root) {
+        View payer = description(root, "付款人");
+        TextView label = text(root, "谁付款");
+        require(payer instanceof Spinner && label != null && countText(root, "谁付款") == 1 &&
+                        payer.getParent() == label.getParent() && ((ViewGroup) payer.getParent()).getChildCount() == 2,
+                "payer settings did not use one compact dropdown row");
+        return (Spinner) payer;
+    }
+
+    private static View paymentControl(View root) {
+        View control = text(root, "付款与分摊");
+        while (control != null && !control.isClickable() && control.getParent() instanceof View)
+            control = (View) control.getParent();
+        require(control != null && control.isClickable(), "missing payment settings control");
+        return control;
     }
 
     private static void checkRecordExpansion(Instrumentation instrumentation, Activity activity,
@@ -1077,11 +1137,16 @@ final class PeerUiChecks {
     }
 
     private static EditText labeledInput(View root, String label) {
-        TextView caption = text(root, label);
-        require(caption != null, "missing input label " + label);
-        EditText field = root.findViewById(caption.getLabelFor());
-        require(field != null, "missing input for " + label);
-        return field;
+        java.util.ArrayList<View> labels = new java.util.ArrayList<>();
+        root.findViewsWithText(labels, label, View.FIND_VIEWS_WITH_TEXT);
+        for (View caption : labels) {
+            if (caption instanceof TextView && label.contentEquals(((TextView) caption).getText()) &&
+                    caption.getLabelFor() != View.NO_ID) {
+                View field = root.findViewById(caption.getLabelFor());
+                if (field instanceof EditText) return (EditText) field;
+            }
+        }
+        throw new AssertionError("missing labeled input " + label);
     }
 
     private static void requireNext(EditText field, EditText next) {

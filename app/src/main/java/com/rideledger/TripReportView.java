@@ -7,12 +7,22 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.TableLayout;
+import android.widget.TableRow;
 import android.widget.TextView;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 /** Displays only aggregate figures from the confirmed part of a trip's ledger. */
 final class TripReportView {
@@ -96,9 +106,9 @@ final class TripReportView {
         summary.addView(style.heading(totals.title, LedgerStyle.SECTION_TITLE), size);
         for (LedgerReport.Entry entry : totals.entries) {
             if ("支出笔数".equals(entry.label)) {
-                caption(summary, entry.value + "支出 · 按原币种", style.muted);
+                caption(summary, entry.value + "支出", style.muted);
             } else {
-                stat(summary, entry, 22);
+                summary.addView(new AmountTable(entry.amountColumns, 20), new LinearLayout.LayoutParams(FULL, WRAP));
             }
         }
     }
@@ -116,8 +126,174 @@ final class TripReportView {
         card.addView(style.heading(section.title, LedgerStyle.SECTION_TITLE));
         for (LedgerReport.Entry entry : rows) {
             divider(card);
-            stat(card, entry, LedgerStyle.BODY);
+            if (entry.amountColumns.isEmpty()) stat(card, entry, LedgerStyle.BODY);
+            else amountGroup(card, entry);
         }
+    }
+
+    private void amountGroup(LinearLayout card, LedgerReport.Entry entry) {
+        LinearLayout heading = new LinearLayout(activity);
+        heading.setGravity(Gravity.CENTER_VERTICAL);
+        heading.setPadding(0, style.dp(LedgerStyle.CONTROL_GAP), 0, style.dp(LedgerStyle.ITEM_GAP));
+        heading.addView(style.heading(entry.label, LedgerStyle.LABEL), new LinearLayout.LayoutParams(0, WRAP, 1));
+        if (!entry.amountNote.isEmpty()) {
+            TextView note = style.text(entry.amountNote, LedgerStyle.CAPTION, style.muted);
+            note.setPadding(style.dp(LedgerStyle.CONTROL_GAP), 0, 0, 0);
+            heading.addView(note, new LinearLayout.LayoutParams(WRAP, WRAP));
+        }
+        card.addView(heading, new LinearLayout.LayoutParams(FULL, WRAP));
+        card.addView(new AmountTable(entry.amountColumns, LedgerStyle.LABEL), new LinearLayout.LayoutParams(FULL, WRAP));
+    }
+
+    /** Keeps metric columns aligned, with a per-currency layout when those columns cannot fit. */
+    private final class AmountTable extends LinearLayout {
+        private final List<LedgerReport.AmountColumn> columns;
+        private final SortedSet<String> currencies = new TreeSet<>();
+        private final int valueSize, tableWidth;
+        private final HorizontalScrollView table;
+        private Boolean stacked;
+
+        AmountTable(List<LedgerReport.AmountColumn> columns, int valueSize) {
+            super(TripReportView.this.activity);
+            setOrientation(VERTICAL);
+            this.columns = columns;
+            this.valueSize = valueSize;
+            for (LedgerReport.AmountColumn column : columns) currencies.addAll(column.values.keySet());
+            TableLayout grid = grid();
+            int natural = MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED);
+            grid.measure(natural, natural);
+            tableWidth = grid.getMeasuredWidth();
+            table = overflow(grid);
+        }
+
+        @Override protected void onMeasure(int widthSpec, int heightSpec) {
+            int width = MeasureSpec.getSize(widthSpec) - getPaddingLeft() - getPaddingRight();
+            boolean useStack = columns.size() > 1 && MeasureSpec.getMode(widthSpec) != MeasureSpec.UNSPECIFIED
+                    && tableWidth > width;
+            if (stacked == null || stacked != useStack) {
+                stacked = useStack;
+                removeAllViews();
+                addView(useStack ? stacked() : table, new LinearLayout.LayoutParams(FULL, WRAP));
+            }
+            super.onMeasure(widthSpec, heightSpec);
+        }
+
+        private TableLayout grid() {
+            TableLayout grid = new TableLayout(activity);
+            for (int i = 1; i <= columns.size(); i++) grid.setColumnStretchable(i, true);
+            List<TableRow> rows = new ArrayList<>();
+            if (columns.size() > 1) {
+                List<String> headers = new ArrayList<>();
+                headers.add("币种");
+                for (LedgerReport.AmountColumn column : columns) headers.add(column.label);
+                rows.add(amountRow(headers, true, valueSize));
+            }
+            for (String code : currencies) {
+                List<String> values = new ArrayList<>();
+                values.add(code);
+                for (LedgerReport.AmountColumn column : columns) values.add(amount(column, code));
+                TableRow row = amountRow(values, false, valueSize);
+                describe(row, description(code));
+                rows.add(row);
+            }
+            // Equal metric widths also align separate member tables within the same card.
+            int metricWidth = 0;
+            int natural = MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED);
+            for (TableRow row : rows) {
+                for (int i = 1; i < row.getChildCount(); i++) {
+                    View cell = row.getChildAt(i);
+                    cell.measure(natural, natural);
+                    metricWidth = Math.max(metricWidth, cell.getMeasuredWidth());
+                }
+            }
+            TextView currency = style.text("WWW", LedgerStyle.LABEL, style.muted);
+            int currencyWidth = (int) Math.ceil(currency.getPaint().measureText("WWW"));
+            for (TableRow row : rows) {
+                ((TextView) row.getChildAt(0)).setMinWidth(currencyWidth);
+                for (int i = 1; i < row.getChildCount(); i++) ((TextView) row.getChildAt(i)).setMinWidth(metricWidth);
+                grid.addView(row);
+            }
+            return grid;
+        }
+
+        private LinearLayout stacked() {
+            LinearLayout stack = column();
+            for (String code : currencies) {
+                LinearLayout group = column();
+                TextView currency = style.heading(code, LedgerStyle.LABEL);
+                currency.setTextColor(style.muted);
+                currency.setPadding(0, style.dp(LedgerStyle.ITEM_GAP), 0, style.dp(LedgerStyle.ITEM_GAP));
+                group.addView(currency);
+                TableLayout metrics = new TableLayout(activity);
+                metrics.setColumnStretchable(1, true);
+                for (LedgerReport.AmountColumn column : columns) {
+                    List<String> values = new ArrayList<>();
+                    values.add(column.label);
+                    values.add(amount(column, code));
+                    metrics.addView(amountRow(values, false, valueSize));
+                }
+                group.addView(overflow(metrics), new LinearLayout.LayoutParams(FULL, WRAP));
+                describe(group, description(code));
+                stack.addView(group, new LinearLayout.LayoutParams(FULL, WRAP));
+            }
+            return stack;
+        }
+
+        private String description(String code) {
+            StringBuilder text = new StringBuilder(code);
+            for (LedgerReport.AmountColumn column : columns)
+                text.append("，").append(column.label.isEmpty() ? "金额" : column.label)
+                        .append(' ').append(amount(column, code));
+            return text.toString();
+        }
+    }
+
+    private TableRow amountRow(List<String> values, boolean header, int valueSize) {
+        TableRow row = new TableRow(activity);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        int gap = style.dp(LedgerStyle.ITEM_GAP);
+        row.setPadding(0, gap, 0, gap);
+        for (int i = 0; i < values.size(); i++) {
+            boolean numeric = !header && i > 0;
+            TextView cell = style.text(values.get(i), header ? LedgerStyle.CAPTION : numeric ? valueSize : LedgerStyle.LABEL,
+                    numeric ? style.title : style.muted);
+            cell.setSingleLine(true);
+            cell.setIncludeFontPadding(false);
+            cell.setGravity(i == 0 ? Gravity.START : Gravity.END);
+            if (numeric) {
+                cell.setTypeface(LedgerStyle.MEDIUM);
+                cell.setFontFeatureSettings("tnum");
+            }
+            TableRow.LayoutParams size = new TableRow.LayoutParams(WRAP, WRAP);
+            if (i > 0) size.setMarginStart(style.dp(LedgerStyle.CONTROL_GAP));
+            row.addView(cell, size);
+        }
+        return row;
+    }
+
+    private HorizontalScrollView overflow(TableLayout table) {
+        // Normal figures fill the available width; only exceptionally long integers need scrolling.
+        HorizontalScrollView scroll = new HorizontalScrollView(activity);
+        scroll.setFillViewport(true);
+        scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        scroll.addView(table, new HorizontalScrollView.LayoutParams(WRAP, WRAP));
+        return scroll;
+    }
+
+    private static String amount(LedgerReport.AmountColumn column, String code) {
+        int scale = Money.scale(code);
+        DecimalFormat format = new DecimalFormat("#,##0", DecimalFormatSymbols.getInstance(Locale.US));
+        format.setMinimumFractionDigits(scale);
+        format.setMaximumFractionDigits(scale);
+        return format.format(new BigDecimal(column.values.getOrDefault(code, BigInteger.ZERO), scale));
+    }
+
+    private static void describe(ViewGroup group, String text) {
+        group.setContentDescription(text);
+        group.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        if (Build.VERSION.SDK_INT >= 28) group.setScreenReaderFocusable(true);
+        for (int i = 0; i < group.getChildCount(); i++)
+            group.getChildAt(i).setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
     }
 
     private static LedgerReport.Section section(LedgerReport report, String title) {

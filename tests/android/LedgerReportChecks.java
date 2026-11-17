@@ -6,6 +6,7 @@ import org.json.JSONObject;
 import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStreamWriter;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPairGenerator;
 import java.text.SimpleDateFormat;
@@ -73,6 +74,24 @@ final class LedgerReportChecks {
         equal("1 笔\n换出 50.00 CNY\n换入 103 JPY", entry(report, "资金往来", "换汇"), "exchange legs");
         equal("178.99 CNY、103 JPY", entry(report, "当前现金", "阿青"), "cash arithmetic");
         equal("3.67 CNY", entry(report, "当前结算", "阿林 → 阿青"), "settlement after repayment");
+        LedgerReport.Entry member = reportEntry(report, "成员付款与承担", "阿青");
+        require(member.amountColumns.size() == 2 && "已付".equals(member.amountColumns.get(0).label)
+                        && "分摊".equals(member.amountColumns.get(1).label),
+                "member table columns were missing or reordered");
+        equal("10101", member.amountColumns.get(0).values.get("CNY").toString(), "paid CNY minor units");
+        equal("3367", member.amountColumns.get(1).values.get("CNY").toString(), "shared CNY minor units");
+        equal("0", member.amountColumns.get(0).values.getOrDefault("JPY", BigInteger.ZERO).toString(),
+                "a JPY share was mistaken for a JPY payment");
+        equal("51", member.amountColumns.get(1).values.get("JPY").toString(), "JPY share stays in its currency row");
+        equal("1234", reportEntry(report, "消费分类", "未分类").amountColumns.get(0).values.get("KWD").toString(),
+                "three-decimal currency lost precision");
+        equal("2 笔", reportEntry(report, "资金往来", "现金入账").amountNote, "funds table count");
+        LedgerReport.Entry exchange = reportEntry(report, "资金往来", "换汇");
+        require(exchange.amountColumns.size() == 2 && "换出".equals(exchange.amountColumns.get(0).label)
+                        && "换入".equals(exchange.amountColumns.get(1).label),
+                "exchange table columns were missing or reversed");
+        equal("5000", exchange.amountColumns.get(0).values.get("CNY").toString(), "exchanged-out CNY");
+        equal("103", exchange.amountColumns.get(1).values.get("JPY").toString(), "exchanged-in JPY");
         equal("2 张", entry(report, "小票", "小票张数"), "visible receipt count");
         equal("1 张", entry(report, "小票", "待接收"), "missing image count");
         equal("1 张", entry(report, "小票", "待同步给同伴"), "awaiting confirmation count");
@@ -136,7 +155,14 @@ final class LedgerReportChecks {
     }
 
     private static String entry(LedgerReport report, String title, String label) {
-        for (LedgerReport.Section section : report.sections) if (title.equals(section.title)) return entry(section.entries, label);
+        return reportEntry(report, title, label).value;
+    }
+
+    private static LedgerReport.Entry reportEntry(LedgerReport report, String title, String label) {
+        for (LedgerReport.Section section : report.sections) if (title.equals(section.title)) {
+            for (LedgerReport.Entry entry : section.entries) if (label.equals(entry.label)) return entry;
+            throw new AssertionError("Missing report entry: " + label);
+        }
         throw new AssertionError("Missing report section: " + title);
     }
 
