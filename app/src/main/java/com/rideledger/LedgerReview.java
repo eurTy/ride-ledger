@@ -40,7 +40,7 @@ final class LedgerReview {
             this.receiptPending = receiptPending;
             localRow = event.localRow;
             label = time + "  " + exportLine + (split.isEmpty() ? "" : "\n分摊：" + split) +
-                    (note.isEmpty() ? "" : "\n" + note);
+                    (note.isEmpty() ? "" : "\n" + ExpenseCategory.visibleNote(note));
         }
     }
 
@@ -61,6 +61,7 @@ final class LedgerReview {
     final List<String> balances;
     final List<Row> records;
     final boolean hasReceipts;
+    final int pendingReceipts;
 
     LedgerReview(LedgerStore.Trip trip, LedgerStore.Summary summary) {
         this(trip, summary, Collections.emptyList());
@@ -84,6 +85,7 @@ final class LedgerReview {
         for (LedgerReceipts.Entry receipt : receipts)
             if (!receipt.digest.isEmpty()) byExpense.put(receipt.eventId, receipt);
         boolean includesReceipts = false;
+        int pendingImages = 0;
         SimpleDateFormat clock = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA);
         for (LedgerStore.Event event : summary.visible) {
             boolean shared = "expense".equals(event.kind) && !"personal".equals(event.data.optString("mode"));
@@ -92,11 +94,13 @@ final class LedgerReview {
             if ("opening".equals(filter) || "topup".equals(filter)) filter = CASH_FILTER;
             LedgerReceipts.Entry receipt = byExpense.get(event.id);
             boolean pending = receipt != null && (!receipt.available || receipt.confirmed < trip.people() - 1);
+            if (pending) pendingImages++;
             recordRows.add(describe(trip, event, filter, clock, receipt, pending));
             includesReceipts |= receipt != null;
         }
         records = Collections.unmodifiableList(recordRows);
         hasReceipts = includesReceipts;
+        pendingReceipts = pendingImages;
     }
 
     private static String formatBalances(Map<String, Long> balances) {

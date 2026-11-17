@@ -21,6 +21,7 @@ final class PeerSync {
     interface Listener {
         void changed(int added);
         default void receiptsChanged() { }
+        default void synced(String tripId, String peer, boolean exchanged) { }
     }
     private final LedgerStore store;
     private final Context context;
@@ -196,7 +197,7 @@ final class PeerSync {
     }
     private final Runnable runSoon = () -> { if (running) { main.removeCallbacks(tick); main.post(tick); } };
     private static final class Transfer {
-        boolean stored;
+        boolean stored, receiptsChanged;
         String verifiedRoute;
     }
 
@@ -235,7 +236,7 @@ final class PeerSync {
                             routes.success(endpoint.key, team == null ? -1 : captured);
                         }
                         if (reverse != null) engine.offer(reverse);
-                        completed(ledgerSync ? endpoint : null, endpoint.channel, result, captured, ledgerSync);
+                        completed(ledgerSync ? endpoint : null, endpoint.channel, result, captured, ledgerSync, transfer);
                     });
                 } catch (Exception error) {
                     int added = legacy == null ? 0 : legacy.progress().added;
@@ -291,7 +292,7 @@ final class PeerSync {
                         if (result.receiptError == null) transfer.verifiedRoute = reverse == null ? "" : reverse.key;
                         onMain(generation, () -> {
                             if (reverse != null) engine.offer(reverse);
-                            completed(null, channel, result, captured, ledgerSync);
+                            completed(null, channel, result, captured, ledgerSync, transfer);
                         });
                     }
                 } catch (Exception error) {
@@ -354,6 +355,7 @@ final class PeerSync {
                 });
             }
             @Override public void receiptsChanged(boolean contentChanged) {
+                transfer.receiptsChanged = true;
                 transfer.stored |= contentChanged;
                 onMain(generation, () -> {
                     lastProgress = SystemClock.elapsedRealtime();
@@ -364,11 +366,15 @@ final class PeerSync {
         };
     }
     private void completed(PeerRoutePolicy.Endpoint endpoint, PeerRoutePolicy.Channel channel,
-                           PeerProtocol.Result result, long captured, boolean ledgerSync) {
+                           PeerProtocol.Result result, long captured, boolean ledgerSync, Transfer transfer) {
         if (engine != null) {
             if (result.receiptError != null) SyncLog.write(context, SyncLog.Event.valueOf(channel.name()), result.receiptError);
             if (result.durable && team.team.issuer.equals(result.remoteId)) initialHistory = true;
             if (enrolled) engine.complete(endpoint, channel, result, ledgerSync ? captured : -1);
+            if (!background && enrolled && result.durable && result.receiptError == null) {
+                boolean exchanged = result.sent > 0 || result.added > 0 || transfer.receiptsChanged;
+                listener.synced(team.id, result.remoteId, exchanged);
+            }
             notifyChange(0);
             return;
         }

@@ -9,10 +9,7 @@ import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
-import android.graphics.Color;
-import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
-import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -27,7 +24,6 @@ import android.view.View;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.EditText;
-import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -49,6 +45,7 @@ public final class TeamSetupActivity extends Activity {
     // Transport callbacks refresh membership immediately. Only user-visible deadlines
     // need a timer; an idle invitation page must not read SQLite four times per second.
     private final Runnable tick = this::refresh;
+    private LedgerStyle style;
     private LedgerStore store;
     private TeamCreator creator;
     private TeamJoiner joiner;
@@ -71,6 +68,7 @@ public final class TeamSetupActivity extends Activity {
 
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
+        style = new LedgerStyle(this);
         store = LedgerStore.application(this);
         creator = new TeamCreator(store);
         joiner = new TeamJoiner(store);
@@ -147,34 +145,43 @@ public final class TeamSetupActivity extends Activity {
         count = roster = history = nameConflict = null;
         ready = retry = changeName = null;
         qr = null;
+        LedgerStore.Trip current = trip();
+        String heading = JOIN.equals(mode) ? "加入小队旅行" : current == null ? "创建小队旅行" : "邀请同伴";
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        int pageInset = dp(LedgerStyle.PAGE_INSET);
+        content.setPadding(pageInset, dp(LedgerStyle.CONTROL_GAP), pageInset, dp(24));
+        scroll.addView(content);
         body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
-        body.setBackgroundColor(Color.rgb(248, 249, 247));
-        body.setPadding(dp(20), dp(16), dp(20), dp(28));
-        scroll.addView(body);
-        FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(Color.rgb(248, 249, 247));
-        root.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
+        body.setFocusableInTouchMode(true);
+        body.setBackground(style.card());
+        int cardInset = dp(LedgerStyle.CARD_INSET);
+        body.setPadding(cardInset, cardInset, cardInset, cardInset);
+        content.addView(body, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(style.page);
+        root.addView(style.topBar(heading, this::finish));
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         FormInput.fitActivityWindow(getWindow(), root);
         setContentView(root);
-        button("返回", this::finish);
-        LedgerStore.Trip current = trip();
         if (JOIN.equals(mode)) joining(current);
         else organizing(current);
+        body.requestFocus();
         refresh();
     }
 
     private void organizing(LedgerStore.Trip current) {
-        text(body, current == null ? "创建小队旅行" : "邀请同伴", 24, Color.BLACK);
-        title = input(body, "旅行名称", 80);
-        name = input(body, "本人名称", 30);
         if (current == null) {
+            title = input(body, "旅行名称", 80);
+            name = input(body, "本人名称", 30);
             FormInput.next(title, name);
             showTeamSize();
-            status = text(body, "", 14, Color.GRAY);
-            button("生成邀请", () -> {
+            status = text(body, "", LedgerStyle.LABEL, style.muted);
+            button(body, "生成邀请", LedgerStyle.Action.PRIMARY, () -> {
                 try {
                     LedgerStore.Trip created = creator.create(value(title), value(name), expected.getProgress());
                     tripId = created.id;
@@ -186,28 +193,27 @@ public final class TeamSetupActivity extends Activity {
             });
             return;
         }
-        title.setText(current.name);
-        name.setText(current.nameOf(current.localPerson));
-        title.setEnabled(false);
-        name.setEnabled(false);
-        count = text(body, "", 18, Color.BLACK);
-        status = text(body, "", 14, Color.GRAY);
-        roster = text(body, "", 15, Color.DKGRAY);
+        TextView tripTitle = style.heading(current.name, LedgerStyle.SECTION_TITLE);
+        body.addView(tripTitle, new LinearLayout.LayoutParams(-1, -2));
+        count = text(body, "", 16, style.primary);
+        count.setTypeface(LedgerStyle.MEDIUM);
+        status = text(body, "", LedgerStyle.LABEL, style.muted);
+        roster = text(body, "", LedgerStyle.BODY, style.ink);
         if (current.people() > 1) {
             qr = new ImageView(this);
             qr.setContentDescription("小队邀请二维码");
-            body.addView(qr, new LinearLayout.LayoutParams(-1, dp(280)));
+            body.addView(qr, new LinearLayout.LayoutParams(-1, dp(248)));
             showInvitation(current);
-            button("令牌", () -> showTextInvite(current));
+            button(body, "令牌", LedgerStyle.Action.OUTLINE, () -> showTextInvite(current));
         }
-        ready = button("开始记账", () -> { selectResult(); finish(); });
+        ready = button(body, "开始记账", LedgerStyle.Action.PRIMARY, () -> { selectResult(); finish(); });
     }
 
     private void showInvitation(LedgerStore.Trip current) {
         try {
             String code = creator.invite(current);
             qr.setImageBitmap(InviteQr.image(code, dp(280)));
-        } catch (Exception error) { text(body, "无法生成二维码，请检查旅行信息。", 14, Color.GRAY); }
+        } catch (Exception error) { text(body, "无法生成二维码，请检查旅行信息。", LedgerStyle.LABEL, style.danger); }
     }
 
     private void showTextInvite(LedgerStore.Trip current) {
@@ -230,61 +236,52 @@ public final class TeamSetupActivity extends Activity {
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(24), 0, dp(24), 0);
-        text(content, copied ? "已复制到剪贴板" : "可长按复制令牌", 14, 0xff176344);
-        text(content, code, 14, Color.DKGRAY).setTextIsSelectable(true);
+        text(content, copied ? "已复制到剪贴板" : "可长按复制令牌", LedgerStyle.LABEL, style.primary);
+        text(content, code, LedgerStyle.LABEL, style.ink).setTextIsSelectable(true);
         scroll.addView(content);
         textInviteDialog = new AlertDialog.Builder(this).setTitle("令牌").setView(scroll)
                 .setPositiveButton("关闭", null).show();
+        style.alertActions(textInviteDialog, LedgerStyle.Action.OUTLINE);
     }
 
     private void joining(LedgerStore.Trip current) {
-        text(body, "加入小队旅行", 24, Color.BLACK);
         if (current == null) {
-            Button scan = button("扫码加入", this::openScanner);
-            GradientDrawable surface = new GradientDrawable();
-            surface.setCornerRadius(dp(12));
-            surface.setColor(0xff14775f);
-            scan.setBackground(new RippleDrawable(ColorStateList.valueOf(0x33ffffff), surface, null));
-            scan.setTextColor(Color.WHITE);
-            scan.setTypeface(scan.getTypeface(), Typeface.BOLD);
-            scan.setTextSize(16);
-            LinearLayout.LayoutParams scanSize = new LinearLayout.LayoutParams(-1, dp(52));
-            scanSize.setMargins(0, dp(4), 0, dp(8));
-            scan.setLayoutParams(scanSize);
-            button("从相册选二维码", () -> {
+            button(body, "扫码加入", LedgerStyle.Action.PRIMARY, this::openScanner);
+            button(body, "从相册选二维码", LedgerStyle.Action.OUTLINE, () -> {
                 Intent pick = new Intent(Intent.ACTION_GET_CONTENT).setType("image/*")
                         .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_LOCAL_ONLY, true);
                 try { startActivityForResult(pick, IMAGE); }
-                catch (ActivityNotFoundException ignored) { status.setText("此设备没有可用的图片选择器，可使用令牌。"); }
+                catch (ActivityNotFoundException ignored) { updateText(status, "此设备没有可用的图片选择器，可使用令牌。"); }
             });
-            tokenToggle = button("令牌（备用）", () -> setTokenExpanded(!tokenExpanded));
+            tokenToggle = button(body, "令牌（备用）", LedgerStyle.Action.QUIET, () -> setTokenExpanded(!tokenExpanded));
             manual = new EditText(this);
             manual.setContentDescription("备用令牌");
             manual.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
             manual.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
             manual.setFilters(new InputFilter[]{new InputFilter.LengthFilter(4096)});
             manual.setMaxLines(4);
+            style.input(manual);
             body.addView(manual, new LinearLayout.LayoutParams(-1, -2));
-            readToken = button("读取令牌", () -> readInvite(value(manual)));
+            readToken = button(body, "读取令牌", LedgerStyle.Action.OUTLINE, () -> readInvite(value(manual)));
             setTokenExpanded(tokenExpanded);
             identity = new LinearLayout(this);
             identity.setOrientation(LinearLayout.VERTICAL);
             body.addView(identity);
-            status = text(body, "", 14, Color.GRAY);
+            status = text(body, "", LedgerStyle.LABEL, style.muted);
             if (invitation != null) readInvite(invitation);
         } else {
             tripLabels(body, current);
-            text(body, "本人名称 · " + current.nameOf(current.localPerson), 15, Color.DKGRAY);
-            status = text(body, "正在加入小队...", 14, Color.GRAY);
-            history = text(body, "", 14, Color.GRAY);
-            retry = button("重试连接", () -> {
+            text(body, "本人名称 · " + current.nameOf(current.localPerson), LedgerStyle.BODY, style.ink);
+            status = text(body, "正在加入小队...", LedgerStyle.LABEL, style.muted);
+            history = text(body, "", LedgerStyle.LABEL, style.muted);
+            retry = button(body, "重试连接", LedgerStyle.Action.PRIMARY, () -> {
                 startedAt = SystemClock.elapsedRealtime();
                 joinFailure = "";
                 transport.stop();
                 transport.select(trip());
                 refresh();
             });
-            if (current.team.openSeats) changeName = button("修改本人名称", () -> {
+            if (current.team.openSeats) changeName = button(body, "修改本人名称", LedgerStyle.Action.OUTLINE, () -> {
                 try {
                     invitation = store.inviteCode(trip());
                     transport.stop();
@@ -307,7 +304,7 @@ public final class TeamSetupActivity extends Activity {
             seat = null;
             if (preview.team.openSeats) {
                 name = input(identity, "本人名称", 30);
-                nameConflict = text(identity, "", 14, Color.GRAY);
+                nameConflict = text(identity, "", LedgerStyle.LABEL, style.danger);
                 nameConflict.setVisibility(View.GONE);
                 name.addTextChangedListener(new TextWatcher() {
                     @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) { }
@@ -319,16 +316,13 @@ public final class TeamSetupActivity extends Activity {
                     @Override public void afterTextChanged(Editable value) { }
                 });
             } else {
-                text(identity, "请选择名单里的本人名称", 14, Color.DKGRAY);
+                text(identity, "请选择名单里的本人名称", LedgerStyle.LABEL, style.muted);
                 String[] names = new String[preview.people() - 1];
                 for (int i = 0; i < names.length; i++) names[i] = preview.nameOf(preview.member(i + 1));
                 seat = choices(identity, names);
             }
-            Button submit = new Button(this);
-            submit.setText("确认并加入");
-            submit.setOnClickListener(view -> submitJoin());
-            identity.addView(submit);
-            status.setText("");
+            button(identity, "确认并加入", LedgerStyle.Action.PRIMARY, this::submitJoin);
+            updateText(status, "");
         } catch (Exception error) {
             invitation = null;
             preview = null;
@@ -367,8 +361,8 @@ public final class TeamSetupActivity extends Activity {
     }
 
     private void tripLabels(LinearLayout parent, LedgerStore.Trip current) {
-        text(parent, "旅行名称 · " + current.name, 16, Color.BLACK);
-        text(parent, "组织者 · " + current.nameOf(current.member(0)), 14, Color.DKGRAY);
+        text(parent, "旅行名称 · " + current.name, 16, style.title).setTypeface(LedgerStyle.MEDIUM);
+        text(parent, "组织者 · " + current.nameOf(current.member(0)), LedgerStyle.LABEL, style.muted);
     }
 
     private void refresh() {
@@ -433,7 +427,7 @@ public final class TeamSetupActivity extends Activity {
         super.onRequestPermissionsResult(request, permissions, results);
         if (request != CAMERA_PERMISSION || isFinishing() || tripId != null) return;
         if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) openScanner();
-        else status.setText("相机权限未开启，可以从相册选择二维码。");
+        else updateText(status, "相机权限未开启，可以从相册选择二维码。");
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
@@ -444,7 +438,7 @@ public final class TeamSetupActivity extends Activity {
             if (code != null) readInvite(code);
         } else if (request == IMAGE && data.getData() != null) {
             Uri image = data.getData();
-            status.setText("正在识别二维码…");
+            updateText(status, "正在识别二维码…");
             decoder.execute(() -> {
                 String code = null;
                 try { code = InviteQr.readImage(getContentResolver(), image); } catch (Exception ignored) { }
@@ -452,50 +446,52 @@ public final class TeamSetupActivity extends Activity {
                 main.post(() -> {
                     if (isDestroyed() || isFinishing() || identity == null) return;
                     if (InviteQr.isTeamCode(decoded)) readInvite(decoded);
-                    else status.setText("图片里没有读到有效的小队二维码。");
+                    else updateText(status, "图片里没有读到有效的小队二维码。");
                 });
             });
         }
     }
 
     private void selectResult() { setResult(RESULT_OK, new Intent().putExtra(TRIP, tripId)); }
-    private void inline(Exception error) { status.setText(error.getMessage() == null ? "暂时无法完成，请重试。" : error.getMessage()); }
+    private void inline(Exception error) { updateText(status, error.getMessage() == null ? "暂时无法完成，请重试。" : error.getMessage()); }
     private String value(EditText field) { return field.getText().toString().trim(); }
-    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+    private int dp(int value) { return style.dp(value); }
 
-    private Button button(String label, Runnable action) {
-        Button button = new Button(this);
-        button.setText(label);
-        button.setOnClickListener(view -> action.run());
-        body.addView(button, new LinearLayout.LayoutParams(-1, -2));
+    private Button button(LinearLayout parent, String label, LedgerStyle.Action role, Runnable action) {
+        Button button = style.button(label, role, action);
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, -2);
+        size.topMargin = dp(LedgerStyle.CONTROL_GAP);
+        parent.addView(button, size);
         return button;
     }
 
     private TextView text(LinearLayout parent, String content, int size, int color) {
-        TextView label = new TextView(this);
-        label.setText(content);
-        label.setTextSize(size);
-        label.setTextColor(color);
-        label.setPadding(dp(2), dp(7), dp(2), dp(7));
+        TextView label = style.text(content, size, color);
+        label.setPadding(0, dp(6), 0, dp(6));
+        if (content.isEmpty()) label.setVisibility(View.GONE);
         parent.addView(label);
         return label;
     }
 
     private EditText input(LinearLayout parent, String label, int length) {
-        text(parent, label, 14, Color.DKGRAY);
+        TextView caption = text(parent, label, LedgerStyle.LABEL, style.muted);
         EditText field = new EditText(this);
+        field.setId(View.generateViewId());
+        caption.setLabelFor(field.getId());
         field.setHint(label);
         field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         field.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
         field.setFilters(new InputFilter[]{new InputFilter.LengthFilter(length)});
         field.setSingleLine(true);
+        style.input(field);
         FormInput.done(field);
-        parent.addView(field);
+        parent.addView(field, new LinearLayout.LayoutParams(-1, -2));
         return field;
     }
 
     private void updateText(TextView view, String text) {
         if (!text.contentEquals(view.getText())) view.setText(text);
+        view.setVisibility(text.isEmpty() ? View.GONE : View.VISIBLE);
     }
 
     private RadioGroup choices(LinearLayout parent, String[] labels) {
@@ -505,7 +501,11 @@ public final class TeamSetupActivity extends Activity {
             RadioButton button = new RadioButton(this);
             button.setId(View.generateViewId());
             button.setText(label);
-            group.addView(button, new RadioGroup.LayoutParams(-1, dp(48)));
+            button.setTextSize(LedgerStyle.BODY);
+            button.setTextColor(style.ink);
+            button.setMinHeight(dp(LedgerStyle.CONTROL_HEIGHT));
+            button.setBackground(style.ripple(null, LedgerStyle.CONTROL_RADIUS));
+            group.addView(button, new RadioGroup.LayoutParams(-1, -2));
         }
         parent.addView(group, new LinearLayout.LayoutParams(-1, -2));
         return group;
@@ -515,10 +515,10 @@ public final class TeamSetupActivity extends Activity {
         LinearLayout header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
         body.addView(header, new LinearLayout.LayoutParams(-1, -2));
-        TextView label = text(header, "小队人数", 14, Color.DKGRAY);
+        TextView label = text(header, "小队人数", LedgerStyle.LABEL, style.muted);
         label.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
-        TextView value = text(header, "1 人", 16, 0xff14775f);
-        value.setTypeface(value.getTypeface(), Typeface.BOLD);
+        TextView value = text(header, "1 人", 16, style.primary);
+        value.setTypeface(LedgerStyle.MEDIUM);
         value.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
 
         expected = new SeekBar(this);
@@ -526,12 +526,12 @@ public final class TeamSetupActivity extends Activity {
         expected.setMax(Team.MAX_DEVICES);
         expected.setProgress(1);
         expected.setContentDescription("小队人数，1 人，包括你");
-        expected.setThumbTintList(ColorStateList.valueOf(0xff14775f));
-        expected.setProgressTintList(ColorStateList.valueOf(0xff14775f));
+        expected.setThumbTintList(ColorStateList.valueOf(style.primary));
+        expected.setProgressTintList(ColorStateList.valueOf(style.primary));
         GradientDrawable tick = new GradientDrawable();
         tick.setShape(GradientDrawable.OVAL);
         tick.setSize(dp(5), dp(5));
-        tick.setColor(0xff7c9e92);
+        tick.setColor(style.fieldLine);
         expected.setTickMark(tick);
         expected.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar slider, int people, boolean fromUser) {

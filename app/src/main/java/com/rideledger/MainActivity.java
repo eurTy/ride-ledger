@@ -7,8 +7,6 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
-import android.graphics.Color;
-import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Build;
@@ -35,8 +33,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -44,6 +44,7 @@ import java.util.function.Consumer;
 
 public final class MainActivity extends Activity {
     private static final int QUICK = 0, REVIEW = 1, TRIPS = 2;
+    private LedgerStyle style;
     private LedgerStore store;
     private LedgerActions ledgerActions;
     private final ExecutorService reviewReader = Executors.newSingleThreadExecutor();
@@ -54,18 +55,22 @@ public final class MainActivity extends Activity {
     private View recordsOverlay;
     private String exportTripId;
     private boolean exportArchive;
-    private List<LedgerReview.Row> pendingExport;
     private boolean deletingRecords;
     private ReviewPanel reviewPanel;
     private TeamTransportAdapter teamTransport;
+    private final Set<String> shownSyncPeers = new HashSet<>();
     private Map<String, String> renderedSeatNames = Collections.emptyMap();
     private boolean started, awaitingEnrollment;
     private SharedPreferences uiPrefs;
     private CurrencyHistory currencyHistory;
+    private NoteHistory noteHistory;
+    private TripReports tripReports;
+    private String restoredReportTripId;
     private LedgerForms forms;
     private ReceiptUi receipts;
     private QuickEntryPanel quickEntry;
-    private Bundle quickDraft;
+    private QuickEntryDrafts quickDrafts;
+    private final QuickEntryDrafts.Listener quickSaveListener = this::onQuickSaveFinished;
     private String currentTripId;
     private String recordFilter = "all";
     private boolean deletingTrips;
@@ -81,32 +86,41 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        getWindow().setStatusBarColor(Color.rgb(248, 249, 247));
-        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+        style = new LedgerStyle(this);
         store = LedgerStore.application(this);
         ledgerActions = new LedgerActions(store);
-        receipts = new ReceiptUi(this, store, ledgerActions, state, trip -> afterSave(trip, false), this::error);
+        Object retained = getLastNonConfigurationInstance();
+        quickDrafts = retained instanceof QuickEntryDrafts ? (QuickEntryDrafts) retained : new QuickEntryDrafts(state);
+        quickDrafts.listen(quickSaveListener);
+        receipts = new ReceiptUi(this, store, ledgerActions, quickDrafts, state, trip -> afterSave(trip, false), this::error);
         teamTransport = new TeamTransportAdapter(this, store, new PeerSync.Listener() {
             @Override public void changed(int count) { onSyncChanged(count); }
             @Override public void receiptsChanged() {
                 if (reviewContent != null && currentTripId != null) refreshReview(currentTripId);
             }
+            @Override public void synced(String tripId, String peer, boolean exchanged) {
+                if (!started || !tripId.equals(currentTripId)) return;
+                boolean first = shownSyncPeers.add(tripId + "/" + peer);
+                if (first || exchanged) toast("账目同步成功");
+            }
         });
         uiPrefs = getSharedPreferences("ui", MODE_PRIVATE);
         currencyHistory = new CurrencyHistory(uiPrefs, store);
-        forms = new LedgerForms(this, ledgerActions, currencyHistory, receipts, reviewReader,
+        noteHistory = new NoteHistory(uiPrefs);
+        forms = new LedgerForms(this, ledgerActions, currencyHistory, noteHistory, receipts, reviewReader,
                 trip -> afterSave(trip, false), this::error);
+        tripReports = new TripReports(this, store, reviewReader);
         startupPermissionsInFlight = state != null && state.getBoolean("startupPermissionsInFlight");
         exportTripId = state == null ? null : state.getString("exportTripId");
         exportArchive = state != null && state.getBoolean("exportArchive");
-        quickDraft = state == null ? null : state.getBundle("quickDraft");
+        restoredReportTripId = state == null ? null : state.getString("reportTripId");
         currentTripId = uiPrefs.getString("last_trip", null);
         if (currentTripId == null || store.getTrip(currentTripId) == null) {
             List<LedgerStore.Trip> trips = store.trips();
             currentTripId = trips.isEmpty() ? null : trips.get(0).id;
         }
-        screen = currentTripId == null ? TRIPS : QUICK;
-        if (state != null && currentTripId != null && receipts.picking()) screen = state.getInt("screen", QUICK);
+        screen = currentTripId == null ? TRIPS : state == null ? QUICK : state.getInt("screen", QUICK);
+        if (state != null) recordFilter = state.getString("recordFilter", "all");
         render();
     }
 
@@ -114,19 +128,20 @@ public final class MainActivity extends Activity {
         super.onStart();
         SyncBackground.beginMainSession(this);
         SyncBackground.foregroundEntered(this);
-        boolean returningFromReceipt = receipts.returningToForm();
-        if (currentTripId != null && screen != QUICK && recordsOverlay == null && exportTripId == null && !returningFromReceipt) {
-            deletingTrips = false;
-            screen = QUICK;
-            render();
-        }
         started = true;
+        tripReports.start();
         startSelectedSync();
         updateSync();
         if (reviewContent != null && currentTripId != null) refreshReview(currentTripId);
+        if (restoredReportTripId != null) {
+            tripReports.show(restoredReportTripId);
+            restoredReportTripId = null;
+        }
     }
     @Override public void onStop() {
         started = false;
+        tripReports.stop();
+        rememberQuickEntry();
         cancelReviewLoad();
         forms.dismissCurrencyMenu();
         teamTransport.stop();
@@ -136,6 +151,8 @@ public final class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         cancelReviewLoad();
+        quickDrafts.unlisten(quickSaveListener);
+        tripReports.close();
         forms.close();
         receipts.close();
         reviewReader.shutdownNow();
@@ -186,10 +203,15 @@ public final class MainActivity extends Activity {
         state.putBoolean("startupPermissionsInFlight", startupPermissionsInFlight);
         state.putString("exportTripId", exportTripId);
         state.putBoolean("exportArchive", exportArchive);
+        state.putString("reportTripId", tripReports.openTripId());
         state.putInt("screen", screen);
-        state.putBundle("quickDraft", quickEntry != null ? quickEntry.saveDraft() : quickDraft);
+        state.putString("recordFilter", recordFilter);
+        rememberQuickEntry();
+        quickDrafts.saveState(state);
         receipts.saveState(state);
     }
+
+    @Override public Object onRetainNonConfigurationInstance() { return quickDrafts; }
 
     private void requestBackgroundBluetoothOnce() {
         if (Build.VERSION.SDK_INT < 29 || Build.VERSION.SDK_INT > 30 ||
@@ -199,11 +221,12 @@ public final class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT == 29) {
             requestPermissions(new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION}, REQUEST_BACKGROUND_BLUETOOTH);
         } else {
-            new AlertDialog.Builder(this).setTitle("后台蓝牙同步")
+            AlertDialog prompt = new AlertDialog.Builder(this).setTitle("后台蓝牙同步")
                     .setMessage("如需在后台自动发现附近队友，请在系统权限中将位置设为「始终允许」。")
                     .setNegativeButton("跳过", null)
                     .setPositiveButton("去授权", (dialog, which) -> openBluetoothSettings())
                     .show();
+            style.alertActions(prompt, LedgerStyle.Action.OUTLINE);
         }
     }
 
@@ -246,8 +269,8 @@ public final class MainActivity extends Activity {
             syncView.setText(denied.isEmpty() ? "请打开登记进度继续首次登记。" : denied);
         } else {
             SyncEngine.Status state = teamTransport.syncState();
-            syncView.setText(state.label());
-            if (reviewPanel != null) reviewPanel.updateConnections(trip, state);
+            if (reviewPanel == null) syncView.setText(state.label());
+            else reviewPanel.updateSync(trip, state, SyncEngine.lastCheckedAt(this, trip));
         }
     }
 
@@ -268,7 +291,8 @@ public final class MainActivity extends Activity {
         scroll.setFillViewport(true);
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(18), dp(18), dp(18), dp(30));
+        int inset = dp(LedgerStyle.PAGE_INSET);
+        body.setPadding(inset, inset, inset, dp(24));
         scroll.addView(body);
         displayPage(scroll);
         return body;
@@ -276,9 +300,9 @@ public final class MainActivity extends Activity {
 
     private void displayPage(View content) {
         cancelReviewLoad();
+        tripReports.invalidatePendingReport();
         reviewContent = null;
-        if (quickEntry != null && currentTripId != null && receipts.holdingQuickPhoto(currentTripId))
-            quickDraft = quickEntry.saveDraft();
+        rememberQuickEntry();
         quickEntry = null;
         recordsOverlay = null;
         reviewPanel = null;
@@ -286,18 +310,23 @@ public final class MainActivity extends Activity {
         awaitingEnrollment = false;
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.rgb(248, 249, 247));
+        root.setBackgroundColor(style.page);
         root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
         if (currentTripId != null) root.addView(bottomBar());
         FormInput.fitActivityWindow(getWindow(), root);
         setContentView(root);
     }
 
+    private void rememberQuickEntry() {
+        if (quickEntry != null) quickEntry.rememberDraft();
+    }
+
     private LinearLayout bottomBar() {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setPadding(dp(8), dp(7), dp(8), dp(7));
-        bar.setBackgroundColor(Color.WHITE);
+        int gap = dp(LedgerStyle.CONTROL_GAP);
+        bar.setPadding(gap, dp(6), gap, dp(6));
+        bar.setBackgroundColor(style.surface);
         navItem(bar, "记账", QUICK);
         navItem(bar, "复盘", REVIEW);
         navItem(bar, "旅行", TRIPS);
@@ -305,15 +334,14 @@ public final class MainActivity extends Activity {
     }
 
     private void navItem(LinearLayout bar, String title, int target) {
-        TextView item = new TextView(this);
-        item.setText(title);
-        item.setTextSize(15);
+        boolean selected = screen == target;
+        TextView item = style.text(title, LedgerStyle.LABEL, selected ? style.primary : style.muted);
         item.setGravity(Gravity.CENTER);
-        item.setTextColor(screen == target ? Color.rgb(23, 99, 68) : Color.rgb(108, 137, 117));
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(screen == target ? Color.rgb(231, 245, 235) : Color.WHITE);
-        background.setCornerRadius(dp(11));
-        item.setBackground(background);
+        item.setTypeface(LedgerStyle.MEDIUM);
+        item.setSelected(selected);
+        item.setMinimumHeight(dp(LedgerStyle.CONTROL_HEIGHT));
+        item.setBackground(style.ripple(selected ? style.rounded(style.selected, 0, LedgerStyle.CONTROL_RADIUS) : null,
+                LedgerStyle.CONTROL_RADIUS));
         item.setOnClickListener(v -> {
             if (target != TRIPS) deletingTrips = false;
             boolean enteringLedger = target == QUICK && screen != QUICK;
@@ -322,7 +350,7 @@ public final class MainActivity extends Activity {
             if (enteringLedger) teamTransport.recordsChanged();
         });
         item.setFocusable(true);
-        bar.addView(item, new LinearLayout.LayoutParams(0, dp(52), 1));
+        bar.addView(item, new LinearLayout.LayoutParams(0, -2, 1));
     }
 
     private void selectTrip(LedgerStore.Trip trip) {
@@ -354,70 +382,106 @@ public final class MainActivity extends Activity {
     private void renderTrips() {
         LinearLayout body = page();
         heading(body, "我的旅行");
-        text(body, "选择旅行后，之后每次打开都会直接进入快速记账。", 14, Color.GRAY);
         List<LedgerStore.Trip> trips = store.trips();
-        Button createTrip = button("新建小队旅行", () -> openTeam(TeamSetupActivity.CREATE, null));
+        Button createTrip = style.button("新建小队旅行", LedgerStyle.Action.PRIMARY, () -> openTeam(TeamSetupActivity.CREATE, null));
         createTrip.setEnabled(Build.VERSION.SDK_INT >= 29);
-        createTrip.setTextColor(Color.WHITE);
-        int actionGreen = Color.rgb(33, 132, 91);
-        createTrip.setBackground(forms.chip(actionGreen, actionGreen, false));
         if (trips.isEmpty()) body.addView(createTrip, fullMargin());
         else {
-            Button deleteTrip = button(deletingTrips ? "完成" : "删除旅行", () -> {
-                deletingTrips = !deletingTrips;
-                renderTrips();
-            });
-            deleteTrip.setTextColor(deletingTrips ? actionGreen : Color.rgb(174, 73, 57));
-            int border = deletingTrips ? Color.rgb(199, 223, 208) : Color.rgb(239, 183, 168);
-            deleteTrip.setBackground(forms.chip(Color.WHITE, border, false));
+            Button deleteTrip = style.button(deletingTrips ? "完成" : "删除旅行",
+                    deletingTrips ? LedgerStyle.Action.OUTLINE : LedgerStyle.Action.DANGER, () -> {
+                        deletingTrips = !deletingTrips;
+                        renderTrips();
+                    });
             row(body, createTrip, deleteTrip);
-            if (deletingTrips) text(body, "点右侧 × 选择旅行，随后确认删除。", 13,
-                    Color.rgb(183, 98, 81));
+            if (deletingTrips) text(body, "点右侧 × 选择旅行，随后确认删除。", LedgerStyle.CAPTION, style.danger);
         }
-        if (Build.VERSION.SDK_INT < 29) text(body, "创建和加入小队需要 Android 10 或以上。", 14, Color.GRAY);
+        if (Build.VERSION.SDK_INT < 29) text(body, "创建和加入小队需要 Android 10 或以上。", LedgerStyle.LABEL, style.muted);
         section(body, "旅行列表");
-        if (trips.isEmpty()) text(body, "新建小队旅行，或使用同伴的邀请二维码加入。", 15, Color.GRAY);
-        for (LedgerStore.Trip trip : trips) {
-            LinearLayout tripRow = new LinearLayout(this);
-            tripRow.setOrientation(LinearLayout.HORIZONTAL);
-            tripRow.setGravity(Gravity.CENTER_VERTICAL);
-            Button item = button(trip.name + (trip.id.equals(currentTripId) ? " · 当前" : "") +
-                    "\n我：" + trip.nameOf(trip.localPerson) + " · " + trip.people() + " 人小队", () -> selectTrip(trip));
-            tripRow.addView(item, new LinearLayout.LayoutParams(0, -2, 1));
-            if (deletingTrips) {
-                TextView remove = new TextView(this);
-                remove.setText("×");
-                remove.setTextSize(24);
-                remove.setGravity(Gravity.CENTER);
-                remove.setMinWidth(dp(44));
-                remove.setMinHeight(dp(44));
-                remove.setTextColor(Color.rgb(186, 87, 69));
-                remove.setContentDescription("删除旅行 " + trip.name);
-                GradientDrawable removeBackground = new GradientDrawable();
-                removeBackground.setColor(Color.rgb(255, 246, 242));
-                removeBackground.setStroke(dp(1), Color.rgb(240, 197, 187));
-                removeBackground.setCornerRadius(dp(13));
-                remove.setBackground(removeBackground);
-                remove.setOnClickListener(v -> confirmDeleteTrip(trip));
-                LinearLayout.LayoutParams removeParams = new LinearLayout.LayoutParams(dp(44), dp(44));
-                removeParams.leftMargin = dp(8);
-                tripRow.addView(remove, removeParams);
-            }
-            body.addView(tripRow, fullMargin());
-        }
+        if (trips.isEmpty()) text(body, "新建小队旅行，或使用同伴的邀请二维码加入。", LedgerStyle.BODY, style.muted);
+        for (LedgerStore.Trip trip : trips) addTripCard(body, trip);
+        LedgerStore.Trip current = currentTripId == null ? null : store.getTrip(currentTripId);
         if (Build.VERSION.SDK_INT >= 29) {
             section(body, "同行与同步");
-            LedgerStore.Trip current = currentTripId == null ? null : store.getTrip(currentTripId);
             Button join = button("加入小队旅行", () -> openTeam(TeamSetupActivity.JOIN, null));
-            if (current == null || current.team == null || current.people() == 1 || !store.teamReady(current)) body.addView(join, fullMargin());
+            if (current == null || current.team == null || current.people() == 1 || !store.teamReady(current))
+                body.addView(join, fullMargin());
             else row(body, join, button("邀请同伴", () -> openTeam(TeamSetupActivity.INVITE, current.id)));
             if (current != null && current.team != null) {
-                List<String> names = new ArrayList<>();
-                for (int i = 0; i < current.people(); i++) names.add(current.nameOf(current.member(i)));
-                text(body, String.join("、", names), 14, Color.GRAY);
-                syncView = text(body, "", 13, Color.GRAY);
+                syncView = text(body, "", LedgerStyle.CAPTION, style.muted);
                 updateSync();
             }
+        }
+    }
+
+    private void addTripReportAction(LinearLayout row, LedgerStore.Trip trip) {
+        Button report = style.button("查看报告", LedgerStyle.Action.QUIET, () -> tripReports.show(trip.id));
+        report.setTextSize(LedgerStyle.LABEL);
+        report.setPadding(dp(LedgerStyle.CONTROL_GAP), report.getPaddingTop(), 0, report.getPaddingBottom());
+        int available = getResources().getConfiguration().screenWidthDp
+                - 2 * (LedgerStyle.PAGE_INSET + LedgerStyle.CARD_INSET);
+        report.setMaxWidth(dp(Math.max(96, available / 2)));
+        row.addView(report, new LinearLayout.LayoutParams(-2, -2));
+    }
+
+    private void addTripCard(LinearLayout body, LedgerStore.Trip trip) {
+        boolean current = trip.id.equals(currentTripId);
+        boolean showReports = !deletingTrips;
+        LinearLayout card = new LinearLayout(this);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setBackground(style.card());
+        LinearLayout.LayoutParams margin = fullMargin();
+        margin.bottomMargin = dp(LedgerStyle.CONTROL_GAP);
+        body.addView(card, margin);
+
+        LinearLayout info = new LinearLayout(this);
+        info.setOrientation(LinearLayout.VERTICAL);
+        int inset = dp(LedgerStyle.CARD_INSET);
+        info.setPadding(inset, dp(showReports ? 10 : 12), inset, dp(showReports ? 2 : 12));
+        info.setForeground(style.ripple(null, LedgerStyle.CARD_RADIUS));
+        info.setFocusable(true);
+        info.setOnClickListener(view -> selectTrip(trip));
+        card.addView(info, new LinearLayout.LayoutParams(0, -2, 1));
+
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        info.addView(titleRow, fullMargin());
+        TextView title = style.heading(trip.name, LedgerStyle.SECTION_TITLE);
+        title.setMaxLines(2);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        titleRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        if (current) {
+            TextView mark = style.text("当前", 12, style.primary);
+            mark.setTypeface(LedgerStyle.MEDIUM);
+            mark.setPadding(dp(8), dp(2), dp(8), dp(2));
+            mark.setBackground(style.rounded(style.selected, 0, LedgerStyle.CONTROL_RADIUS));
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-2, -2);
+            size.setMarginStart(dp(LedgerStyle.CONTROL_GAP));
+            titleRow.addView(mark, size);
+        }
+        List<String> names = new ArrayList<>();
+        for (int i = 0; i < trip.people(); i++) {
+            String member = trip.member(i);
+            if (trip.team != null && trip.team.openSeats && !trip.seatNames.containsKey(member) &&
+                    !member.equals(trip.localPerson)) continue;
+            names.add(trip.nameOf(member) + (member.equals(trip.localPerson) ? "（我）" : ""));
+        }
+        String members = trip.people() + " 人小队" + (names.isEmpty() ? "" : " · " + String.join("、", names));
+        TextView detail = style.text(members, LedgerStyle.CAPTION, style.muted);
+        detail.setMaxLines(2);
+        detail.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout memberRow = new LinearLayout(this);
+        memberRow.setGravity(Gravity.CENTER_VERTICAL);
+        memberRow.addView(detail, new LinearLayout.LayoutParams(0, -2, 1));
+        if (showReports) addTripReportAction(memberRow, trip);
+        info.addView(memberRow, new LinearLayout.LayoutParams(-1, -2));
+        info.setContentDescription(trip.name + (current ? "，当前旅行" : "") + "，" + members);
+        if (deletingTrips) {
+            Button remove = style.button("×", LedgerStyle.Action.DANGER, () -> confirmDeleteTrip(trip));
+            remove.setTextSize(20);
+            remove.setContentDescription("删除旅行 " + trip.name);
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(dp(LedgerStyle.CONTROL_HEIGHT), -2);
+            size.setMarginEnd(dp(LedgerStyle.CONTROL_GAP));
+            card.addView(remove, size);
         }
     }
 
@@ -432,17 +496,18 @@ public final class MainActivity extends Activity {
     }
 
     private void confirmDeleteTrip(LedgerStore.Trip trip) {
-        new AlertDialog.Builder(this).setTitle("删除旅行？")
+        AlertDialog confirmation = new AlertDialog.Builder(this).setTitle("删除旅行？")
                 .setMessage("将从这台手机删除“" + trip.name + "”和它的全部本地记录。此操作无法撤销；同伴设备上的副本仍可在重新加入后同步。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton("删除旅行", (dialog, which) -> {
                     if (!store.deleteTrip(trip.id)) return;
+                    quickDrafts.clearForm(trip.id);
                     receipts.clearDraft(trip.id, receipts.draft(trip.id));
                     SharedPreferences.Editor prefs = uiPrefs.edit()
                             .remove("payer:" + trip.id).remove("mode:" + trip.id)
                             .remove("share:" + trip.id);
                     currencyHistory.clear(prefs, trip.id);
-                    new NoteHistory(uiPrefs).clear(prefs, trip.id);
+                    noteHistory.clear(prefs, trip.id);
                     if (trip.id.equals(currentTripId)) {
                         List<LedgerStore.Trip> remaining = store.trips();
                         currentTripId = remaining.isEmpty() ? null : remaining.get(0).id;
@@ -458,12 +523,14 @@ public final class MainActivity extends Activity {
                     updateSync();
                     toast("旅行及本机记录已删除");
                 }).show();
+        style.alertActions(confirmation, LedgerStyle.Action.DANGER);
     }
 
     private void renderQuick(LedgerStore.Trip trip) {
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(14), dp(8), dp(14), dp(8));
+        int inset = dp(LedgerStyle.PAGE_INSET);
+        body.setPadding(inset, dp(LedgerStyle.CONTROL_GAP), inset, dp(LedgerStyle.CONTROL_GAP));
         ScrollView scroll = new ScrollView(this) {
             @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
                 // Keep the quick-entry section at least as tall as the area above navigation.
@@ -478,11 +545,12 @@ public final class MainActivity extends Activity {
         LinearLayout header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
         body.addView(header, fullMargin());
-        TextView tripTitle = text(header, trip.name, 21, 0xff154b3c);
+        TextView tripTitle = style.heading(trip.name, LedgerStyle.PAGE_TITLE);
+        header.addView(tripTitle);
         tripTitle.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
         tripTitle.setSingleLine(true);
         tripTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        TextView quickLabel = text(header, "快速记账", 14, 0xff1c5938);
+        TextView quickLabel = text(header, "快速记账", LedgerStyle.CAPTION, style.muted);
         quickLabel.setLayoutParams(new LinearLayout.LayoutParams(-2, -2));
         quickLabel.setPadding(dp(8), dp(6), 0, dp(6));
         if (!store.teamReady(trip)) {
@@ -490,12 +558,8 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        quickEntry = new QuickEntryPanel(this, trip, uiPrefs, currencyHistory, ledgerActions, forms, receipts, quickDraft,
-                saved -> {
-                    afterSave(saved, true);
-                    toast("已记账");
-                }, this::error);
-        quickDraft = null;
+        quickEntry = new QuickEntryPanel(this, trip, uiPrefs, currencyHistory, noteHistory, ledgerActions, forms, receipts, quickDrafts,
+                this::error);
         body.addView(quickEntry, new LinearLayout.LayoutParams(-1, -2, 1));
         addCashActions(sections, trip);
     }
@@ -503,19 +567,21 @@ public final class MainActivity extends Activity {
     private void addCashActions(LinearLayout sections, LedgerStore.Trip trip) {
         LinearLayout cash = new LinearLayout(this);
         cash.setOrientation(LinearLayout.VERTICAL);
-        cash.setPadding(dp(16), dp(10), dp(16), dp(8));
-        GradientDrawable background = forms.chip(Color.WHITE, 0xffdce6df, false);
-        background.setCornerRadius(dp(16));
-        cash.setBackground(background);
+        int inset = dp(LedgerStyle.CARD_INSET);
+        cash.setPadding(inset, dp(10), inset, dp(12));
+        cash.setBackground(style.card());
         LinearLayout.LayoutParams margin = new LinearLayout.LayoutParams(-1, -2);
-        margin.setMargins(dp(14), dp(8), dp(14), dp(18));
+        margin.setMargins(dp(LedgerStyle.PAGE_INSET), dp(LedgerStyle.CONTROL_GAP), dp(LedgerStyle.PAGE_INSET), dp(18));
         sections.addView(cash, margin);
-        TextView title = text(cash, "现金与结算", 18, 0xff154b3c);
-        title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
+        TextView title = style.heading("现金管理", LedgerStyle.SECTION_TITLE);
+        title.setPadding(0, dp(4), 0, dp(10));
+        cash.addView(title, fullMargin());
         LedgerIcon.attach(title, R.drawable.ic_ledger_split);
         View divider = new View(this);
-        divider.setBackgroundColor(0xffe6eee8);
-        cash.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
+        divider.setBackgroundColor(style.divider);
+        LinearLayout.LayoutParams rule = new LinearLayout.LayoutParams(-1, dp(1));
+        rule.bottomMargin = dp(LedgerStyle.CONTROL_GAP);
+        cash.addView(divider, rule);
         Button deposit = button(LedgerReview.CASH_LABEL, () -> openCashForm(trip.id, forms::moneyIn));
         Button exchange = button("换汇", () -> openCashForm(trip.id, forms::exchange));
         if (trip.people() > 1) {
@@ -531,7 +597,7 @@ public final class MainActivity extends Activity {
 
     private void waitingForTeam(LinearLayout body) {
         awaitingEnrollment = true;
-        syncView = text(body, "等待首次登记", 15, Color.GRAY);
+        syncView = text(body, "等待首次登记", LedgerStyle.BODY, style.muted);
         body.addView(button("查看登记进度", () -> openTeam(TeamSetupActivity.JOIN, currentTripId)), fullMargin());
         updateSync();
     }
@@ -551,7 +617,7 @@ public final class MainActivity extends Activity {
         loading.setPadding(dp(18), dp(18), dp(18), 0);
         reviewContent.addView(loading, new FrameLayout.LayoutParams(-1, -2));
         heading(loading, trip.name);
-        text(loading, "正在读取流水…", 14, Color.GRAY);
+        text(loading, "正在读取流水…", LedgerStyle.LABEL, style.muted);
         refreshReview(trip.id);
     }
 
@@ -617,7 +683,7 @@ public final class MainActivity extends Activity {
         int position = first == null ? 0 : reviewPanel.getFirstVisiblePosition();
         int offset = first == null ? 0 : first.getTop();
         long latest = Math.max(confirmed, teamTransport.syncState().confirmedThrough);
-        reviewPanel = new ReviewPanel(this, trip.name, review, recordFilter, latest, new ReviewPanel.Actions() {
+        reviewPanel = new ReviewPanel(this, trip.name, review, recordFilter, latest, true, new ReviewPanel.Actions() {
             @Override public void filter(String key) { recordFilter = key; }
             @Override public void openAll() { openRecords(trip, review); }
             @Override public void reconnect() {
@@ -657,8 +723,8 @@ public final class MainActivity extends Activity {
 
     private void openRecords(LedgerStore.Trip trip, LedgerReview review) {
         if (reviewContent == null || recordsOverlay != null) return;
-        recordsOverlay = reviewPanel.allRecords(this::closeRecords, () -> chooseExportFormat(trip, review));
-        reviewPanel.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        recordsOverlay = reviewPanel.allRecords(this::closeRecords, () -> chooseExportFormat(trip, review.hasReceipts));
+        reviewPanel.setVisibility(View.INVISIBLE);
         reviewContent.addView(recordsOverlay, new FrameLayout.LayoutParams(-1, -1));
     }
 
@@ -666,35 +732,35 @@ public final class MainActivity extends Activity {
         reviewContent.removeView(recordsOverlay);
         recordsOverlay = null;
         reviewPanel.recordsClosed();
-        reviewPanel.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+        reviewPanel.setVisibility(View.VISIBLE);
     }
 
-    private void chooseExportFormat(LedgerStore.Trip trip, LedgerReview review) {
-        if (review.hasReceipts) {
-            new AlertDialog.Builder(this).setTitle("导出")
-                    .setItems(new String[]{"旅行记录（文本）", "账本备份（含小票）"},
-                            (dialog, choice) -> chooseExportFile(trip, review.records, choice == 1)).show();
-        } else chooseExportFile(trip, review.records, false);
+    private void chooseExportFormat(LedgerStore.Trip trip, boolean hasReceipts) {
+        if (hasReceipts) {
+            AlertDialog options = new AlertDialog.Builder(this).setTitle("导出")
+                    .setItems(new String[]{"旅行日志（文本）", "账本备份（含小票）"},
+                            (dialog, choice) -> chooseExportFile(trip, choice == 1))
+                    .setNegativeButton("取消", null).show();
+            style.alertActions(options, LedgerStyle.Action.OUTLINE);
+        } else chooseExportFile(trip, false);
     }
 
-    private void chooseExportFile(LedgerStore.Trip trip, List<LedgerReview.Row> records, boolean archive) {
+    private void chooseExportFile(LedgerStore.Trip trip, boolean archive) {
         String name = trip.name.replace('/', '_').replace('\\', '_');
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
                 .setType(archive ? "application/zip" : "text/plain")
-                .putExtra(Intent.EXTRA_TITLE, name + (archive ? ".rlbackup.zip" : "-旅行记录.txt"));
+                .putExtra(Intent.EXTRA_TITLE, name + (archive ? ".rlbackup.zip" : "-旅行日志.txt"));
         exportTripId = trip.id;
         exportArchive = archive;
-        pendingExport = records;
         try { startActivityForResult(intent, REQUEST_EXPORT); }
         catch (android.content.ActivityNotFoundException error) {
             exportTripId = null;
             exportArchive = false;
-            pendingExport = null;
             toast("系统文件选择器不可用");
         }
     }
 
-    private void exportRecords(Uri destination, String tripId, List<LedgerReview.Row> records, boolean archiveSelected) {
+    private void exportRecords(Uri destination, String tripId, boolean archiveSelected) {
         new Thread(() -> {
             String status;
             try {
@@ -716,8 +782,8 @@ public final class MainActivity extends Activity {
                     }
                     status = "账本备份已保存";
                 } else {
-                    writeRecordText(destination, tripId, records);
-                    status = "旅行记录已导出";
+                    writeReportText(destination, tripId);
+                    status = "旅行日志已导出";
                 }
             } catch (Exception error) { status = "导出失败，请重试"; }
             String message = status;
@@ -747,21 +813,14 @@ public final class MainActivity extends Activity {
         return destination.getLastPathSegment();
     }
 
-    private void writeRecordText(Uri destination, String tripId, List<LedgerReview.Row> records) throws IOException {
-        List<LedgerReview.Row> rows = records;
-        if (rows == null) {
-            LedgerStore.Snapshot snapshot = store.snapshot(tripId);
-            if (snapshot.trip == null) throw new IOException("旅行不存在");
-            rows = new LedgerReview(snapshot.trip, snapshot.totals()).records;
-        }
+    private void writeReportText(Uri destination, String tripId) throws IOException {
+        LedgerStore.Snapshot snapshot = store.snapshotWithReceipts(tripId);
+        if (snapshot.trip == null) throw new IOException("旅行不存在");
+        LedgerReport report = LedgerReport.from(snapshot);
         try (OutputStream stream = getContentResolver().openOutputStream(destination, "wt")) {
             if (stream == null) throw new IOException("无法打开文件");
             try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(stream, StandardCharsets.UTF_8))) {
-                for (LedgerReview.Row row : rows) {
-                    writer.write(row.label);
-                    writer.newLine();
-                    writer.newLine();
-                }
+                report.write(writer);
             }
         }
     }
@@ -779,18 +838,32 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void onQuickSaveFinished(String tripId, Exception failure) {
+        if (!tripId.equals(currentTripId)) return;
+        boolean showingQuick = screen == QUICK;
+        if (failure != null) {
+            if (quickEntry != null) quickEntry.saveFailed();
+            if (started) error(failure);
+            return;
+        }
+        // Don't capture the submitted values when replacing the form.
+        if (showingQuick) quickEntry = null;
+        LedgerStore.Trip trip = store.getTrip(tripId);
+        if (trip == null) return;
+        afterSave(trip, showingQuick);
+        if (started) toast("已记账");
+    }
+
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
         if (receipts.activityResult(request, result, data)) return;
         if (request == REQUEST_EXPORT) {
             String tripId = exportTripId;
             boolean archive = exportArchive;
-            List<LedgerReview.Row> records = pendingExport;
             exportTripId = null;
             exportArchive = false;
-            pendingExport = null;
             if (tripId != null && result == RESULT_OK && data != null && data.getData() != null)
-                exportRecords(data.getData(), tripId, records, archive);
+                exportRecords(data.getData(), tripId, archive);
             return;
         }
         if (request != REQUEST_TEAM) return;
@@ -799,26 +872,24 @@ public final class MainActivity extends Activity {
         else render();
     }
 
-    private void heading(LinearLayout body, String value) { text(body, value, 26, Color.rgb(21, 75, 60)); }
-    private void section(LinearLayout body, String value) { text(body, value, 19, Color.rgb(21, 75, 60)); }
+    private void heading(LinearLayout body, String value) { addHeading(body, value, LedgerStyle.PAGE_TITLE); }
+    private void section(LinearLayout body, String value) { addHeading(body, value, LedgerStyle.SECTION_TITLE); }
+
+    private void addHeading(LinearLayout body, String value, int size) {
+        TextView view = style.heading(value, size);
+        view.setPadding(0, dp(8), 0, dp(6));
+        body.addView(view, fullMargin());
+    }
 
     private TextView text(LinearLayout body, String value, int sp, int color) {
-        TextView view = new TextView(this);
-        view.setText(value);
-        view.setTextColor(color);
-        view.setTextSize(sp);
+        TextView view = style.text(value, sp, color);
         view.setPadding(0, dp(8), 0, dp(8));
         body.addView(view, fullMargin());
         return view;
     }
 
     private Button button(String value, Runnable onClick) {
-        Button button = new Button(this);
-        button.setText(value);
-        button.setTextSize(13);
-        button.setAllCaps(false);
-        button.setOnClickListener(v -> onClick.run());
-        return button;
+        return style.button(value, LedgerStyle.Action.OUTLINE, onClick);
     }
 
     private void row(LinearLayout body, Button left, Button right) {
@@ -826,7 +897,7 @@ public final class MainActivity extends Activity {
         line.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams first = new LinearLayout.LayoutParams(0, -2, 1);
         LinearLayout.LayoutParams second = new LinearLayout.LayoutParams(0, -2, 1);
-        second.leftMargin = dp(6);
+        second.setMarginStart(dp(LedgerStyle.CONTROL_GAP));
         line.addView(left, first);
         line.addView(right, second);
         body.addView(line, fullMargin());
@@ -834,11 +905,11 @@ public final class MainActivity extends Activity {
 
     private LinearLayout.LayoutParams fullMargin() {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
-        params.bottomMargin = dp(4);
+        params.bottomMargin = dp(LedgerStyle.ITEM_GAP);
         return params;
     }
 
-    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+    private int dp(int value) { return style.dp(value); }
     private void toast(String value) { Toast.makeText(this, value, Toast.LENGTH_SHORT).show(); }
     private void error(Exception e) { toast(e.getMessage() == null ? "操作失败" : e.getMessage()); }
 }

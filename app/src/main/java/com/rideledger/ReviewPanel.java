@@ -2,20 +2,16 @@ package com.rideledger;
 
 import android.app.AlertDialog;
 import android.content.Context;
-import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
-import android.graphics.drawable.GradientDrawable;
-import android.graphics.drawable.RippleDrawable;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
 import android.text.style.StyleSpan;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -31,7 +27,10 @@ import android.widget.ListView;
 import android.widget.TextView;
 
 import java.util.ArrayList;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Set;
 import java.util.List;
 
@@ -49,11 +48,14 @@ final class ReviewPanel extends ListView {
 
     private static final int PREVIEW_SIZE = 5;
     private static final int EMPTY_STATE_TEXT_SIZE = 15;
-    private static final int EMPTY_STATE_TEXT_COLOR = Color.GRAY;
+    private static final int RECORD_RADIUS = 8;
     private static final String[] KEYS = {"all", "shared", LedgerReview.CASH_FILTER, "exchange"};
     private static final String[] LABELS = {"全部", "共同支出", LedgerReview.CASH_LABEL, "换汇记录"};
 
     private final LedgerReview model;
+    private final boolean editable;
+    private final LedgerStyle style;
+    private final SimpleDateFormat checkTime = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA);
     private final Actions actions;
     private final TextView count;
     final TextView syncStatus;
@@ -64,12 +66,14 @@ final class ReviewPanel extends ListView {
     private long confirmedThrough;
     private RecordsOverlay records;
     ReviewPanel(Context context, String tripName, LedgerReview model, String initialFilter,
-                long confirmedThrough, Actions actions) {
+                long confirmedThrough, boolean editable, Actions actions) {
         super(context);
+        style = new LedgerStyle(context);
         this.model = model;
+        this.editable = editable;
         this.actions = actions;
         this.confirmedThrough = confirmedThrough;
-        setPadding(dp(18), 0, dp(18), 0);
+        setPadding(dp(LedgerStyle.PAGE_INSET), 0, dp(LedgerStyle.PAGE_INSET), 0);
         setDivider(null);
         setSelector(new ColorDrawable(Color.TRANSPARENT));
         LinearLayout header = column();
@@ -79,8 +83,9 @@ final class ReviewPanel extends ListView {
         LinearLayout titleRow = new LinearLayout(context);
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
         header.addView(titleRow, new LinearLayout.LayoutParams(-1, -2));
-        TextView title = text(titleRow, tripName, 26, 0xff154b3c);
-        title.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
+        TextView title = style.heading(tripName, LedgerStyle.PAGE_TITLE);
+        title.setPadding(0, dp(LedgerStyle.CONTROL_GAP), 0, dp(LedgerStyle.CONTROL_GAP));
+        titleRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
         title.setMaxLines(2);
         title.setEllipsize(TextUtils.TruncateAt.END);
         connection = new ConnectionBadge(context, actions::reconnect);
@@ -89,44 +94,58 @@ final class ReviewPanel extends ListView {
         LinearLayout.LayoutParams badgeWidth = new LinearLayout.LayoutParams(-2, -2);
         badgeWidth.setMarginStart(dp(8));
         titleRow.addView(connection, badgeWidth);
-        if (model.incomplete) text(header, "部分记录超出金额范围，合计不完整。", 14, 0xff9b4b25);
+        if (model.incomplete) text(header, "部分记录超出金额范围，合计不完整。", LedgerStyle.LABEL, style.warning);
         LinearLayout spending = card(header, "总支出", R.drawable.ic_ledger_receipt);
-        text(spending, model.spending, model.hasSpending ? 20 : 15, model.hasSpending ? Color.BLACK : Color.GRAY);
+        TextView total = text(spending, model.spending, model.hasSpending ? 20 : LedgerStyle.BODY,
+                model.hasSpending ? style.title : style.muted);
+        if (model.hasSpending) total.setTypeface(LedgerStyle.MEDIUM);
         LinearLayout balances = card(header, "现金余额", R.drawable.ic_ledger_balance);
-        for (String balance : model.balances) text(balances, balance, 16, Color.BLACK);
+        for (String balance : model.balances) text(balances, balance, 16, style.ink);
         LinearLayout history = card(header, "旅行记录", R.drawable.ic_ledger_book);
-        count = text(history, "", 13, Color.GRAY);
+        count = text(history, "", LedgerStyle.CAPTION, style.muted);
         buildFilters(history);
         preview = column();
         history.addView(preview, fullMargin());
         buildSettlement(card(ending, "小队结算", R.drawable.ic_ledger_reconcile));
-        syncStatus = text(ending, "", 13, Color.GRAY);
+        syncStatus = text(ending, "", LedgerStyle.CAPTION, style.muted);
         header.addView(ending);
         selectFilter(initialFilter);
         addHeaderView(header, null, false);
         setAdapter(new ArrayAdapter<String>(context, android.R.layout.simple_list_item_1));
     }
 
-    void updateConnections(LedgerStore.Trip trip, SyncEngine.Status state) {
+    void updateSync(LedgerStore.Trip trip, SyncEngine.Status state, long lastCheckedAt) {
         connection.update(trip, state);
+        StringBuilder status = new StringBuilder("本机已保存");
+        boolean teamTrip = trip.people() > 1;
+        if (teamTrip) {
+            if (state.phase == SyncEngine.Phase.SYNCING) status.append("\n正在与同伴核对");
+            if (state.pending > 0) status.append("\n").append("待同伴确认 ").append(state.pending).append(" 条");
+        }
+        if (model.pendingReceipts > 0) status.append("\n小票待补传 ").append(model.pendingReceipts).append(" 张");
+        if (teamTrip) {
+            if (lastCheckedAt > 0) status.append("\n上次与同伴核对  ").append(checkTime.format(new Date(lastCheckedAt)));
+            else status.append("\n暂无同伴核对时间");
+        }
+        if (!status.toString().contentEquals(syncStatus.getText())) syncStatus.setText(status.toString());
     }
 
     private void buildSettlement(LinearLayout card) {
         if (model.records.stream().anyMatch(row -> !row.event.financialOptions.isEmpty()))
-            text(card, "有账目待核对，结算暂按当前显示版本计算", 13, 0xff94631c);
+            text(card, "有账目待核对，结算暂按当前显示版本计算", LedgerStyle.CAPTION, style.warning);
         if (model.settlement.isEmpty()) {
-            text(card, "目前已结清", EMPTY_STATE_TEXT_SIZE, EMPTY_STATE_TEXT_COLOR);
+            text(card, "目前已结清", EMPTY_STATE_TEXT_SIZE, style.muted);
             return;
         }
         for (int i = 0; i < model.settlement.size(); i++) {
             if (i > 0) divider(card);
             LedgerReview.Debt debt = model.settlement.get(i);
-            TextView direction = text(card, debt.payer + " → " + debt.recipient, 14, 0xff52665a);
+            TextView direction = text(card, debt.payer + " → " + debt.recipient, LedgerStyle.LABEL, style.muted);
             direction.setContentDescription(debt.payer + " 应还 " + debt.recipient);
             direction.setPadding(0, dp(10), 0, 0);
             ((LinearLayout.LayoutParams) direction.getLayoutParams()).bottomMargin = dp(2);
             String amounts = String.join("　", debt.amounts).replace(' ', '\u00a0');
-            TextView amount = text(card, amounts, 17, 0xff154b3c);
+            TextView amount = text(card, amounts, 17, style.title);
             amount.setTypeface(amount.getTypeface(), Typeface.BOLD);
             amount.setPadding(0, 0, 0, dp(8));
         }
@@ -148,10 +167,10 @@ final class ReviewPanel extends ListView {
             String key = KEYS[i];
             TextView chip = new TextView(getContext());
             chip.setText(LABELS[i]);
-            chip.setTextSize(14);
+            chip.setTextSize(LedgerStyle.LABEL);
             chip.setGravity(Gravity.CENTER);
             chip.setPadding(dp(2), dp(8), dp(2), dp(8));
-            chip.setMinHeight(dp(44));
+            chip.setMinHeight(dp(LedgerStyle.COMPACT_HEIGHT));
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
             if (i % perRow != perRow - 1) params.setMarginEnd(dp(5));
             row.addView(chip, params);
@@ -169,8 +188,9 @@ final class ReviewPanel extends ListView {
         for (int i = 0; i < chips.size(); i++) {
             boolean selected = KEYS[i].equals(key);
             TextView chip = chips.get(i);
-            chip.setBackground(surface(selected ? 0xffe8f5eb : Color.WHITE, selected ? 0xffa8d1b2 : 0xffdce8df, 24));
-            chip.setTextColor(selected ? 0xff176344 : 0xff607969);
+            chip.setBackground(style.ripple(style.rounded(selected ? style.selected : style.surface,
+                    style.stroke, LedgerStyle.CONTROL_RADIUS), LedgerStyle.CONTROL_RADIUS));
+            chip.setTextColor(selected ? style.primary : style.muted);
             chip.setSelected(selected);
             if (selected) label = LABELS[i];
         }
@@ -180,18 +200,18 @@ final class ReviewPanel extends ListView {
         count.setText(all ? filtered.size() + " 笔" : filtered.size() + " / " + model.records.size() + " 笔");
         if (filtered.isEmpty()) {
             text(preview, all ? "还没有记录" : "暂无" + label + "。可切换到“全部”查看完整流水。",
-                    EMPTY_STATE_TEXT_SIZE, EMPTY_STATE_TEXT_COLOR);
+                    EMPTY_STATE_TEXT_SIZE, style.muted);
         } else {
             int end = Math.min(PREVIEW_SIZE, filtered.size());
             for (int i = 0; i < end; i++) {
-                RecordCard card = new RecordCard();
+                RecordCard card = new RecordCard(false);
                 preview.addView(card, fullMargin());
                 bindRecord(card, filtered.get(i), true);
             }
         }
         if (!model.records.isEmpty())
-            preview.addView(button(model.records.size() > PREVIEW_SIZE ? "显示更多" : "查看全部",
-                    actions::openAll), fullMargin());
+            preview.addView(style.button(model.records.size() > PREVIEW_SIZE ? "显示更多" : "查看全部",
+                    LedgerStyle.Action.TINT, actions::openAll), fullMargin());
     }
 
     View allRecords(Runnable close, Runnable export) {
@@ -222,44 +242,45 @@ final class ReviewPanel extends ListView {
         RecordsOverlay(Runnable close, Runnable export) {
             super(ReviewPanel.this.getContext());
             setOrientation(VERTICAL);
-            setBackgroundColor(Color.WHITE);
-            setPadding(dp(16), dp(8), dp(16), 0);
+            setBackgroundColor(style.surface);
+            setPadding(dp(LedgerStyle.PAGE_INSET), dp(LedgerStyle.ITEM_GAP), dp(LedgerStyle.PAGE_INSET), 0);
             setClickable(true);
             if (android.os.Build.VERSION.SDK_INT >= 28) setAccessibilityPaneTitle("全部旅行记录");
 
-            LinearLayout toolbar = new LinearLayout(getContext());
-            toolbar.setGravity(Gravity.CENTER_VERTICAL);
-            addView(toolbar, fullMargin());
-            title = text(toolbar, "全部旅行记录", 18, 0xff154b3c);
-            title.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
+            title = style.heading("全部旅行记录", 16);
+            LinearLayout controls = new LinearLayout(getContext());
+            controls.setGravity(Gravity.CENTER_VERTICAL);
             trash = new ImageButton(getContext());
             trash.setImageResource(android.R.drawable.ic_menu_delete);
-            trash.setColorFilter(0xffa53831);
+            trash.setColorFilter(style.danger);
             trash.setContentDescription("选择要删除的记录");
             trash.setOnClickListener(view -> {
                 selecting = true;
                 updateToolbar();
                 adapterChanged();
             });
-            TypedValue ripple = new TypedValue();
-            if (getContext().getTheme().resolveAttribute(android.R.attr.selectableItemBackground, ripple, true))
-                trash.setBackgroundResource(ripple.resourceId);
-            toolbar.addView(trash, new LinearLayout.LayoutParams(dp(44), dp(44)));
-            exportButton = toolbarButton("导出", export);
-            closeButton = toolbarButton("退出", close);
-            cancel = toolbarButton("取消", this::cancelSelection);
-            delete = toolbarButton("删除", this::confirmSelection);
-            delete.setTextColor(0xffa53831);
-            toolbar.addView(exportButton);
-            toolbar.addView(closeButton);
-            toolbar.addView(cancel);
-            toolbar.addView(delete);
-            text(this, model.records.size() + " 笔", 13, Color.GRAY);
+            trash.setBackground(style.ripple(null, LedgerStyle.CONTROL_RADIUS));
+            trash.setPadding(dp(10), dp(10), dp(10), dp(10));
+            trash.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+            int target = dp(LedgerStyle.COMPACT_HEIGHT);
+            controls.addView(trash, new LinearLayout.LayoutParams(target, target));
+            exportButton = recordAction("日志导出", LedgerStyle.Action.QUIET, export);
+            closeButton = recordAction("退出", LedgerStyle.Action.QUIET, close);
+            cancel = recordAction("取消", LedgerStyle.Action.QUIET, this::cancelSelection);
+            delete = recordAction("删除", LedgerStyle.Action.DANGER, this::confirmSelection);
+            controls.addView(exportButton);
+            controls.addView(closeButton);
+            controls.addView(cancel);
+            controls.addView(delete);
+            addView(recordsToolbar(controls), new LinearLayout.LayoutParams(-1, -2));
+            TextView total = style.text(model.records.size() + " 笔", 11, style.muted);
+            total.setPadding(0, 0, 0, dp(5));
+            addView(total, new LinearLayout.LayoutParams(-1, -2));
 
             list = new ListView(getContext());
             list.setSelector(new ColorDrawable(Color.TRANSPARENT));
-            list.setDivider(new ColorDrawable(Color.WHITE));
-            list.setDividerHeight(dp(4));
+            list.setDivider(new ColorDrawable(style.surface));
+            list.setDividerHeight(dp(3));
             list.setItemsCanFocus(true);
             adapter = new BaseAdapter() {
                 @Override public int getCount() { return model.records.size(); }
@@ -292,15 +313,50 @@ final class ReviewPanel extends ListView {
             updateToolbar();
         }
 
+        private LinearLayout recordsToolbar(LinearLayout controls) {
+            LinearLayout.LayoutParams titleSize = new LinearLayout.LayoutParams(0, -2, 1);
+            int gap = dp(LedgerStyle.ITEM_GAP);
+            LinearLayout toolbar = new LinearLayout(getContext()) {
+                @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                    title.measure(0, 0);
+                    controls.measure(0, 0);
+                    int needed = title.getMeasuredWidth() + gap + controls.getMeasuredWidth();
+                    boolean stack = MeasureSpec.getMode(widthSpec) != MeasureSpec.UNSPECIFIED
+                            && MeasureSpec.getSize(widthSpec) < needed;
+                    setOrientation(stack ? VERTICAL : HORIZONTAL);
+                    titleSize.width = stack ? -1 : 0;
+                    titleSize.weight = stack ? 0 : 1;
+                    titleSize.setMarginEnd(stack ? 0 : gap);
+                    super.onMeasure(widthSpec, heightSpec);
+                }
+            };
+            toolbar.setGravity(Gravity.CENTER_VERTICAL);
+            toolbar.addView(title, titleSize);
+            LinearLayout.LayoutParams controlsSize = new LinearLayout.LayoutParams(-2, -2);
+            controlsSize.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
+            toolbar.addView(controls, controlsSize);
+            return toolbar;
+        }
+
+        private Button recordAction(String label, LedgerStyle.Action action, Runnable click) {
+            Button button = style.button(label, action, click);
+            int target = dp(LedgerStyle.COMPACT_HEIGHT);
+            button.setTextSize(LedgerStyle.CAPTION);
+            button.setMinWidth(target);
+            button.setMinHeight(target);
+            button.setMinimumHeight(target);
+            button.setPadding(dp(6), dp(4), dp(6), dp(4));
+            return button;
+        }
+
         private void updateToolbar() {
             title.setText(selecting ? "已选 " + selected.size() + " 笔" : "全部旅行记录");
-            trash.setVisibility(!selecting && !model.records.isEmpty() ? VISIBLE : GONE);
+            trash.setVisibility(editable && !selecting && !model.records.isEmpty() ? VISIBLE : GONE);
             exportButton.setVisibility(selecting ? GONE : VISIBLE);
             closeButton.setVisibility(selecting ? GONE : VISIBLE);
             cancel.setVisibility(selecting ? VISIBLE : GONE);
             delete.setVisibility(selecting ? VISIBLE : GONE);
             delete.setEnabled(!selected.isEmpty());
-            delete.setAlpha(delete.isEnabled() ? 1f : 0.45f);
         }
 
         private void adapterChanged() { adapter.notifyDataSetChanged(); }
@@ -321,7 +377,7 @@ final class ReviewPanel extends ListView {
                     .setMessage("将删除 " + ids.size() + " 笔记录。删除会在下次与队友同步时传到对方的账本。")
                     .setNegativeButton("取消", null)
                     .setPositiveButton("确认删除", (dialog, which) -> actions.delete(ids)).show();
-            confirmation.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(0xffa53831);
+            style.alertActions(confirmation, LedgerStyle.Action.DANGER);
         }
 
         void restore(RecordsOverlay previous) {
@@ -367,42 +423,48 @@ final class ReviewPanel extends ListView {
 
     private void styleRecord(View item, LedgerReview.Row record) {
         boolean pending = record.localRow > confirmedThrough;
-        item.setBackground(surface(pending ? 0xffe9ebed : 0xfff4f8f5, 0, 8));
+        item.setBackground(style.rounded(pending ? style.pendingRecord : style.confirmedRecord, 0, RECORD_RADIUS));
         item.setContentDescription(record.label + (record.event.conflicted() ? "，有并发修改" : "") +
                 (pending ? "，待同步" : ""));
     }
 
     private final class RecordCard extends LinearLayout {
+        final boolean compact;
         final TextView type, time, details, arrow, note, receiptStatus;
         final LinearLayout receipt;
         final ImageView thumbnail;
 
-        RecordCard() {
+        RecordCard(boolean compact) {
             super(ReviewPanel.this.getContext());
+            this.compact = compact;
             setOrientation(VERTICAL);
-            setPadding(dp(12), dp(10), dp(12), dp(10));
+            int horizontalPadding = dp(compact ? 10 : 12);
+            int verticalPadding = dp(compact ? 6 : 10);
+            setPadding(horizontalPadding, verticalPadding, horizontalPadding, verticalPadding);
             LinearLayout meta = new LinearLayout(getContext());
             meta.setGravity(Gravity.TOP);
             LinearLayout.LayoutParams metaSize = new LinearLayout.LayoutParams(-1, -2);
-            metaSize.bottomMargin = dp(3);
+            metaSize.bottomMargin = dp(compact ? 2 : 3);
             addView(meta, metaSize);
             type = new TextView(getContext());
-            type.setTextSize(12);
+            type.setTextSize(compact ? 11 : 12);
+            type.setIncludeFontPadding(!compact);
             type.setTypeface(type.getTypeface(), Typeface.BOLD);
-            type.setTextColor(0xff28634e);
+            type.setTextColor(style.primary);
             LinearLayout.LayoutParams typeSize = new LinearLayout.LayoutParams(0, -2, 1);
             typeSize.setMarginEnd(dp(8));
             meta.addView(type, typeSize);
             time = new TextView(getContext());
-            time.setTextSize(12);
-            time.setTextColor(0xff586b61);
+            time.setTextSize(compact ? 11 : 12);
+            time.setIncludeFontPadding(!compact);
+            time.setTextColor(style.muted);
             time.setGravity(Gravity.END);
             meta.addView(time, new LinearLayout.LayoutParams(-2, -2));
             arrow = new TextView(getContext());
             arrow.setText("›");
-            arrow.setTextSize(16);
+            arrow.setTextSize(compact ? 14 : 16);
             arrow.setIncludeFontPadding(false);
-            arrow.setTextColor(0xff426d5b);
+            arrow.setTextColor(style.muted);
             LinearLayout.LayoutParams arrowSize = new LinearLayout.LayoutParams(-2, -2);
             arrowSize.setMarginStart(dp(8));
             meta.addView(arrow, arrowSize);
@@ -413,10 +475,12 @@ final class ReviewPanel extends ListView {
             body.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
             details = new TextView(getContext());
             details.setTextSize(15);
-            details.setLineSpacing(dp(2), 1f);
+            details.setIncludeFontPadding(!compact);
+            details.setLineSpacing(compact ? 0 : dp(2), 1f);
             copy.addView(details, new LinearLayout.LayoutParams(-1, -2));
             note = new TextView(getContext());
-            note.setTextSize(13);
+            note.setTextSize(compact ? 12 : 13);
+            note.setIncludeFontPadding(!compact);
             note.setTextColor(Color.BLACK);
             note.setMaxLines(2);
             note.setEllipsize(TextUtils.TruncateAt.END);
@@ -426,17 +490,17 @@ final class ReviewPanel extends ListView {
             receipt.setMinimumWidth(dp(48));
             receipt.setMinimumHeight(dp(48));
             LinearLayout.LayoutParams receiptSize = new LinearLayout.LayoutParams(-2, -2);
-            receiptSize.setMarginStart(dp(10));
+            receiptSize.setMarginStart(dp(compact ? 8 : 10));
             body.addView(receipt, receiptSize);
             thumbnail = new ImageView(getContext());
-            thumbnail.setBackground(surface(0xffdce9df, 0, 7));
+            thumbnail.setBackground(style.rounded(style.stroke, 0, 7));
             thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
             thumbnail.setClipToOutline(true);
             receipt.addView(thumbnail, new LinearLayout.LayoutParams(dp(36), dp(36)));
             receiptStatus = new TextView(getContext());
             receiptStatus.setText("图片待同步");
             receiptStatus.setTextSize(10);
-            receiptStatus.setTextColor(0xff586b61);
+            receiptStatus.setTextColor(style.muted);
             receiptStatus.setGravity(Gravity.CENTER);
             receipt.addView(receiptStatus, new LinearLayout.LayoutParams(-2, -2));
             setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
@@ -446,7 +510,7 @@ final class ReviewPanel extends ListView {
 
         @Override public boolean onTouchEvent(MotionEvent event) {
             if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-                int radius = dp(8);
+                int radius = dp(RECORD_RADIUS);
                 float dx = Math.max(0, radius - Math.min(event.getX(), getWidth() - event.getX()));
                 float dy = Math.max(0, radius - Math.min(event.getY(), getHeight() - event.getY()));
                 if (dx * dx + dy * dy > radius * radius) return false;
@@ -455,17 +519,17 @@ final class ReviewPanel extends ListView {
         }
     }
 
-    private void bindRecord(RecordCard card, LedgerReview.Row record, boolean editing) {
+    private void bindRecord(RecordCard card, LedgerReview.Row record, boolean actionsEnabled) {
         card.type.setText(record.type);
         card.time.setText(record.time);
-        CharSequence body = recordText(record);
+        CharSequence body = recordText(record, card.compact);
         card.details.setText(body);
         card.details.setVisibility(body.length() == 0 ? GONE : VISIBLE);
-        card.note.setText(record.note);
+        card.note.setText(ExpenseCategory.visibleNote(record.note));
         card.note.setVisibility(record.note.isEmpty() ? GONE : VISIBLE);
         card.receipt.setVisibility(record.receipt == null ? GONE : VISIBLE);
         card.thumbnail.setTag(null);
-        boolean canViewReceipt = editing && record.receipt != null;
+        boolean canViewReceipt = actionsEnabled && record.receipt != null;
         card.receipt.setOnClickListener(canViewReceipt ? view -> actions.openReceipt(record) : null);
         card.receipt.setClickable(canViewReceipt);
         card.receipt.setFocusable(canViewReceipt);
@@ -475,49 +539,49 @@ final class ReviewPanel extends ListView {
             actions.thumbnail(record, card.thumbnail);
         }
         card.setTag(record);
-        boolean editable = editing && LedgerRules.editable(record.event.kind);
-        card.arrow.setVisibility(editable ? VISIBLE : GONE);
-        card.setOnClickListener(editable ? view -> actions.edit(record) : null);
-        card.setClickable(editable);
-        card.setFocusable(editable);
-        card.setForeground(editable ? new RippleDrawable(ColorStateList.valueOf(0x26176344), null,
-                surface(Color.WHITE, 0, 8)) : null);
+        boolean canEdit = actionsEnabled && editable && LedgerRules.editable(record.event.kind);
+        card.arrow.setVisibility(canEdit ? VISIBLE : GONE);
+        card.setOnClickListener(canEdit ? view -> actions.edit(record) : null);
+        card.setClickable(canEdit);
+        card.setFocusable(canEdit);
+        card.setForeground(canEdit ? style.ripple(null, RECORD_RADIUS) : null);
         styleRecord(card, record);
     }
 
-    private static CharSequence recordText(LedgerReview.Row record) {
+    private CharSequence recordText(LedgerReview.Row record, boolean compact) {
         SpannableStringBuilder line = new SpannableStringBuilder();
         if (!record.amount.isEmpty()) {
-            appendAmount(line, record.amount);
+            appendAmount(line, record.amount, compact);
             if (!record.received.isEmpty()) {
-                append(line, "  →\u00a0", 15, 0xff607969, false);
-                appendAmount(line, record.received);
+                append(line, "  →\u00a0", compact ? 13 : 15, style.muted, false);
+                appendAmount(line, record.received, compact);
             }
         }
         if (!record.people.isEmpty()) {
             if (line.length() > 0) line.append('\n');
-            append(line, record.people, 14, 0xff293f36, false);
+            append(line, record.people, compact ? 12 : 14, style.ink, false);
         }
         if (!record.split.isEmpty()) {
             if (line.length() > 0) line.append('\n');
-            append(line, "分摊  ", 12, 0xff586b61, true);
-            append(line, record.split, 13, 0xff43594e, false);
+            append(line, "分摊  ", compact ? 11 : 12, style.muted, true);
+            append(line, record.split, compact ? 12 : 13, style.muted, false);
         }
         if (record.event.conflicted()) {
             if (line.length() > 0) line.append('\n');
-            append(line, "有并发修改 · 点开核对", 13, 0xff94631c, true);
+            append(line, "有并发修改 · 点开核对", compact ? 12 : 13, style.warning, true);
         }
         return line;
     }
 
-    private static void appendAmount(SpannableStringBuilder line, String amount) {
+    private void appendAmount(SpannableStringBuilder line, String amount, boolean compact) {
+        int size = compact ? 16 : 19;
         int currency = amount.lastIndexOf(' ');
         if (currency < 0) {
-            append(line, amount, 19, 0xff154b3c, true);
+            append(line, amount, size, style.title, true);
             return;
         }
-        append(line, amount.substring(0, currency), 19, 0xff154b3c, true);
-        append(line, "\u00a0" + amount.substring(currency + 1), 12, 0xff52665a, false);
+        append(line, amount.substring(0, currency), size, style.title, true);
+        append(line, "\u00a0" + amount.substring(currency + 1), compact ? 11 : 12, style.muted, false);
     }
 
     private static void append(SpannableStringBuilder line, String value, int size, int color, boolean bold) {
@@ -536,7 +600,7 @@ final class ReviewPanel extends ListView {
         CheckBox box = new CheckBox(getContext());
         box.setGravity(Gravity.CENTER);
         row.addView(box, new LinearLayout.LayoutParams(dp(44), dp(44)));
-        row.addView(new RecordCard(), new LinearLayout.LayoutParams(0, -2, 1));
+        row.addView(new RecordCard(true), new LinearLayout.LayoutParams(0, -2, 1));
         return row;
     }
 
@@ -548,13 +612,15 @@ final class ReviewPanel extends ListView {
 
     private LinearLayout card(LinearLayout parent, String title, int icon) {
         LinearLayout card = column();
-        card.setPadding(dp(16), dp(10), dp(16), dp(8));
-        card.setBackground(surface(Color.WHITE, 0xffdce6df, 16));
+        int inset = dp(LedgerStyle.CARD_INSET);
+        card.setPadding(inset, dp(10), inset, dp(8));
+        card.setBackground(style.card());
         LinearLayout.LayoutParams params = fullMargin();
-        params.bottomMargin = dp(14);
+        params.bottomMargin = dp(LedgerStyle.SECTION_GAP);
         parent.addView(card, params);
-        TextView label = text(card, title, 18, 0xff154b3c);
-        label.setTypeface(label.getTypeface(), Typeface.BOLD);
+        TextView label = style.heading(title, LedgerStyle.SECTION_TITLE);
+        label.setPadding(0, dp(8), 0, dp(8));
+        card.addView(label, fullMargin());
         LedgerIcon.attach(label, icon);
         divider(card);
         return card;
@@ -562,52 +628,22 @@ final class ReviewPanel extends ListView {
 
     private void divider(LinearLayout card) {
         View divider = new View(getContext());
-        divider.setBackgroundColor(0xffe6eee8);
+        divider.setBackgroundColor(style.divider);
         card.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
     }
 
-    private GradientDrawable surface(int fill, int stroke, int radius) {
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(fill);
-        background.setCornerRadius(dp(radius));
-        if (stroke != 0) background.setStroke(dp(1), stroke);
-        return background;
-    }
-
     private TextView text(LinearLayout parent, String label, int size, int color) {
-        TextView view = new TextView(getContext());
-        view.setText(label);
-        view.setTextColor(color);
-        view.setTextSize(size);
+        TextView view = style.text(label, size, color);
         view.setPadding(0, dp(8), 0, dp(8));
         parent.addView(view, fullMargin());
         return view;
     }
 
-    private Button button(String label, Runnable action) {
-        Button button = new Button(getContext());
-        button.setText(label);
-        button.setTextSize(13);
-        button.setAllCaps(false);
-        button.setOnClickListener(view -> action.run());
-        return button;
-    }
-
-    private Button toolbarButton(String label, Runnable action) {
-        Button button = button(label, action);
-        button.setMinWidth(dp(54));
-        button.setMinimumWidth(dp(54));
-        button.setMinHeight(dp(44));
-        button.setMinimumHeight(dp(44));
-        button.setPadding(dp(8), 0, dp(8), 0);
-        return button;
-    }
-
     private LinearLayout.LayoutParams fullMargin() {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
-        params.bottomMargin = dp(4);
+        params.bottomMargin = dp(LedgerStyle.ITEM_GAP);
         return params;
     }
 
-    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+    private int dp(int value) { return style.dp(value); }
 }

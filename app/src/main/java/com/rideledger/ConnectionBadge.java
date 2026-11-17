@@ -13,7 +13,6 @@ import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.style.ImageSpan;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Button;
@@ -22,22 +21,21 @@ import android.widget.TextView;
 /** Small visual marks, with full teammate names and channel descriptions for accessibility. */
 final class ConnectionBadge extends TextView {
     private static final int NAME_LIMIT = 6;
-    private static final int MUTED = 0xff60776a, ACTIVE = 0xff167053;
+    private final LedgerStyle style;
     private enum Symbol { WIFI, HOTSPOT, BLUETOOTH, OFFLINE, REFRESH, SEARCH }
     private boolean searching;
 
     ConnectionBadge(Context context, Runnable reconnect) {
         super(context);
+        style = new LedgerStyle(context);
         setTextSize(11);
-        setTextColor(MUTED);
+        setTextColor(style.muted);
         setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
         setMaxLines(2);
         setEllipsize(TextUtils.TruncateAt.END);
-        setMinHeight(dp(44));
+        setMinHeight(dp(LedgerStyle.COMPACT_HEIGHT));
         setPadding(dp(4), 0, dp(4), 0);
-        TypedValue ripple = new TypedValue();
-        if (context.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, ripple, true))
-            setBackgroundResource(ripple.resourceId);
+        setBackground(style.ripple(null, LedgerStyle.CONTROL_RADIUS));
         setOnClickListener(view -> reconnect.run());
     }
 
@@ -47,11 +45,11 @@ final class ConnectionBadge extends TextView {
         boolean canReconnect = trip.people() > 1;
         searching = canReconnect && state.searching;
         if (searching) {
-            icon(text, Symbol.SEARCH, ACTIVE);
+            icon(text, Symbol.SEARCH, style.primary);
             text.append(" 查找队友…");
             description.append("正在查找队友");
         } else if (state.links.isEmpty()) {
-            icon(text, Symbol.OFFLINE, MUTED);
+            icon(text, Symbol.OFFLINE, style.muted);
             String label = canReconnect ? "无连接" : "单人旅行";
             text.append(" ").append(label);
             description.append(label);
@@ -62,7 +60,7 @@ final class ConnectionBadge extends TextView {
                     description.append("，");
                 }
                 String name = trip.nameOf(link.member);
-                icon(text, Symbol.valueOf(link.channel.name()), link.active ? ACTIVE : MUTED);
+                icon(text, Symbol.valueOf(link.channel.name()), link.active ? style.primary : style.muted);
                 text.append('\u00a0').append(shortName(name));
                 description.append(name).append(link.active ? "正在通过" : "刚通过")
                         .append(channelName(link.channel)).append(link.active ? "同步" : "确认连通");
@@ -71,7 +69,7 @@ final class ConnectionBadge extends TextView {
         if (canReconnect) {
             if (!searching) {
                 text.append("   ");
-                icon(text, Symbol.REFRESH, MUTED);
+                icon(text, Symbol.REFRESH, style.muted);
             }
             description.append("。点击重新连接");
         }
@@ -110,7 +108,7 @@ final class ConnectionBadge extends TextView {
         text.setSpan(new ImageSpan(mark, ImageSpan.ALIGN_BOTTOM), start, start + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
 
-    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+    private int dp(int value) { return style.dp(value); }
 
     private static final class Mark extends Drawable {
         private final Symbol symbol;

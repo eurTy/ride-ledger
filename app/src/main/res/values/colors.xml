@@ -1,4 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ride_ledger_icon_background">#123D31</color>
+    <color name="ledger_page">#F7F8F4</color>
+    <color name="ledger_surface">#FFFFFF</color>
+    <color name="ledger_ink">#25372D</color>
+    <color name="ledger_title">#154B3C</color>
+    <color name="ledger_muted">#53695C</color>
+    <color name="ledger_hint">#677970</color>
+    <color name="ledger_primary">#186448</color>
+    <color name="ledger_selected">#E4F1E6</color>
+    <color name="ledger_soft">#F0F5ED</color>
+    <color name="ledger_stroke">#D3E0D5</color>
+    <color name="ledger_field_line">#9DADA2</color>
+    <color name="ledger_divider">#E0EAE2</color>
+    <color name="ledger_danger">#9D3E34</color>
+    <color name="ledger_danger_stroke">#E7BEB7</color>
+    <color name="ledger_warning">#885615</color>
+    <color name="ledger_pressed">#24186448</color>
+    <color name="ledger_pending_record">#E9EBED</color>
+    <color name="ledger_confirmed_record">#F4F8F5</color>
 </resources>

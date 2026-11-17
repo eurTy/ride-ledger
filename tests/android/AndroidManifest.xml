@@ -20,7 +20,7 @@
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <application android:debuggable="true" android:allowBackup="false"
         android:usesCleartextTraffic="true" android:label="Ride Ledger isolated sync tests"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@style/LedgerTheme">
         <service android:name="com.rideledger.SyncJobService" android:exported="false" android:permission="android.permission.BIND_JOB_SERVICE" />
         <service android:name="com.rideledger.NearbySyncService" android:exported="false" android:foregroundServiceType="connectedDevice" />
         <receiver android:name="com.rideledger.SyncBleWake" android:exported="false" />

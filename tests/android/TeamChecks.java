@@ -688,14 +688,44 @@ final class TeamChecks {
                 a.reopen();
                 a.openCoordinator();
                 b.openCoordinator();
-                await(() -> a.sync.status().equals("待同步 1 条"), 3000, "offline operation was not recovered");
+                await(() -> a.sync.status().equals("待同伴确认 1 条"), 3000, "offline operation was not recovered");
+                require(SyncEngine.lastCheckedAt(a.context, a.trip) == 0, "offline entry claimed a peer check");
                 onMain(() -> a.link(b, PeerRoutePolicy.Channel.WIFI, new AtomicInteger(), false));
-                await(() -> b.count() == 1 && a.sync.status().equals("已同步"), 10000, "durable receipt was not tracked");
+                await(() -> b.count() == 1 && a.sync.status().equals("本机已保存"), 10000, "durable receipt was not tracked");
+                long checkedAt = SyncEngine.lastCheckedAt(a.context, a.trip);
+                require(checkedAt > 0, "confirmed session did not record its check time");
                 onMain(a.sync::stop);
                 a.reopen();
                 record(a, "USD", 700, "after confirmation");
                 a.openCoordinator();
-                await(() -> a.sync.status().equals("待同步 1 条"), 3000, "checkpoint did not survive coordinator and database reopen");
+                await(() -> a.sync.status().equals("待同伴确认 1 条"), 3000, "checkpoint did not survive coordinator and database reopen");
+                require(SyncEngine.lastCheckedAt(a.context, a.trip) == checkedAt, "offline work changed the previous check time");
+            }
+        });
+
+        sink.check("team sync confirmation: first contact, new ledger data, and an empty replay", () -> {
+            try (Device a = new Device(base); Device b = new Device(base)) {
+                a.trip = a.store.createTeam("同步提示", MEMBERS.subList(0, 2));
+                b.enroll(a, 1);
+                List<Boolean> aConfirmed = new java.util.concurrent.CopyOnWriteArrayList<>();
+                List<Boolean> bConfirmed = new java.util.concurrent.CopyOnWriteArrayList<>();
+                a.openCoordinator(confirmations(aConfirmed));
+                b.openCoordinator(confirmations(bConfirmed));
+                onMain(() -> a.link(b, PeerRoutePolicy.Channel.WIFI, null, false));
+                await(() -> !aConfirmed.isEmpty() && !bConfirmed.isEmpty(), 10000, "first confirmed contact was missed");
+                require(!aConfirmed.contains(true) && !bConfirmed.contains(true), "first connection exchanged unexpected data");
+
+                record(a, "CNY", 1250, "offline expense");
+                onMain(a.sync::syncNow);
+                await(() -> aConfirmed.contains(true) && bConfirmed.contains(true), 10000, "sender or receiver missed confirmation");
+                require(b.count() == 1, "confirmation was delivered before ledger storage");
+
+                int seenA = aConfirmed.size(), seenB = bConfirmed.size();
+                onMain(a.sync::syncNow);
+                await(() -> aConfirmed.size() > seenA && bConfirmed.size() > seenB,
+                        10000, "empty replay did not finish on both devices");
+                require(Collections.frequency(aConfirmed, true) == 1 && Collections.frequency(bConfirmed, true) == 1 &&
+                        b.count() == 1, "empty replay reported another ledger change");
             }
         });
 
@@ -962,7 +992,10 @@ final class TeamChecks {
         TeamProtocol protocol() { return protocol(false); }
         TeamProtocol protocol(boolean photos) { return new TeamProtocol(store, trip, id, QUIET, () -> { }, 0, photos); }
         void openCoordinator() throws Exception {
-            sync = new PeerSync(context, store, ignored -> { }, false, trip);
+            openCoordinator(ignored -> { });
+        }
+        void openCoordinator(PeerSync.Listener listener) throws Exception {
+            sync = new PeerSync(context, store, listener, false, trip);
             onMain(sync::start);
         }
         void link(Device other, PeerRoutePolicy.Channel channel, AtomicInteger dials, boolean unreachable) {
@@ -996,6 +1029,13 @@ final class TeamChecks {
             keys.deleteEntry("ride-ledger-team-" + id.deviceId);
             context.cleanup();
         }
+    }
+
+    private static PeerSync.Listener confirmations(List<Boolean> confirmed) {
+        return new PeerSync.Listener() {
+            @Override public void changed(int added) { }
+            @Override public void synced(String tripId, String peer, boolean exchanged) { confirmed.add(exchanged); }
+        };
     }
 
     private static void onMain(Runnable action) throws Exception {

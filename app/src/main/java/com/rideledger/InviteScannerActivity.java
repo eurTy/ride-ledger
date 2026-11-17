@@ -2,10 +2,14 @@ package com.rideledger;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.ImageFormat;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.hardware.Camera;
 import android.os.Bundle;
 import android.os.Handler;
@@ -14,7 +18,7 @@ import android.view.Gravity;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
-import android.widget.Button;
+import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -27,12 +31,13 @@ import java.util.concurrent.Executors;
 @SuppressWarnings("deprecation")
 public final class InviteScannerActivity extends Activity implements SurfaceHolder.Callback {
     static final String EXTRA_INVITE = "com.rideledger.QR_INVITE";
-    private static final String AIM = "将队友手机上的小队二维码放入画面";
+    private static final String AIM = "将队友的小队二维码放入取景框";
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService decoder = Executors.newSingleThreadExecutor();
     private final Runnable nextFrame = this::requestFrame;
     private FrameLayout previewFrame;
     private SurfaceView preview;
+    private View finder;
     private TextView hint;
     private Camera camera;
     private Camera.Size frameSize;
@@ -40,31 +45,32 @@ public final class InviteScannerActivity extends Activity implements SurfaceHold
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        LedgerStyle style = new LedgerStyle(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.WHITE);
-        root.setFitsSystemWindows(true);
-        hint = new TextView(this);
-        hint.setText("扫码加入");
-        hint.setTextSize(17);
-        hint.setGravity(Gravity.CENTER);
-        int padding = Math.round(16 * getResources().getDisplayMetrics().density);
-        hint.setPadding(padding, padding, padding, padding);
-        root.addView(hint);
+        root.setBackgroundColor(style.page);
+        root.addView(style.topBar("扫码加入", this::finish));
 
         previewFrame = new FrameLayout(this);
         previewFrame.setBackgroundColor(Color.BLACK);
         preview = new SurfaceView(this);
         previewFrame.addView(preview, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
-        root.addView(previewFrame, new LinearLayout.LayoutParams(-1, 0, 1));
+        finder = new Finder(this, style);
+        finder.setVisibility(View.INVISIBLE);
+        previewFrame.addView(finder, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+        LinearLayout.LayoutParams area = new LinearLayout.LayoutParams(-1, 0, 1);
+        int inset = style.dp(LedgerStyle.PAGE_INSET);
+        area.setMargins(inset, style.dp(LedgerStyle.CONTROL_GAP), inset, 0);
+        root.addView(previewFrame, area);
         preview.getHolder().addCallback(this);
         preview.setOnClickListener(view -> {
             if (camera != null) focusIfManual(camera);
         });
-        Button back = new Button(this);
-        back.setText("返回");
-        back.setOnClickListener(view -> finish());
-        root.addView(back, new LinearLayout.LayoutParams(-1, -2));
+        hint = style.text(AIM, LedgerStyle.LABEL, style.muted);
+        hint.setGravity(Gravity.CENTER);
+        hint.setPadding(inset, style.dp(LedgerStyle.SECTION_GAP), inset, style.dp(LedgerStyle.SECTION_GAP));
+        root.addView(hint, new LinearLayout.LayoutParams(-1, -2));
+        FormInput.fitActivityWindow(getWindow(), root);
         setContentView(root);
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
             hint.setText("请返回加入页授权相机，或从相册选择二维码。");
@@ -127,6 +133,7 @@ public final class InviteScannerActivity extends Activity implements SurfaceHold
             camera.setPreviewDisplay(preview.getHolder());
             camera.setErrorCallback((error, source) -> { if (source == camera) showCameraFailure(); });
             camera.startPreview();
+            finder.setVisibility(View.VISIBLE);
             hint.setText(AIM);
             focusIfManual(camera);
             requestFrame();
@@ -166,8 +173,10 @@ public final class InviteScannerActivity extends Activity implements SurfaceHold
         int height = orientation % 180 == 0 ? size.height : size.width;
         previewFrame.post(() -> {
             float scale = Math.min((float) previewFrame.getWidth() / width, (float) previewFrame.getHeight() / height);
-            if (scale > 0) preview.setLayoutParams(new FrameLayout.LayoutParams(
-                    Math.round(width * scale), Math.round(height * scale), Gravity.CENTER));
+            if (scale <= 0) return;
+            int fittedWidth = Math.round(width * scale), fittedHeight = Math.round(height * scale);
+            preview.setLayoutParams(new FrameLayout.LayoutParams(fittedWidth, fittedHeight, Gravity.CENTER));
+            finder.setLayoutParams(new FrameLayout.LayoutParams(fittedWidth, fittedHeight, Gravity.CENTER));
         });
     }
 
@@ -208,10 +217,54 @@ public final class InviteScannerActivity extends Activity implements SurfaceHold
 
     private void closePreview() {
         main.removeCallbacks(nextFrame);
+        if (finder != null) finder.setVisibility(View.INVISIBLE);
         Camera previous = camera;
         camera = null;
         if (previous == null) return;
         try { previous.stopPreview(); } catch (RuntimeException ignored) { }
         previous.release();
+    }
+
+    /** Open corners leave the preview and tap-to-focus area visible. */
+    private static final class Finder extends View {
+        private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path corners = new Path();
+        private final LedgerStyle style;
+
+        Finder(Context context, LedgerStyle style) {
+            super(context);
+            this.style = style;
+            setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+            line.setStyle(Paint.Style.STROKE);
+            line.setStrokeCap(Paint.Cap.ROUND);
+            line.setStrokeJoin(Paint.Join.ROUND);
+        }
+
+        @Override protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
+            float side = Math.min(width, height) * .69f;
+            float left = (width - side) / 2f, top = (height - side) / 2f;
+            float right = left + side, bottom = top + side;
+            float length = Math.min(side / 3, style.dp(24));
+            corners.reset();
+            corner(left, top, length, length);
+            corner(right, top, -length, length);
+            corner(right, bottom, -length, -length);
+            corner(left, bottom, length, -length);
+        }
+
+        private void corner(float x, float y, float horizontal, float vertical) {
+            corners.moveTo(x, y + vertical);
+            corners.lineTo(x, y);
+            corners.lineTo(x + horizontal, y);
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            line.setColor(0x90000000);
+            line.setStrokeWidth(style.dp(5));
+            canvas.drawPath(corners, line);
+            line.setColor(style.selected);
+            line.setStrokeWidth(style.dp(2));
+            canvas.drawPath(corners, line);
+        }
     }
 }

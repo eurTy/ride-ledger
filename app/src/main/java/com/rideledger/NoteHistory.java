@@ -27,7 +27,7 @@ final class NoteHistory {
 
     void remember(String tripId, String raw) {
         String note = raw.trim();
-        if (note.isEmpty()) return;
+        if (ExpenseCategory.details(note).isEmpty()) return;
         List<String> notes = options(tripId);
         notes.remove(note);
         notes.add(0, note);

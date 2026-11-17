@@ -11,7 +11,6 @@ import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.RectF;
-import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -21,8 +20,9 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
+import android.view.Window;
+import android.view.WindowInsetsController;
 import android.widget.Button;
-import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -43,60 +43,50 @@ final class ReceiptUi {
     private static final int CAMERA = 81, GALLERY = 82, CAMERA_PERMISSION = 83;
     private static final int GREEN = 0xff28634e;
     private final Activity activity;
+    private final LedgerStyle style;
     private final LedgerStore store;
     private final LedgerActions actions;
+    private final QuickEntryDrafts drafts;
     private final Consumer<LedgerStore.Trip> saved;
     private final Consumer<Exception> error;
     private final ExecutorService images = Executors.newSingleThreadExecutor();
     private final LruCache<String, Bitmap> thumbnails = new LruCache<>(48);
-    private String draftTrip, draftToken;
     private String targetTrip, targetEvent, captureToken;
     private ImageButton targetButton;
-    private boolean returning, importing;
+    private boolean importing;
     private Dialog preview;
 
-    ReceiptUi(Activity activity, LedgerStore store, LedgerActions actions, Bundle state,
+    ReceiptUi(Activity activity, LedgerStore store, LedgerActions actions, QuickEntryDrafts drafts, Bundle state,
               Consumer<LedgerStore.Trip> saved, Consumer<Exception> error) {
         this.activity = activity;
+        style = new LedgerStyle(activity);
         this.store = store;
         this.actions = actions;
+        this.drafts = drafts;
         this.saved = saved;
         this.error = error;
         if (state != null) {
-            draftTrip = state.getString("receiptDraftTrip");
-            draftToken = state.getString("receiptDraft");
-            if (draftToken != null && (!PeerIdentity.valid(draftToken) || !cacheFile("receipt-draft", draftToken).isFile()))
-                draftTrip = draftToken = null;
             targetTrip = state.getString("receiptTrip");
             targetEvent = state.getString("receiptEvent");
             captureToken = state.getString("receiptCapture");
-            returning = state.getBoolean("receiptReturning");
         }
     }
 
     void saveState(Bundle state) {
-        state.putString("receiptDraftTrip", draftTrip);
-        state.putString("receiptDraft", draftToken);
         if (!importing) {
             state.putString("receiptTrip", targetTrip);
             state.putString("receiptEvent", targetEvent);
             state.putString("receiptCapture", captureToken);
         }
-        state.putBoolean("receiptReturning", returning);
-    }
-
-    boolean returningToForm() {
-        boolean keep = returning || targetTrip != null;
-        returning = false;
-        return keep;
     }
 
     boolean picking() { return targetTrip != null; }
 
-    String draft(String tripId) { return tripId.equals(draftTrip) ? draftToken : null; }
-
-    boolean holdingQuickPhoto(String tripId) {
-        return draft(tripId) != null || tripId.equals(targetTrip) && targetEvent == null;
+    String draft(String tripId) {
+        String token = drafts.photo(tripId);
+        if (token == null || PeerIdentity.valid(token) && cacheFile("receipt-draft", token).isFile()) return token;
+        drafts.removePhoto(tripId);
+        return null;
     }
 
     ReceiptImage draftImage(String token) throws IOException {
@@ -113,58 +103,70 @@ final class ReceiptUi {
     void clearDraft(String tripId, String token) {
         if (token == null || !token.equals(draft(tripId))) return;
         remove(cacheFile("receipt-draft", token));
-        draftTrip = draftToken = null;
+        drafts.removePhoto(tripId);
     }
 
-    ImageButton besideNote(EditText note, LedgerStore.Trip trip, String eventId, boolean attached) {
-        LinearLayout parent = (LinearLayout) note.getParent();
-        int index = parent.indexOfChild(note);
-        LinearLayout.LayoutParams sizing = (LinearLayout.LayoutParams) note.getLayoutParams();
-        parent.removeView(note);
+    ImageButton besideNote(View input, LedgerStore.Trip trip, String eventId, boolean attached) {
+        LinearLayout parent = (LinearLayout) input.getParent();
+        int index = parent.indexOfChild(input);
+        LinearLayout.LayoutParams sizing = (LinearLayout.LayoutParams) input.getLayoutParams();
+        parent.removeView(input);
         LinearLayout row = new LinearLayout(activity);
         row.setGravity(Gravity.CENTER_VERTICAL);
         parent.addView(row, index, sizing);
-        row.addView(note, new LinearLayout.LayoutParams(0, -2, 1));
+        row.addView(input, new LinearLayout.LayoutParams(0, -2, 1));
         ImageButton button = new ImageButton(activity);
         button.setImageResource(R.drawable.ic_ledger_camera);
         button.setScaleType(ImageView.ScaleType.CENTER);
         paint(button, eventId == null ? draft(trip.id) != null : attached);
         row.addView(button, new LinearLayout.LayoutParams(dp(48), dp(48)));
-        button.setOnClickListener(view -> menu(button, trip, eventId));
+        button.setOnClickListener(view -> press(button, trip.id, eventId, false));
+        button.setOnLongClickListener(view -> {
+            press(button, trip.id, eventId, true);
+            return true;
+        });
         if (trip.id.equals(targetTrip) && java.util.Objects.equals(eventId, targetEvent)) targetButton = button;
         return button;
     }
 
     private void paint(ImageButton button, boolean attached) {
-        button.setContentDescription(attached ? "已添加小票" : "添加小票");
-        button.setTooltipText(attached ? "查看或更换小票" : "添加小票");
-        GradientDrawable background = new GradientDrawable();
-        background.setCornerRadius(dp(12));
-        background.setColor(attached ? 0xffe5f2e8 : Color.TRANSPARENT);
-        button.setBackground(background);
+        String hint = attached ? "查看小票，长按管理" : "拍照添加小票，长按从相册选择";
+        button.setContentDescription(hint);
+        button.setTooltipText(hint);
+        button.setBackground(style.ripple(attached ? style.rounded(style.selected, 0, LedgerStyle.CONTROL_RADIUS) : null,
+                LedgerStyle.CONTROL_RADIUS));
     }
 
-    private void menu(ImageButton button, LedgerStore.Trip trip, String eventId) {
+    private void press(ImageButton button, String tripId, String eventId, boolean longPress) {
         if (picking()) return;
-        LedgerReceipts.Entry entry = eventId == null ? null : store.receipts.get(trip.id, eventId);
-        String draft = eventId == null ? draft(trip.id) : null;
-        boolean attached = draft != null || entry != null && !entry.digest.isEmpty();
+        LedgerReceipts.Entry entry = eventId == null ? null : store.receipts.get(tripId, eventId);
+        String draft = eventId == null ? draft(tripId) : null;
+        if (draft == null && (entry == null || entry.digest.isEmpty())) {
+            select(tripId, eventId, button, !longPress);
+        } else if (longPress) {
+            menu(button, tripId, eventId, draft);
+        } else if (draft != null) {
+            showPhoto(() -> readDraft(draft));
+        } else {
+            view(tripId, entry);
+        }
+    }
+
+    private void menu(ImageButton button, String tripId, String eventId, String draft) {
         PopupMenu menu = new PopupMenu(activity, button);
-        if (attached) menu.getMenu().add(0, 1, 0, "查看小票");
-        menu.getMenu().add(0, 2, 1, attached ? "重新拍照" : "拍照");
-        menu.getMenu().add(0, 3, 2, "从相册选择");
-        if (attached) menu.getMenu().add(0, 4, 3, "移除小票");
+        menu.getMenu().add(0, 1, 0, "重新拍照");
+        menu.getMenu().add(0, 2, 1, "从相册选择");
+        menu.getMenu().add(0, 3, 2, "移除小票");
         menu.setOnMenuItemClickListener(item -> {
+            if (picking() || !button.isAttachedToWindow()) return false;
             switch (item.getItemId()) {
-                case 1:
-                    if (draft != null) showPhoto(() -> readDraft(draft));
-                    else view(trip.id, entry);
-                    break;
-                case 2: select(trip.id, eventId, button, true); break;
-                case 3: select(trip.id, eventId, button, false); break;
-                case 4:
-                    if (eventId == null) { clearDraft(trip.id, draft); paint(button, false); }
-                    else changeReceipt(trip.id, eventId, null, button);
+                case 1: select(tripId, eventId, button, true); break;
+                case 2: select(tripId, eventId, button, false); break;
+                case 3:
+                    if (eventId == null) {
+                        clearDraft(tripId, draft);
+                        paint(button, false);
+                    } else changeReceipt(tripId, eventId, null, button);
                     break;
                 default: return false;
             }
@@ -187,7 +189,7 @@ final class ReceiptUi {
         if (request != CAMERA_PERMISSION) return false;
         if (!picking()) return true;
         if (activity.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) launchCamera();
-        else finishSelection(new IOException("未授权相机，可以从相册选择小票"));
+        else finishSelection(new IOException("未授权相机，长按相机图标可从相册选择"));
         return true;
     }
 
@@ -202,9 +204,8 @@ final class ReceiptUi {
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             camera.setClipData(ClipData.newRawUri("receipt", uri));
             activity.startActivityForResult(camera, CAMERA);
-            returning = true;
         } catch (IOException | RuntimeException unavailable) {
-            finishSelection(new IOException("系统相机不可用，可以从相册选择小票"));
+            finishSelection(new IOException("系统相机不可用，长按相机图标可从相册选择"));
         }
     }
 
@@ -213,13 +214,11 @@ final class ReceiptUi {
             if (Build.VERSION.SDK_INT >= 33) {
                 try {
                     activity.startActivityForResult(new Intent(MediaStore.ACTION_PICK_IMAGES).setType("image/*"), GALLERY);
-                    returning = true;
                     return;
                 } catch (android.content.ActivityNotFoundException unavailable) { /* Use the document picker. */ }
             }
             activity.startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
                     .setType("image/*"), GALLERY);
-            returning = true;
         } catch (RuntimeException unavailable) { finishSelection(new IOException("系统照片选择器不可用")); }
     }
 
@@ -245,9 +244,8 @@ final class ReceiptUi {
                     Files.write(draft.toPath(), photo);
                     activity.runOnUiThread(() -> {
                         if (activity.isDestroyed()) { remove(draft); return; }
-                        if (draftToken != null) remove(cacheFile("receipt-draft", draftToken));
-                        draftTrip = tripId;
-                        draftToken = token;
+                        clearDraft(tripId, draft(tripId));
+                        drafts.putPhoto(tripId, token);
                         if (targetButton != null) paint(targetButton, true);
                         finishSelection(null);
                     });
@@ -342,28 +340,29 @@ final class ReceiptUi {
         title.setTextSize(20);
         title.setTextColor(GREEN);
         bar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        Button close = new Button(activity);
-        close.setText("关闭");
-        close.setTextColor(GREEN);
-        close.setStateListAnimator(null);
-        GradientDrawable closeSurface = new GradientDrawable();
-        closeSurface.setCornerRadius(dp(12));
-        closeSurface.setColor(Color.WHITE);
-        closeSurface.setStroke(dp(1), 0xffd9e8df);
-        close.setBackground(closeSurface);
-        close.setOnClickListener(view -> dialog.dismiss());
-        LinearLayout.LayoutParams closeSize = new LinearLayout.LayoutParams(dp(64), dp(44));
+        Button close = style.button("关闭", LedgerStyle.Action.OUTLINE, dialog::dismiss);
+        close.setMinWidth(dp(64));
+        close.setMinHeight(dp(LedgerStyle.COMPACT_HEIGHT));
+        close.setMinimumHeight(dp(LedgerStyle.COMPACT_HEIGHT));
+        LinearLayout.LayoutParams closeSize = new LinearLayout.LayoutParams(-2, -2);
         closeSize.topMargin = closeSize.bottomMargin = dp(4);
         bar.addView(close, closeSize);
         frame.addView(bar, new LinearLayout.LayoutParams(-1, -2));
         ZoomImage image = new ZoomImage(activity);
         image.setContentDescription("小票照片，可双指缩放");
         frame.addView(image, new LinearLayout.LayoutParams(-1, 0, 1));
-        FormInput.fitActivityWindow(dialog.getWindow(), frame);
+        Window window = dialog.getWindow();
+        FormInput.fitActivityWindow(window, frame);
         dialog.setContentView(frame);
         preview = dialog;
         dialog.setOnDismissListener(ignored -> { if (preview == dialog) preview = null; });
         dialog.show();
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.getInsetsController().setSystemBarsAppearance(0, WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS);
+        } else {
+            View decor = window.getDecorView();
+            decor.setSystemUiVisibility(decor.getSystemUiVisibility() & ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+        }
         images.execute(() -> {
             Bitmap bitmap = null;
             try {

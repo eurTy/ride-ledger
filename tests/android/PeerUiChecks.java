@@ -78,6 +78,7 @@ final class PeerUiChecks {
                     View root = activity.getWindow().getDecorView();
                     TextView noRecords = text(root, "还没有记录");
                     TextView settled = text(root, "目前已结清");
+                    require(text(root, "本机已保存\n暂无同伴核对时间") != null, "offline review misrepresented its peer state");
                     require(noRecords != null && settled != null &&
                             noRecords.getTextSize() == settled.getTextSize() &&
                             noRecords.getCurrentTextColor() == settled.getCurrentTextColor(),
@@ -88,7 +89,7 @@ final class PeerUiChecks {
                     View root = activity.getWindow().getDecorView();
                     require(text(root, "快速记账") != null && text(root, "全员平摊  ⌄") != null, "group quick entry missing");
                     View save = text(root, "保存这笔支出");
-                    View cash = text(root, "现金与结算");
+                    View cash = text(root, "现金管理");
                     require(fullyVisible(labeledInput(root, "支付金额")) && fullyVisible(labeledInput(root, "货币")) &&
                             fullyVisible(labeledInput(root, "备注（可选）")) && fullyVisible(save) &&
                             containingScroll(save).getScrollY() == 0, "quick entry requires scrolling on the first screen");
@@ -103,8 +104,7 @@ final class PeerUiChecks {
                 waitForRecordColor(instrumentation, activity, "1.01 CNY", 0xffe9ebed);
                 require(store.events(trip.id).size() == 1 && store.summary(trip.id).spent.get("CNY") == 101L,
                         "group could not record offline");
-                instrumentation.runOnMainSync(() -> require(description(activity.getWindow().getDecorView(),
-                        "无连接。点击重新连接") instanceof ConnectionBadge, "offline review badge was missing"));
+                awaitBadge(instrumentation, activity, "无连接。点击重新连接", 3000);
                 teamExchange(sync, companion, peer, other);
                 try {
                     waitForRecordColor(instrumentation, activity, "1.01 CNY", 0xfff4f8f5);
@@ -135,6 +135,8 @@ final class PeerUiChecks {
                 instrumentation.runOnMainSync(() -> {
                     View review = activity.getWindow().getDecorView();
                     require(text(review, "2 笔") != null, "synced record was not visible");
+                    require(containsText(review, "上次与同伴核对") && text(review, "已同步") == null,
+                            "review is missing the previous check time or still shows an unconditional sync claim");
                     View newer = recordContaining(review, "1.01 CNY");
                     View backdated = recordContaining(review, "5.00 USD");
                     require(newer != null && backdated != null && newer.getParent() == backdated.getParent() &&
@@ -161,7 +163,7 @@ final class PeerUiChecks {
                 waitForText(instrumentation, activity, "4 笔");
                 instrumentation.runOnMainSync(() -> {
                     View root = activity.getWindow().getDecorView();
-                    require(text(root, "现金与结算") == null &&
+                    require(text(root, "现金管理") == null &&
                             text(root, "成员还款") == null && text(root, "换汇") == null,
                             "cash actions still appeared in review");
                     View history = (View) text(root, "旅行记录").getParent();
@@ -197,6 +199,84 @@ final class PeerUiChecks {
                         "a stale review load replaced the trips page"));
             } finally { instrumentation.runOnMainSync(activity::finish); instrumentation.waitForIdleSync(); }
         } finally { other.cleanup(); }
+    }
+
+    static void runQuickDrafts(Instrumentation instrumentation) throws Exception {
+        Context context = instrumentation.getTargetContext();
+        try (LedgerStore store = new LedgerStore(context)) {
+            LedgerStore.Trip first = store.createTeam("草稿甲旅行", Arrays.asList("甲"));
+            LedgerStore.Trip second = store.createTeam("草稿乙旅行", Arrays.asList("乙"));
+            context.getSharedPreferences("ui", 0).edit().putString("last_trip", first.id)
+                    .putBoolean(MainActivity.STARTUP_PERMISSIONS_REQUESTED, true).commit();
+            Activity activity = instrumentation.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            try {
+                String firstTrip = first.name, secondTrip = second.name;
+                instrumentation.runOnMainSync(() -> {
+                    View root = activity.getWindow().getDecorView();
+                    amount(root).setText("31.");
+                    labeledInput(root, "备注（可选）").setText("甲的草稿");
+                    labeledInput(root, "货币").setText("U");
+                    clickDraftPages(activity, "复盘", "记账", "旅行", "记账");
+                    requireDraft(activity, "31.", "甲的草稿");
+                    require("U".contentEquals(labeledInput(activity.getWindow().getDecorView(), "货币").getText()), "partial currency was lost");
+                    clickDraftPages(activity, "旅行", secondTrip);
+                    requireDraft(activity, "", "");
+
+                    root = activity.getWindow().getDecorView();
+                    amount(root).setText("0");
+                    labeledInput(root, "备注（可选）").setText("乙的草稿");
+                    clickDraftPages(activity, "保存这笔支出", "复盘", "记账");
+                    requireDraft(activity, "0", "乙的草稿");
+                    require(!text(activity.getWindow().getDecorView(), "保存这笔支出").isEnabled(), "a returning form allowed a second in-flight save");
+                });
+                waitForQuickSaveButton(instrumentation, activity);
+                require(store.events(first.id).isEmpty() && store.events(second.id).isEmpty(), "draft or failed save became a ledger entry");
+                instrumentation.runOnMainSync(() -> {
+                    requireDraft(activity, "0", "乙的草稿");
+                    amount(activity.getWindow().getDecorView()).setText("22.00");
+                    clickDraftPages(activity, "保存这笔支出", "旅行", firstTrip);
+                    requireDraft(activity, "31.", "甲的草稿");
+                    clickDraftPages(activity, "旅行", secondTrip);
+                    require(!text(activity.getWindow().getDecorView(), "保存这笔支出").isEnabled(), "saving form was reopened as a second entry");
+                });
+                waitForQuickSaveButton(instrumentation, activity);
+                instrumentation.runOnMainSync(() -> {
+                    requireDraft(activity, "", "");
+                    clickDraftPages(activity, "旅行", firstTrip);
+                    requireDraft(activity, "31.", "甲的草稿");
+                });
+                require(store.events(first.id).isEmpty() && store.events(second.id).size() == 1, "submission did not clear just the saved trip");
+            } finally {
+                instrumentation.runOnMainSync(activity::finish);
+                instrumentation.waitForIdleSync();
+            }
+        }
+    }
+
+    private static void clickDraftPages(Activity activity, String... labels) {
+        for (String label : labels) {
+            View button = text(activity.getWindow().getDecorView(), label);
+            while (button != null && !button.isClickable() && button.getParent() instanceof View)
+                button = (View) button.getParent();
+            require(button != null && button.performClick(), "missing form action " + label);
+        }
+    }
+
+    private static void requireDraft(Activity activity, String amountText, String noteText) {
+        View root = activity.getWindow().getDecorView();
+        require(amountText.contentEquals(amount(root).getText()) &&
+                noteText.contentEquals(labeledInput(root, "备注（可选）").getText()), "unexpected amount or note after restoring draft");
+    }
+
+    private static void waitForQuickSaveButton(Instrumentation instrumentation, Activity activity) {
+        java.util.concurrent.atomic.AtomicBoolean enabled = new java.util.concurrent.atomic.AtomicBoolean();
+        long deadline = SystemClock.elapsedRealtime() + 5000;
+        do {
+            instrumentation.runOnMainSync(() -> enabled.set(text(activity.getWindow().getDecorView(), "保存这笔支出").isEnabled()));
+            if (enabled.get()) return;
+            SystemClock.sleep(40);
+        } while (SystemClock.elapsedRealtime() < deadline);
+        throw new AssertionError("the quick-entry submission did not finish");
     }
 
     static void runCustomSplit(Instrumentation instrumentation) throws Exception {
@@ -321,6 +401,24 @@ final class PeerUiChecks {
                             "selecting a note did not fill the editable field");
                     field.append("补充");
                     require((note + "补充").contentEquals(field.getText()), "selected note was no longer editable");
+                    View categories = description(reopened.getWindow().getDecorView(), "选择备注分类");
+                    require(categories != null && categories.performClick(), "category choices did not open");
+                });
+                instrumentation.waitForIdleSync();
+                instrumentation.runOnMainSync(() -> {
+                    View popup = windowWithText("住宿");
+                    require(popup != null && text(popup, "不分类") == null, "note choices allocated an extra unclassified row");
+                    View row = popup == null ? null : text(popup, "住宿");
+                    while (row != null && row.getParent() instanceof View &&
+                            !(row.getParent() instanceof android.widget.ListView)) row = (View) row.getParent();
+                    require(row != null && row.getParent() instanceof android.widget.ListView, "category choice missing");
+                    android.widget.ListView list = (android.widget.ListView) row.getParent();
+                    int position = list.getPositionForView(row);
+                    require(list.performItemClick(row, position, list.getItemIdAtPosition(position)), "category selection failed");
+                    View root = reopened.getWindow().getDecorView();
+                    require(description(root, "备注分类，住宿") != null &&
+                            (note + "补充").contentEquals(labeledInput(root, "备注（可选）").getText()),
+                            "category replaced the editable note or was not selected");
                 });
                 require(store.events(trip.id).size() == 1 && history.options(trip.id).equals(Arrays.asList(note)),
                         "using a suggestion changed the ledger or history before save");
@@ -329,6 +427,101 @@ final class PeerUiChecks {
                 instrumentation.waitForIdleSync();
             }
         }
+    }
+
+    static void runTripStatistics(Instrumentation instrumentation) throws Exception {
+        Context context = instrumentation.getTargetContext();
+        android.content.SharedPreferences prefs = context.getSharedPreferences("ui", 0);
+        PeerProtocolChecks.Ctx other = new PeerProtocolChecks.Ctx(context);
+        try (LedgerStore store = new LedgerStore(context); LedgerStore companion = new LedgerStore(other)) {
+            LedgerStore.Trip trip = store.createTeam("统计界面检查", Arrays.asList("甲", "乙"));
+            LedgerStore.Trip peer = companion.joinTrip(store.inviteCode(trip), "m2");
+            LedgerActions actions = new LedgerActions(store);
+            actions.expense(trip, trip.localPerson, "CNY", "36.50", false, "【餐食】 午餐");
+            actions.expense(trip, trip.localPerson, "JPY", "200", true, "【交通】 车票");
+            LedgerStore.Event meal = store.events(trip.id).stream()
+                    .filter(event -> "CNY".equals(event.data.optString("currency"))).findFirst().get();
+            LedgerStore.Event fare = store.events(trip.id).stream()
+                    .filter(event -> "JPY".equals(event.data.optString("currency"))).findFirst().get();
+            prefs.edit().putString("last_trip", trip.id).putBoolean(MainActivity.STARTUP_PERMISSIONS_REQUESTED, true)
+                    .putLong("archived_at/" + trip.id, System.currentTimeMillis()).commit();
+            Activity activity = instrumentation.startActivitySync(new Intent(context, MainActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            try {
+                waitForText(instrumentation, activity, "保存这笔支出");
+                TripStatistics unsynced = TripStatistics.load(context, store, trip.id);
+                require(unsynced.pending && unsynced.report.records.isEmpty(), "stats counted unsynced local expenses");
+                instrumentation.runOnMainSync(() -> {
+                    clickDraftPages(activity, "旅行");
+                    openTripReport(activity, trip.name);
+                });
+                clickWindow(instrumentation, "暂无已同步账目", "返回");
+
+                PeerSync sync = transport(activity).nearby;
+                teamExchange(sync, companion, peer, other);
+                waitForTripConfirmation(context, store, trip.id);
+                actions.editExpense(trip, meal, trip.localPerson, "CNY", "40", 0, null, "【住宿】 房费");
+                actions.delete(trip, java.util.Collections.singletonList(fare.id));
+                actions.expense(trip, trip.localPerson, "USD", "5", true, "未同步的支出");
+                TripStatistics pending = TripStatistics.load(context, store, trip.id);
+                require(pending.pending && pending.report.records.size() == 2 && pending.report.records.stream()
+                                .anyMatch(row -> "36.50 CNY".equals(row.amount) && "【餐食】 午餐".equals(row.note)) &&
+                                pending.report.records.stream().anyMatch(row -> "200 JPY".equals(row.amount)),
+                        "pending edits or deletions changed the confirmed report before sync");
+                instrumentation.runOnMainSync(() -> openTripReport(activity, trip.name));
+                clickWindow(instrumentation, "消费分类", "返回");
+
+                teamExchange(sync, companion, peer, other);
+                waitForTripConfirmation(context, store, trip.id);
+                TripStatistics confirmed = TripStatistics.load(context, store, trip.id);
+                require(!confirmed.pending && confirmed.report.records.size() == 2 && confirmed.report.records.stream()
+                                .anyMatch(row -> "40.00 CNY".equals(row.amount) && "【住宿】 房费".equals(row.note)) &&
+                                confirmed.report.records.stream().anyMatch(row -> "5.00 USD".equals(row.amount)) &&
+                                confirmed.report.records.stream().noneMatch(row -> fare.id.equals(row.id)),
+                        "stats did not incorporate the confirmed edit, deletion and new expense");
+                instrumentation.runOnMainSync(() -> clickDraftPages(activity, "记账"));
+                waitForText(instrumentation, activity, "保存这笔支出");
+            } finally {
+                instrumentation.runOnMainSync(activity::finish);
+                instrumentation.waitForIdleSync();
+            }
+        } finally { other.cleanup(); }
+    }
+
+    private static void openTripReport(Activity activity, String tripName) {
+        View card = text(activity.getWindow().getDecorView(), tripName);
+        while (card != null && text(card, "查看报告") == null && card.getParent() instanceof View)
+            card = (View) card.getParent();
+        View action = card == null ? null : text(card, "查看报告");
+        require(action != null && action.performClick(), "trip card did not directly open its statistics");
+    }
+
+    private static void waitForTripConfirmation(Context context, LedgerStore store, String tripId) {
+        long deadline = SystemClock.elapsedRealtime() + 5000L;
+        do {
+            LedgerStore.Snapshot snapshot = store.snapshot(tripId);
+            if (SyncEngine.confirmedThrough(context, store, snapshot.trip) >= snapshot.syncPoint.row) return;
+            SystemClock.sleep(60);
+        } while (SystemClock.elapsedRealtime() < deadline);
+        throw new AssertionError("peer acknowledgement did not reach the last local operation");
+    }
+
+    private static void clickWindow(Instrumentation instrumentation, String anchor, String action) {
+        long deadline = SystemClock.elapsedRealtime() + 5000;
+        java.util.concurrent.atomic.AtomicBoolean clicked = new java.util.concurrent.atomic.AtomicBoolean();
+        do {
+            instrumentation.runOnMainSync(() -> {
+                View window = windowWithText(anchor);
+                View target = window == null ? null : text(window, action);
+                if (target != null) clicked.set(target.performClick());
+            });
+            if (clicked.get()) {
+                instrumentation.waitForIdleSync();
+                return;
+            }
+            SystemClock.sleep(60);
+        } while (SystemClock.elapsedRealtime() < deadline);
+        throw new AssertionError("missing " + action + " in " + anchor);
     }
 
     static void runLedgerBackup(Instrumentation instrumentation) throws Exception {
@@ -357,7 +550,7 @@ final class PeerUiChecks {
                 waitForText(instrumentation, activity, "1 笔");
                 instrumentation.runOnMainSync(() -> text(activity.getWindow().getDecorView(), "查看全部").performClick());
                 waitForText(instrumentation, activity, "全部旅行记录");
-                instrumentation.runOnMainSync(() -> require(text(activity.getWindow().getDecorView(), "导出").performClick(),
+                instrumentation.runOnMainSync(() -> require(text(activity.getWindow().getDecorView(), "日志导出").performClick(),
                         "existing export action unavailable"));
                 long deadline = SystemClock.elapsedRealtime() + 5000;
                 String contents;
@@ -709,7 +902,7 @@ final class PeerUiChecks {
             Rect panelBounds = new Rect(), navBounds = new Rect();
             overlay.getGlobalVisibleRect(panelBounds);
             ((View) text(root, "记账").getParent()).getGlobalVisibleRect(navBounds);
-            require(panelBounds.bottom == navBounds.top && fullyVisible(text(overlay, "导出")) &&
+            require(panelBounds.bottom == navBounds.top && fullyVisible(text(overlay, "日志导出")) &&
                     fullyVisible(text(overlay, "退出")), "overlay covered navigation or clipped its actions");
             require(list.getCount() == 70 && list.getChildCount() < list.getCount() &&
                     ((LedgerReview.Row) list.getItemAtPosition(0)).label.endsWith("展开测试#65") &&
@@ -735,18 +928,21 @@ final class PeerUiChecks {
                 new Instrumentation.ActivityResult(Activity.RESULT_OK, new Intent().setData(android.net.Uri.fromFile(export))), true);
         try {
             instrumentation.runOnMainSync(() ->
-                    require(text(activity.getWindow().getDecorView(), "导出").performClick(), "export action missing"));
+                    require(text(activity.getWindow().getDecorView(), "日志导出").performClick(), "export action missing"));
             long deadline = SystemClock.elapsedRealtime() + 5000;
             String contents;
             do {
                 contents = new String(java.nio.file.Files.readAllBytes(export.toPath()), java.nio.charset.StandardCharsets.UTF_8);
-                if (contents.contains("1.01 CNY") && contents.contains("5.00 USD")) break;
+                int details = contents.indexOf("逐笔明细");
+                if (details >= 0 && contents.indexOf("5.00 USD", details) >= 0) break;
                 SystemClock.sleep(40);
             } while (SystemClock.elapsedRealtime() < deadline);
-            int newest = contents.indexOf("展开测试#65");
-            int older = contents.indexOf("展开测试#55");
-            require(picker.getHits() == 1 && contents.contains("弹层打开后收到") && newest >= 0 && older > newest &&
-                    contents.indexOf("5.00 USD") > older, "export omitted older records or changed their order");
+            int details = contents.indexOf("逐笔明细");
+            int newest = contents.indexOf("展开测试#65", details);
+            int older = contents.indexOf("展开测试#55", details);
+            require(picker.getHits() == 1 && contents.contains("消费分类") && contents.contains("弹层打开后收到") &&
+                    details >= 0 && newest > details && older > newest && contents.indexOf("5.00 USD", details) > older,
+                    "report export omitted statistics or changed record order");
         } finally {
             instrumentation.removeMonitor(picker);
             export.delete();
@@ -777,7 +973,7 @@ final class PeerUiChecks {
         instrumentation.waitForIdleSync();
         instrumentation.runOnMainSync(() -> {
             View root = activity.getWindow().getDecorView();
-            View cash = text(root, "现金与结算");
+            View cash = text(root, "现金管理");
             ScrollView scroll = containingScroll(cash);
             scroll.scrollTo(0, scroll.getChildAt(0).getHeight());
             require(fullyVisible(cash) && fullyVisible(text(root, "现金入账")) &&
@@ -813,7 +1009,7 @@ final class PeerUiChecks {
                         text(dialog, "保存").performClick();
                         View root = activity.getWindow().getDecorView();
                         require("7.77".contentEquals(amount(root).getText()) &&
-                                fullyVisible(text(root, "现金与结算")), "saving cash reset the quick entry draft or scroll position");
+                                fullyVisible(text(root, "现金管理")), "saving cash reset the quick entry draft or scroll position");
                     } else text(dialog, "取消").performClick();
                 }
             });
@@ -1087,6 +1283,15 @@ final class PeerUiChecks {
             TextView result = text(((ViewGroup) view).getChildAt(i), expected); if (result != null) return result;
         }
         return null;
+    }
+
+    private static boolean containsText(View view, String expected) {
+        if (view instanceof TextView && ((TextView) view).getText().toString().contains(expected)) return true;
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) if (containsText(group.getChildAt(i), expected)) return true;
+        }
+        return false;
     }
 
     private static View recordContaining(View view, String expected) {

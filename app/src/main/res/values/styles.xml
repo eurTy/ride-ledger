@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="LedgerTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/ledger_page</item>
+        <item name="android:statusBarColor">@color/ledger_page</item>
+        <item name="android:navigationBarColor">@color/ledger_surface</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:colorAccent">@color/ledger_primary</item>
+        <item name="android:colorControlHighlight">@color/ledger_pressed</item>
+        <item name="android:popupWindowStyle">@style/LedgerPopupWindow</item>
+        <item name="android:popupMenuStyle">@style/LedgerPopupMenu</item>
+    </style>
+    <style name="LedgerPopupWindow" parent="android:style/Widget.Material.Light.PopupWindow">
+        <item name="android:overlapAnchor">false</item>
+    </style>
+    <style name="LedgerPopupMenu" parent="android:style/Widget.Material.Light.PopupMenu">
+        <item name="android:popupBackground">@drawable/ledger_menu_background</item>
+    </style>
+</resources>

@@ -41,7 +41,7 @@ final class SyncEngine {
 
         String label() {
             if (phase == Phase.SYNCING) return "同步中";
-            return phase == Phase.COMPLETE ? "已同步" : "待同步 " + pending + " 条";
+            return pending == 0 ? "本机已保存" : "待同伴确认 " + pending + " 条";
         }
     }
 
@@ -177,11 +177,13 @@ final class SyncEngine {
         PeerRoutePolicy.Channel previous = lastChannel.put(peer, channel);
         if (previous != null && previous != channel) SyncLog.write(context, SyncLog.Event.CHANNEL_SWITCH, previous.name() + ">" + channel.name());
         LedgerStore.SyncPoint point = result.syncPoint;
-        if (result.complete && result.authenticated && result.durable && point != null) {
+        if (result.complete && result.authenticated && result.durable) {
             String key = prefix + result.remoteId;
             try {
-                if (point.row > confirmedRow(store, checkpoints, trip.id, key))
-                    checkpoints.edit().putLong(key, point.row).putString(key + "/event", point.event).apply();
+                SharedPreferences.Editor verified = checkpoints.edit().putLong(prefix + "last_checked_at", System.currentTimeMillis());
+                if (point != null && point.row > confirmedRow(store, checkpoints, trip.id, key))
+                    verified.putLong(key, point.row).putString(key + "/event", point.event);
+                verified.apply();
             } catch (RuntimeException error) { SyncLog.write(context, SyncLog.Event.CHECKPOINT_SAVE, error); }
             pendingDirty = true;
         }
@@ -240,6 +242,12 @@ final class SyncEngine {
 
     private static String checkpointPrefix(LedgerStore.Trip trip, String device) {
         return trip.id + "/" + trip.team.fingerprint + "/" + device + "/";
+    }
+
+    static long lastCheckedAt(Context context, LedgerStore.Trip trip) {
+        if (trip.team == null || trip.people() == 1) return 0;
+        String key = checkpointPrefix(trip, PeerIdentity.deviceId(context)) + "last_checked_at";
+        return context.getSharedPreferences("peer_checkpoints", Context.MODE_PRIVATE).getLong(key, 0);
     }
 
     private static long confirmedRow(LedgerStore store, SharedPreferences checkpoints, String tripId, String key) {
