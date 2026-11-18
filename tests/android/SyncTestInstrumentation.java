@@ -260,6 +260,7 @@ public final class SyncTestInstrumentation extends Instrumentation {
                 }
             });
             check("two-person team UI: quick entry, review and sync use the same team flow", () -> PeerUiChecks.runTeam(this));
+            check("record colors: one durable exchange confirms incoming records without skipping local edits", () -> PeerUiChecks.runFirstSyncCardColors(this));
             check("quick drafts: tab switching, trip isolation, failed save and successful submission", () -> PeerUiChecks.runQuickDrafts(this));
             check("custom split UI: payer, individual shares and settlement agree", () -> PeerUiChecks.runCustomSplit(this));
             check("record deletion: full-list checkboxes, confirmation, offline propagation and replay", () -> PeerUiChecks.runRecordDeletion(this));
@@ -271,6 +272,7 @@ public final class SyncTestInstrumentation extends Instrumentation {
             check("review badge: verified channels, Wi-Fi failure falls back to Bluetooth on tap, and recent contact expires", () -> PeerUiChecks.runRosterRefresh(this));
             check("open team UI: organizer roster and validation are inline", () -> PeerUiChecks.runTeamSetup(this));
             check("open team UI: join details, connecting and delayed success are inline", () -> PeerUiChecks.runTeamJoin(this));
+            check("open team UI: reinstall in a full team offers another invite", () -> PeerUiChecks.runTeamFullAfterReinstall(this));
         }
     }
 

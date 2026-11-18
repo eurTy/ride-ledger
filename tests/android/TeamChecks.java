@@ -147,7 +147,10 @@ final class TeamChecks {
                 second.trip = second.store.joinTrip(code, "星河");
                 require(first.trip.localPerson.isEmpty() && !first.store.teamReady(first.trip), "an unregistered name occupied a seat");
                 require(exchange(first, root).complete(), "first named enrollment failed");
-                require(exchange(second, root).clientError instanceof TeamProtocol.Admission, "duplicate name was admitted");
+                Pair nameInUse = exchange(second, root);
+                require(nameInUse.clientError instanceof TeamProtocol.Admission &&
+                        ((TeamProtocol.Admission) nameInUse.clientError).reason == TeamProtocol.Admission.Reason.NAME_IN_USE,
+                        "duplicate name did not offer the rename path while a seat remained");
                 second.trip = second.store.joinTrip(code, "山谷");
                 require(exchange(second, root).complete(), "correcting an unregistered name failed");
                 first.reopen(); second.reopen(); root.reopen();
@@ -156,9 +159,12 @@ final class TeamChecks {
                 require(exchange(first, second).complete(), "registered phones could not exchange without issuer");
                 first.reopen();
                 require(first.trip.nameOf("m3").equals("山谷"), "authenticated roster did not propagate");
-                extra.trip = extra.store.joinTrip(code, "高原");
-                require(exchange(extra, root).clientError instanceof TeamProtocol.Admission && root.store.teamSeatCount(root.trip.id) == 3,
-                        "more than the expected number enrolled");
+                extra.trip = extra.store.joinTrip(code, "星河");
+                Pair full = exchange(extra, root);
+                require(full.clientError instanceof TeamProtocol.Admission &&
+                        ((TeamProtocol.Admission) full.clientError).reason == TeamProtocol.Admission.Reason.TEAM_FULL &&
+                        root.store.teamSeatCount(root.trip.id) == 3 && !extra.store.teamReady(extra.trip),
+                        "a different installation with the same name did not get the full-team response");
                 record(first, "CNY", 130, "after open team");
                 require(exchange(first, root).complete() && root.count() == 1, "new identity broke normal ledger sync");
             }

@@ -51,11 +51,11 @@ public final class TeamSetupActivity extends Activity {
     private TeamJoiner joiner;
     private TeamTransportAdapter transport;
     private String mode, tripId, invitation;
-    private String joinFailure = "";
+    private TeamProtocol.Admission joinFailure;
     private long startedAt, joinedAt;
     private boolean started;
     private LinearLayout body, identity;
-    private TextView status, count, roster, history, nameConflict;
+    private TextView status, count, roster, history, nameConflict, joinHelp;
     private EditText title, name, manual;
     private Button tokenToggle, readToken;
     private boolean tokenExpanded;
@@ -63,7 +63,7 @@ public final class TeamSetupActivity extends Activity {
     private RadioGroup seat;
     private ImageView qr;
     private AlertDialog textInviteDialog;
-    private Button ready, retry, changeName;
+    private Button ready, retry, changeName, otherTrip;
     private LedgerStore.Trip preview;
 
     @Override protected void onCreate(Bundle saved) {
@@ -80,7 +80,8 @@ public final class TeamSetupActivity extends Activity {
         long now = SystemClock.elapsedRealtime();
         startedAt = saved == null ? now : Math.min(now, saved.getLong("startedAt", now));
         joinedAt = saved == null ? 0 : saved.getLong("joinedAt");
-        joinFailure = saved == null ? "" : saved.getString("joinFailure", "");
+        String rejection = saved == null ? "" : saved.getString("joinFailure", "");
+        if (!rejection.isEmpty()) joinFailure = TeamProtocol.Admission.reported(saved.getString("joinFailureCode", ""), rejection);
         show();
         if (CREATE.equals(mode) && tripId != null) selectResult();
         if (saved != null) {
@@ -100,7 +101,10 @@ public final class TeamSetupActivity extends Activity {
         out.putBoolean("tokenExpanded", tokenExpanded);
         out.putLong("startedAt", startedAt);
         out.putLong("joinedAt", joinedAt);
-        out.putString("joinFailure", joinFailure);
+        if (joinFailure != null) {
+            out.putString("joinFailure", joinFailure.getMessage());
+            out.putString("joinFailureCode", joinFailure.reason.name());
+        }
         if (title != null) out.putString("title", value(title));
         if (name != null) out.putString("name", value(name));
         if (manual != null) out.putString("manual", value(manual));
@@ -114,7 +118,7 @@ public final class TeamSetupActivity extends Activity {
         started = true;
         LedgerStore.Trip current = trip();
         if (!JOIN.equals(mode) || current == null || store.teamReady(current) ||
-                (joinFailure.isEmpty() && SystemClock.elapsedRealtime() - startedAt < TeamJoiner.WAIT_MILLIS))
+                (joinFailure == null && SystemClock.elapsedRealtime() - startedAt < TeamJoiner.WAIT_MILLIS))
             transport.select(current);
         main.post(tick);
     }
@@ -142,8 +146,8 @@ public final class TeamSetupActivity extends Activity {
         expected = null;
         seat = null;
         identity = null;
-        count = roster = history = nameConflict = null;
-        ready = retry = changeName = null;
+        count = roster = history = nameConflict = joinHelp = null;
+        ready = retry = changeName = otherTrip = null;
         qr = null;
         LedgerStore.Trip current = trip();
         String heading = JOIN.equals(mode) ? "加入小队旅行" : current == null ? "创建小队旅行" : "邀请同伴";
@@ -273,25 +277,33 @@ public final class TeamSetupActivity extends Activity {
             tripLabels(body, current);
             text(body, "本人名称 · " + current.nameOf(current.localPerson), LedgerStyle.BODY, style.ink);
             status = text(body, "正在加入小队...", LedgerStyle.LABEL, style.muted);
+            joinHelp = text(body, "", LedgerStyle.LABEL, style.muted);
             history = text(body, "", LedgerStyle.LABEL, style.muted);
             retry = button(body, "重试连接", LedgerStyle.Action.PRIMARY, () -> {
                 startedAt = SystemClock.elapsedRealtime();
-                joinFailure = "";
+                joinFailure = null;
                 transport.stop();
                 transport.select(trip());
                 refresh();
             });
             if (current.team.openSeats) changeName = button(body, "修改本人名称", LedgerStyle.Action.OUTLINE, () -> {
                 try {
-                    invitation = store.inviteCode(trip());
-                    transport.stop();
-                    joinFailure = "";
-                    tripId = null;
-                    show();
+                    chooseInvitation(store.inviteCode(trip()));
                     name.setText(current.joinName);
                 } catch (Exception error) { inline(error); }
             });
+            otherTrip = button(body, "加入其他旅行", LedgerStyle.Action.PRIMARY, () -> chooseInvitation(null));
         }
+    }
+
+    private void chooseInvitation(String code) {
+        transport.stop();
+        joinFailure = null;
+        tripId = null;
+        invitation = code;
+        preview = null;
+        tokenExpanded = false;
+        show();
     }
 
     private void readInvite(String code) {
@@ -354,7 +366,7 @@ public final class TeamSetupActivity extends Activity {
             tripId = current.id;
             startedAt = SystemClock.elapsedRealtime();
             joinedAt = 0;
-            joinFailure = "";
+            joinFailure = null;
             show();
             transport.select(current);
         } catch (Exception error) { inline(error); }
@@ -373,13 +385,21 @@ public final class TeamSetupActivity extends Activity {
         long now = SystemClock.elapsedRealtime();
         if (JOIN.equals(mode)) {
             boolean enrolled = store.teamReady(current);
-            String failure = transport.error();
-            if (!failure.isEmpty()) joinFailure = failure;
+            TeamProtocol.Admission failure = transport.admissionFailure();
+            if (failure != null) joinFailure = failure;
             boolean expired = now - startedAt >= TeamJoiner.WAIT_MILLIS;
-            if (!enrolled && transport.nearby != null && (expired || !joinFailure.isEmpty())) transport.stop();
-            updateText(status, joiner.status(current, joinFailure, now - startedAt));
-            retry.setVisibility(!enrolled && (expired || !joinFailure.isEmpty()) ? View.VISIBLE : View.GONE);
-            if (changeName != null) changeName.setVisibility(!enrolled && !joinFailure.isEmpty() ? View.VISIBLE : View.GONE);
+            if (!enrolled && transport.nearby != null && (expired || joinFailure != null)) transport.stop();
+            updateText(status, joiner.status(current, joinFailure == null ? "" : joinFailure.getMessage(), now - startedAt));
+            boolean full = !enrolled && joinFailure != null && joinFailure.reason == TeamProtocol.Admission.Reason.TEAM_FULL;
+            boolean nameUsed = !enrolled && changeName != null && joinFailure != null &&
+                    joinFailure.reason == TeamProtocol.Admission.Reason.NAME_IN_USE;
+            String help = full ? "重装后需重新登记，可请组织者发来新小队邀请" :
+                    nameUsed ? "有空位时可换名，以新成员身份加入" : "";
+            updateText(joinHelp, help);
+            joinHelp.setVisibility(help.isEmpty() ? View.GONE : View.VISIBLE);
+            retry.setVisibility(!enrolled && !full && !nameUsed && (expired || joinFailure != null) ? View.VISIBLE : View.GONE);
+            if (changeName != null) changeName.setVisibility(nameUsed ? View.VISIBLE : View.GONE);
+            otherTrip.setVisibility(full ? View.VISIBLE : View.GONE);
             if (enrolled && joinedAt == 0) joinedAt = now;
             boolean receiving = enrolled && !transport.initialHistoryReceived() && transport.receivingInitialHistory() &&
                     now - joinedAt < TeamJoiner.HISTORY_WAIT_MILLIS;
@@ -390,7 +410,7 @@ public final class TeamSetupActivity extends Activity {
             if (enrolled && started && !receiving && now - joinedAt >= TeamJoiner.RETURN_MILLIS) {
                 selectResult();
                 finish();
-            } else if (!enrolled && !expired && joinFailure.isEmpty()) {
+            } else if (!enrolled && !expired && joinFailure == null) {
                 refreshAt(startedAt + TeamJoiner.WAIT_MILLIS);
             } else if (enrolled) {
                 refreshAt(joinedAt + (receiving ? TeamJoiner.HISTORY_WAIT_MILLIS : TeamJoiner.RETURN_MILLIS));

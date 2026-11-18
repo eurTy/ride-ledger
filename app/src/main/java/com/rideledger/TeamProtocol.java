@@ -15,7 +15,34 @@ import javax.crypto.spec.SecretKeySpec;
 /** Mutual device authentication and first enrollment, followed by the normal durable delta exchange. */
 final class TeamProtocol {
     static final class Admission extends Exception {
-        Admission(String message) { super(message); }
+        enum Reason {
+            NAME_IN_USE("这个名字已登记在另一台设备"),
+            TEAM_FULL("小队设备名额已满"),
+            OTHER("");
+
+            final String message;
+
+            Reason(String message) { this.message = message; }
+        }
+
+        final Reason reason;
+
+        Admission(String message) { this(Reason.OTHER, message); }
+
+        Admission(Reason reason) { this(reason, reason.message); }
+
+        private Admission(Reason reason, String message) {
+            super(message);
+            this.reason = reason;
+        }
+
+        static Admission reported(String code, String message) {
+            for (Reason reason : Reason.values()) {
+                if (reason.name().equals(code) || (code.isEmpty() && !reason.message.isEmpty() && reason.message.equals(message)))
+                    return new Admission(reason, message);
+            }
+            return new Admission(message);
+        }
     }
 
     private static final String DOMAIN = "ride-ledger-team-session-1";
@@ -88,7 +115,7 @@ final class TeamProtocol {
         write(wire, trip, new JSONObject().put("kind", "proof").put("proof", local.sign(signedAs(proof, "initiator"))));
         LedgerStore.Trip session = trip.withKey(key(keys, remote, proof));
         JSONObject decision = read(wire, session, "admission");
-        if (decision.has("reason")) throw new Admission(decision.getString("reason"));
+        if (decision.has("reason")) throw Admission.reported(decision.optString("reasonCode"), decision.getString("reason"));
         if (!store.teamReady(trip)) {
             JSONObject grant = decision.getJSONObject("grant");
             store.acceptSeat(trip, grant, local.deviceId, local.key, grant.getString("member"));
@@ -138,7 +165,7 @@ final class TeamProtocol {
             store.acceptSeat(trip, grant, remote.device, remote.key, grant.getString("member"));
             if (store.acceptRoster(trip, offer.optJSONArray("roster"))) enrolled.run();
         } catch (Admission denied) {
-            write(wire, session, decision.put("reason", denied.getMessage()));
+            write(wire, session, decision.put("reason", denied.getMessage()).put("reasonCode", denied.reason.name()));
             throw denied;
         }
         if (trip.team.openSeats) decision.put("roster", store.teamSeats(trip.id));

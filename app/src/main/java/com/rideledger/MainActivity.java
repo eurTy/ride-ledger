@@ -7,8 +7,6 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
-import android.graphics.drawable.Drawable;
-import android.graphics.drawable.LayerDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Build;
@@ -16,6 +14,7 @@ import android.provider.Settings;
 import android.provider.OpenableColumns;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -42,7 +41,6 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.function.Consumer;
 
 public final class MainActivity extends Activity {
     private static final int QUICK = 0, REVIEW = 1, TRIPS = 2;
@@ -286,7 +284,10 @@ public final class MainActivity extends Activity {
     }
 
     private LinearLayout page() {
-        ScrollView scroll = new ScrollView(this);
+        return page(new ScrollView(this));
+    }
+
+    private LinearLayout page(ScrollView scroll) {
         scroll.setFillViewport(true);
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
@@ -526,7 +527,20 @@ public final class MainActivity extends Activity {
     }
 
     private void renderQuick(LedgerStore.Trip trip) {
-        LinearLayout body = page();
+        ScrollView scroll = new ScrollView(this) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                QuickEntryPanel panel = quickEntry;
+                if (panel != null && panel.getParent() == getChildAt(0)) {
+                    WindowInsets insets = getRootWindowInsets();
+                    boolean keyboard = insets != null && (Build.VERSION.SDK_INT >= 30
+                            ? insets.isVisible(WindowInsets.Type.ime())
+                            : insets.getSystemWindowInsetBottom() > insets.getStableInsetBottom());
+                    panel.fitViewport(MeasureSpec.getSize(widthSpec), MeasureSpec.getSize(heightSpec), keyboard);
+                }
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
+        LinearLayout body = page(scroll);
         int inset = dp(LedgerStyle.PAGE_INSET);
         body.setPadding(inset, dp(LedgerStyle.CONTROL_GAP), inset, dp(LedgerStyle.CONTROL_GAP));
         LinearLayout header = new LinearLayout(this);
@@ -546,57 +560,8 @@ public final class MainActivity extends Activity {
         }
 
         quickEntry = new QuickEntryPanel(this, trip, uiPrefs, currencyHistory, noteHistory, ledgerActions, forms, receipts, quickDrafts,
-                this::error);
-        addCashActions(quickEntry, trip);
+                () -> store.getTrip(trip.id), this::error);
         body.addView(quickEntry, new LinearLayout.LayoutParams(-1, -2, 1));
-    }
-
-    private void addCashActions(LinearLayout card, LedgerStore.Trip trip) {
-        View divider = new View(this);
-        divider.setBackgroundColor(style.divider);
-        LinearLayout.LayoutParams rule = new LinearLayout.LayoutParams(-1, dp(1));
-        rule.topMargin = dp(LedgerStyle.CONTROL_GAP);
-        rule.bottomMargin = dp(LedgerStyle.ITEM_GAP);
-        card.addView(divider, rule);
-        TextView title = style.heading("现金管理", LedgerStyle.CAPTION);
-        title.setTextColor(style.muted);
-        title.setIncludeFontPadding(false);
-        card.addView(title, new LinearLayout.LayoutParams(-1, -2));
-        Button deposit = cashButton(LedgerReview.CASH_LABEL, R.drawable.ic_ledger_cash_in,
-                () -> openCashForm(trip.id, forms::moneyIn));
-        Button exchange = cashButton("换汇", R.drawable.ic_ledger_cash_exchange,
-                () -> openCashForm(trip.id, forms::exchange));
-        LinearLayout actions;
-        if (trip.people() > 1) {
-            Button repayment = cashButton("成员还款", R.drawable.ic_ledger_cash_repayment,
-                    () -> openCashForm(trip.id, forms::transfer));
-            actions = row(card, deposit, repayment, exchange);
-        } else actions = row(card, deposit, exchange);
-        ((LinearLayout.LayoutParams) actions.getLayoutParams()).weight = 1;
-        actions.setBaselineAligned(false);
-        actions.setGravity(Gravity.CENTER_VERTICAL);
-    }
-
-    private Button cashButton(String label, int icon, Runnable onClick) {
-        Button action = style.button(label, LedgerStyle.Action.QUIET, onClick);
-        action.setTextSize(LedgerStyle.CAPTION);
-        action.setIncludeFontPadding(false);
-        int touch = dp(LedgerStyle.CONTROL_HEIGHT);
-        action.setMinHeight(touch);
-        action.setMinimumHeight(touch);
-        int inset = dp(LedgerStyle.ITEM_GAP);
-        action.setPaddingRelative(inset, dp(2), inset, dp(2));
-        LayerDrawable badge = new LayerDrawable(new Drawable[]{style.rounded(style.soft, 0, 8), getDrawable(icon)});
-        badge.setLayerInset(1, inset, inset, inset, inset);
-        badge.setBounds(0, 0, dp(24), dp(24));
-        action.setCompoundDrawablesRelative(null, badge, null, null);
-        action.setCompoundDrawablePadding(dp(1));
-        return action;
-    }
-
-    private void openCashForm(String tripId, Consumer<LedgerStore.Trip> action) {
-        LedgerStore.Trip latest = store.getTrip(tripId);
-        if (latest != null) action.accept(latest);
     }
 
     private void waitingForTeam(LinearLayout body) {

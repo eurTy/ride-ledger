@@ -57,7 +57,8 @@ final class JournalSync {
         }
         result.remoteId = peer;
         result.modern = result.authenticated = result.complete = result.durable = true;
-        result.syncPoint = new LedgerStore.SyncPoint(local.tip.seq, local.tip.id);
+        result.syncPoint = result.added == 0 ? new LedgerStore.SyncPoint(local.tip.seq, local.tip.id)
+                : store.confirmedJournalPoint(trip.id, local, remote);
         result.bytesRead = wire.bytesRead;
         result.bytesWritten = wire.bytesWritten;
         return result;

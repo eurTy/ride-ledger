@@ -586,12 +586,28 @@ final class LedgerForms {
         return compactAmount(box, label, hint, LedgerStyle.LABEL);
     }
 
-    EditText currencyField(LinearLayout box, String tripId, String label, String initial, boolean quick) {
-        return currencyField(box, tripId, label, initial, quick, true);
+    static final class CurrencyInput {
+        final EditText field;
+        final TextView caption, historyButton;
+
+        CurrencyInput(EditText field, TextView caption, TextView historyButton) {
+            this.field = field;
+            this.caption = caption;
+            this.historyButton = historyButton;
+        }
+    }
+
+    CurrencyInput quickCurrencyField(LinearLayout box, String tripId, String initial) {
+        return currencyInput(box, tripId, "货币", initial, true, true);
     }
 
     private EditText currencyField(LinearLayout box, String tripId, String label, String initial,
                                    boolean quick, boolean rememberTyping) {
+        return currencyInput(box, tripId, label, initial, quick, rememberTyping).field;
+    }
+
+    private CurrencyInput currencyInput(LinearLayout box, String tripId, String label, String initial,
+                                        boolean quick, boolean rememberTyping) {
         TextView caption = text(box, label, quick ? LedgerStyle.CAPTION : LedgerStyle.LABEL, style.muted);
         if (quick) caption.setIncludeFontPadding(false);
         caption.setPadding(0, dp(3), 0, 0);
@@ -659,7 +675,7 @@ final class LedgerForms {
                 } catch (RuntimeException error) { SyncLog.write(activity, SyncLog.Event.UI_REFRESH, error); }
             });
         });
-        return currency;
+        return new CurrencyInput(currency, caption, historyButton);
     }
 
     private void showCurrencyHistory(String tripId, EditText currency, TextView anchor, List<String> history) {

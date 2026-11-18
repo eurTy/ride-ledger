@@ -436,6 +436,25 @@ final class LedgerStore extends SQLiteOpenHelper {
         } finally { db.endTransaction(); }
     }
 
+    synchronized SyncPoint confirmedJournalPoint(String tripId, JournalWindow local, JournalWindow remote) {
+        SQLiteDatabase db = getReadableDatabase();
+        requireEpoch(db, tripId, local.epoch);
+        long through = local.tip.seq;
+        String event = local.tip.id;
+        // The peer also has the rows it sent during this exchange, beyond our opening tip.
+        // Keep the checkpoint contiguous so a concurrent local write never counts as acknowledged.
+        try (Cursor cursor = db.rawQuery("SELECT seq,id,source_epoch,source_seq FROM events " +
+                "WHERE trip_id=? AND seq>? ORDER BY seq", new String[]{tripId, Long.toString(through)})) {
+            while (cursor.moveToNext()) {
+                if (!remote.epoch.equals(cursor.getString(2)) || cursor.isNull(3) || cursor.getLong(3) > remote.tip.seq)
+                    break;
+                through = cursor.getLong(0);
+                event = cursor.getString(1);
+            }
+        }
+        return new SyncPoint(through, event);
+    }
+
     synchronized long confirmedRow(String tripId, long row, String event) {
         if (row == 0 || event == null) return 0;
         try (Cursor c = getReadableDatabase().rawQuery(
@@ -492,7 +511,7 @@ final class LedgerStore extends SQLiteOpenHelper {
             return existing;
         }
         int slot = trip.indexOf(member);
-        if (teamSeatCount(trip.id) >= trip.people()) throw new TeamProtocol.Admission("小队设备名额已满");
+        if (teamSeatCount(trip.id) >= trip.people()) throw new TeamProtocol.Admission(TeamProtocol.Admission.Reason.TEAM_FULL);
         try (Cursor c = getReadableDatabase().rawQuery("SELECT 1 FROM team_seats WHERE trip_id=? AND seat=?",
                 new String[]{trip.id, Integer.toString(slot)})) {
             if (c.moveToFirst()) throw new TeamProtocol.Admission("这个名字已登记在另一台设备");
@@ -510,11 +529,13 @@ final class LedgerStore extends SQLiteOpenHelper {
             if (!name.equals(existing.getString("name"))) throw new TeamProtocol.Admission("本机已登记为「" + existing.getString("name") + "」");
             return existing;
         }
-        boolean[] occupied = new boolean[trip.people()];
         JSONArray seats = teamSeats(trip.id);
+        if (seats.length() >= trip.people()) throw new TeamProtocol.Admission(TeamProtocol.Admission.Reason.TEAM_FULL);
+        boolean[] occupied = new boolean[trip.people()];
         for (int i = 0; i < seats.length(); i++) {
             JSONObject seat = seats.getJSONObject(i);
-            if (name.equalsIgnoreCase(seat.getString("name"))) throw new TeamProtocol.Admission("这个名字已登记在另一台设备");
+            if (name.equalsIgnoreCase(seat.getString("name")))
+                throw new TeamProtocol.Admission(TeamProtocol.Admission.Reason.NAME_IN_USE);
             occupied[seat.getInt("seat")] = true;
         }
         for (int slot = 1; slot < occupied.length; slot++) {
@@ -523,7 +544,7 @@ final class LedgerStore extends SQLiteOpenHelper {
             saveSeat(getWritableDatabase(), trip, grant);
             return grant;
         }
-        throw new TeamProtocol.Admission("小队设备名额已满");
+        throw new TeamProtocol.Admission(TeamProtocol.Admission.Reason.TEAM_FULL);
     }
 
     synchronized void acceptSeat(Trip trip, JSONObject grant, String device, String key, String member) throws Exception {

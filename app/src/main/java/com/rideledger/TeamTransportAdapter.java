@@ -34,8 +34,11 @@ final class TeamTransportAdapter {
     }
 
     String error() {
-        return nearby == null ? "" : nearby.admissionError();
+        TeamProtocol.Admission failure = admissionFailure();
+        return failure == null ? "" : failure.getMessage();
     }
+
+    TeamProtocol.Admission admissionFailure() { return nearby == null ? null : nearby.admissionFailure(); }
 
     SyncEngine.Status syncState() {
         return nearby == null ? SyncEngine.Status.EMPTY : nearby.syncState();

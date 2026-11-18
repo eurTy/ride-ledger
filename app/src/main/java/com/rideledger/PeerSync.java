@@ -63,7 +63,7 @@ final class PeerSync {
     private long revision, lastBluetoothRefresh, discoveryStarted;
     private boolean pending = true;
     private volatile String summary = "本机账目已保存 · 等待同伴连接";
-    private volatile String admissionError = "";
+    private volatile TeamProtocol.Admission admissionFailure;
 
     PeerSync(Context context, LedgerStore store, Listener listener, boolean startRadios) {
         this(context, store, listener, startRadios, null);
@@ -390,7 +390,7 @@ final class PeerSync {
             SyncLog.write(context, SyncLog.Event.valueOf(channel.name()), error);
             if (!enrolled && error instanceof TeamProtocol.Admission) {
                 summary = error.getMessage();
-                admissionError = summary;
+                admissionFailure = (TeamProtocol.Admission) error;
             }
         } else summary = "本机记录保留 · " + (received > 0 ? "已收到 " + received + " 笔，确认待重试" :
                 channel == PeerRoutePolicy.Channel.WIFI && radios.legacyBluetoothEnabled() ? "热点待连接，自动尝试蓝牙" : "等待同伴，连接恢复后自动补传");
@@ -422,7 +422,7 @@ final class PeerSync {
         for (PeerConnection connection : connections.keySet()) latest = Math.max(latest, connection.lastProgress());
         return latest;
     }
-    String admissionError() { return enrolled ? "" : admissionError; }
+    TeamProtocol.Admission admissionFailure() { return enrolled ? null : admissionFailure; }
     boolean enrollingNearby() { return !enrollmentPeer.isEmpty() && routes.busy(enrollmentPeer); }
     private void closeChannel(PeerRoutePolicy.Channel channel) {
         for (Map.Entry<PeerConnection, PeerRoutePolicy.Channel> item : connections.entrySet())

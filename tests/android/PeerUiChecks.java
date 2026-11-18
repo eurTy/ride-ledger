@@ -204,6 +204,59 @@ final class PeerUiChecks {
         } finally { other.cleanup(); }
     }
 
+    static void runFirstSyncCardColors(Instrumentation instrumentation) throws Exception {
+        Context context = instrumentation.getTargetContext();
+        PeerProtocolChecks.Ctx other = new PeerProtocolChecks.Ctx(context);
+        try (LedgerStore store = new LedgerStore(context); LedgerStore companion = new LedgerStore(other)) {
+            LedgerStore.Trip trip = store.createOpenTeam("卡片确认检查", "甲", 2);
+            LedgerStore.Trip pending = companion.joinTrip(store.inviteCode(trip), "乙");
+            Team.Identity identity = Team.Identity.load(other);
+            JSONObject grant = store.enroll(trip, Team.Identity.load(context), identity.deviceId, identity.key, "", "乙");
+            companion.acceptSeat(pending, grant, identity.deviceId, identity.key, grant.getString("member"));
+            LedgerStore.Trip peer = companion.getTrip(trip.id);
+            LedgerActions localActions = new LedgerActions(store), peerActions = new LedgerActions(companion);
+            localActions.expense(trip, trip.localPerson, "CNY", "11.23", false, "首轮本机");
+            peerActions.expense(peer, peer.localPerson, "USD", "24.56", false, "首轮同伴");
+            context.getSharedPreferences("ui", 0).edit().putString("last_trip", trip.id)
+                    .putBoolean(MainActivity.STARTUP_PERMISSIONS_REQUESTED, true).commit();
+            Activity activity = instrumentation.startActivitySync(new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            try {
+                LedgerStyle style = new LedgerStyle(context);
+                PeerSync sync = transport(activity).nearby;
+                require(sync != null, "group coordinator not running on open");
+                instrumentation.runOnMainSync(() -> text(activity.getWindow().getDecorView(), "复盘").performClick());
+                waitForRecordColor(instrumentation, activity, "11.23 CNY", style.pendingRecord);
+                instrumentation.runOnMainSync(() -> require(text(activity.getWindow().getDecorView(), "查看全部").performClick(),
+                        "full records could not open before sync"));
+                waitForText(instrumentation, activity, "全部旅行记录");
+                waitForRecordColor(instrumentation, activity, "11.23 CNY", style.pendingRecord);
+
+                // One real session with records in both directions while the full list is open.
+                teamExchange(sync, companion, peer, other);
+                waitForRecordColor(instrumentation, activity, "11.23 CNY", style.confirmedRecord);
+                waitForRecordColor(instrumentation, activity, "24.56 USD", style.confirmedRecord);
+                require(store.events(trip.id).size() == 2 && companion.events(peer.id).size() == 2,
+                        "the first exchange did not produce exactly two records on each device");
+                instrumentation.runOnMainSync(() -> require(text(activity.getWindow().getDecorView(), "退出").performClick(),
+                        "the open record list was replaced during sync"));
+                waitForRecordColor(instrumentation, activity, "24.56 USD", style.confirmedRecord);
+
+                // Insert after the next session freezes both journals, before it receives a new peer row.
+                peerActions.expense(peer, peer.localPerson, "USD", "31.57", false, "下一笔同伴");
+                teamExchange(sync, companion, peer, other, PeerRoutePolicy.Channel.WIFI, () -> {
+                    try { localActions.expense(trip, trip.localPerson, "CNY", "43.89", false, "会话中的本机新账"); }
+                    catch (Exception error) { throw new AssertionError(error); }
+                });
+                waitForText(instrumentation, activity, "4 笔");
+                waitForRecordColor(instrumentation, activity, "43.89 CNY", style.pendingRecord);
+                require(companion.events(peer.id).size() == 3,
+                        "a simultaneous local entry unexpectedly entered the frozen outbound journal");
+                require(SyncEngine.confirmedThrough(context, store, trip) < store.snapshot(trip.id).syncPoint.row,
+                        "advancing an inbound checkpoint skipped pending local work");
+            } finally { instrumentation.runOnMainSync(activity::finish); instrumentation.waitForIdleSync(); }
+        } finally { other.cleanup(); }
+    }
+
     static void runQuickDrafts(Instrumentation instrumentation) throws Exception {
         Context context = instrumentation.getTargetContext();
         try (LedgerStore store = new LedgerStore(context)) {
@@ -1042,7 +1095,7 @@ final class PeerUiChecks {
         });
         for (String action : new String[]{"现金入账", "成员还款", "换汇"}) {
             instrumentation.runOnMainSync(() -> {
-                TextView button = text(activity.getWindow().getDecorView(), action);
+                View button = description(activity.getWindow().getDecorView(), action);
                 require(button != null && button.performClick(), "missing ledger action " + action);
             });
             instrumentation.waitForIdleSync();
@@ -1294,6 +1347,60 @@ final class PeerUiChecks {
         } finally { organizer.cleanup(); }
     }
 
+    static void runTeamFullAfterReinstall(Instrumentation instrumentation) throws Exception {
+        Context context = instrumentation.getTargetContext();
+        PeerProtocolChecks.Ctx organizer = new PeerProtocolChecks.Ctx(context);
+        PeerProtocolChecks.Ctx originalInstall = new PeerProtocolChecks.Ctx(context);
+        try (LedgerStore remote = new LedgerStore(organizer); LedgerStore currentInstall = new LedgerStore(context);
+             ServerSocket listener = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+            LedgerStore.Trip created = remote.createOpenTeam("重装后的两人旅行", "组织者甲", 2);
+            Team.Identity issuer = Team.Identity.load(organizer);
+            Team.Identity original = Team.Identity.load(originalInstall);
+            remote.enroll(created, issuer, original.deviceId, original.key, "", "Eureka");
+            new LedgerActions(remote).expense(created, created.localPerson, "CNY", "15", false, "旧账");
+            LedgerStore.Trip pending = currentInstall.joinTrip(remote.inviteCode(created), "Eureka");
+
+            java.util.concurrent.FutureTask<TeamProtocol.Admission.Reason> response = new java.util.concurrent.FutureTask<>(() -> {
+                try (Socket client = listener.accept()) {
+                    client.setSoTimeout(6000);
+                    new TeamProtocol(remote, created, issuer, QUIET, () -> { }).accept(
+                            new PeerWire(client.getInputStream(), client.getOutputStream(), () -> { }));
+                    throw new AssertionError("a fresh installation took over the registered member");
+                } catch (TeamProtocol.Admission denied) { return denied.reason; }
+            });
+            Thread server = new Thread(response, "full-team-join-fixture");
+            server.setDaemon(true);
+            server.start();
+
+            Activity page = instrumentation.startActivitySync(new Intent(context, TeamSetupActivity.class)
+                    .putExtra(TeamSetupActivity.MODE, TeamSetupActivity.JOIN).putExtra(TeamSetupActivity.TRIP, pending.id)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            try {
+                PeerSync joining = setupTransport(page).nearby;
+                require(joining != null, "the pending device did not start enrollment");
+                String route = TeamProtocol.routeId(created.team, issuer.deviceId);
+                joining.offer(new PeerRoutePolicy.Endpoint("wifi:full-team-test", PeerRoutePolicy.Channel.WIFI, route,
+                        true, () -> openBadgeTestSocket(listener)));
+                waitForText(instrumentation, page, "小队设备名额已满");
+                require(response.get(3, java.util.concurrent.TimeUnit.SECONDS) == TeamProtocol.Admission.Reason.TEAM_FULL,
+                        "the organizer did not reject the fresh installation as full");
+                instrumentation.runOnMainSync(() -> {
+                    View root = page.getWindow().getDecorView();
+                    require(!text(root, "重试连接").isShown() && !text(root, "修改本人名称").isShown(),
+                            "a full team still suggested retrying or renaming");
+                    View anotherTrip = text(root, "加入其他旅行");
+                    require(anotherTrip != null && anotherTrip.isShown() && anotherTrip.performClick(),
+                            "no action to join a different trip");
+                    require(text(page.getWindow().getDecorView(), "扫码加入") != null,
+                            "the alternative action did not reopen the invite chooser");
+                });
+                require(currentInstall.getTrip(pending.id) != null && currentInstall.events(pending.id).isEmpty() &&
+                                remote.seat(created.id, original.deviceId) != null && remote.events(created.id).size() == 1,
+                        "leaving the blocked join altered the old seat or ledger");
+            } finally { instrumentation.runOnMainSync(page::finish); instrumentation.waitForIdleSync(); }
+        } finally { organizer.cleanup(); originalInstall.cleanup(); }
+    }
+
     private static TeamTransportAdapter setupTransport(Activity activity) throws ReflectiveOperationException {
         Field field = TeamSetupActivity.class.getDeclaredField("transport");
         field.setAccessible(true);
@@ -1325,6 +1432,11 @@ final class PeerUiChecks {
 
     private static void teamExchange(PeerSync sync, LedgerStore peerStore, LedgerStore.Trip peer, Context context,
                                      PeerRoutePolicy.Channel channel) throws Exception {
+        teamExchange(sync, peerStore, peer, context, channel, () -> { });
+    }
+
+    private static void teamExchange(PeerSync sync, LedgerStore peerStore, LedgerStore.Trip peer, Context context,
+                                     PeerRoutePolicy.Channel channel, Runnable journalsCaptured) throws Exception {
         try (ServerSocket server = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
              Socket client = new Socket("127.0.0.1", server.getLocalPort());
              Socket accepted = server.accept()) {
@@ -1332,7 +1444,7 @@ final class PeerUiChecks {
             sync.accept(new PeerConnection(accepted.getInputStream(), accepted.getOutputStream(), accepted, null),
                     channel, "");
             TeamProtocol protocol = new TeamProtocol(peerStore, peer, Team.Identity.load(context), new PeerProtocol.Listener() {
-                @Override public void authenticated(String id) { }
+                @Override public void authenticated(String id) { journalsCaptured.run(); }
                 @Override public void stored(int count) { }
             }, () -> { });
             require(protocol.exchange(new PeerWire(client.getInputStream(), client.getOutputStream(), () -> { }), "").complete,
@@ -1374,7 +1486,10 @@ final class PeerUiChecks {
         long deadline = SystemClock.elapsedRealtime() + 5000;
         do {
             instrumentation.runOnMainSync(() -> {
-                View record = recordContaining(activity.getWindow().getDecorView(), label);
+                View root = activity.getWindow().getDecorView();
+                TextView title = text(root, "全部旅行记录");
+                if (title != null && title.isShown()) root = (View) title.getParent().getParent();
+                View record = recordContaining(root, label);
                 actual.set(record == null ? 0 : ((GradientDrawable) record.getBackground()).getColor().getDefaultColor());
             });
             if (actual.get() == color) return;
