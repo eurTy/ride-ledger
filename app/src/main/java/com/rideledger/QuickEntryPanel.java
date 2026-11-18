@@ -20,11 +20,13 @@ import java.util.function.Supplier;
 /** Owns the edited expense so a roster update never recreates the input fields. */
 final class QuickEntryPanel extends LinearLayout {
     private static final int ROOMY_WIDTH = 344, ROOMY_HEIGHT = 590;
+    private static final int MAX_CONTROL_GROWTH = 64;
     private final LedgerStyle style;
     private final QuickEntryDrafts drafts;
     private LedgerStore.Trip trip;
     private final FrameLayout amountArea;
     private final LinearLayout paymentControl, cashActions;
+    private final View cashDivider;
     private final TextView amountCaption, paymentCaption, paymentSummary, noteCaption, cashCaption;
     private final LedgerForms.CurrencyInput currencyInput;
     private final ImageView paymentIcon;
@@ -40,6 +42,7 @@ final class QuickEntryPanel extends LinearLayout {
     private String payerId;
     private PaymentSplitSheet paymentSheet;
     private boolean roomy;
+    private int verticalGrowth = -1;
 
     QuickEntryPanel(Activity activity, LedgerStore.Trip trip, SharedPreferences uiPrefs,
                     CurrencyHistory currencyHistory, NoteHistory noteHistory, LedgerActions ledgerActions, LedgerForms forms,
@@ -183,12 +186,9 @@ final class QuickEntryPanel extends LinearLayout {
         saveSpacing.topMargin = dp(LedgerStyle.ITEM_GAP);
         card.addView(save, saveSpacing);
 
-        View divider = new View(activity);
-        divider.setBackgroundColor(style.divider);
-        LayoutParams rule = new LayoutParams(-1, dp(1));
-        rule.topMargin = dp(LedgerStyle.CONTROL_GAP);
-        rule.bottomMargin = dp(LedgerStyle.ITEM_GAP);
-        card.addView(divider, rule);
+        cashDivider = new View(activity);
+        cashDivider.setBackgroundColor(style.divider);
+        card.addView(cashDivider, new LayoutParams(-1, dp(1)));
         cashCaption = style.heading("现金管理", LedgerStyle.CAPTION);
         cashCaption.setTextColor(style.muted);
         cashCaption.setIncludeFontPadding(false);
@@ -205,43 +205,71 @@ final class QuickEntryPanel extends LinearLayout {
 
     /** The viewport is measured above the navigation and keyboard. Keep the same inputs on resize. */
     void fitViewport(int width, int height, boolean keyboardVisible) {
-        boolean useRoomy = !keyboardVisible && width >= dp(ROOMY_WIDTH) && height >= dp(ROOMY_HEIGHT)
+        int growth = !keyboardVisible && height >= dp(ROOMY_HEIGHT)
+                ? Math.min(MAX_CONTROL_GROWTH, (height - dp(ROOMY_HEIGHT)) / dp(4)) : -1;
+        boolean useRoomy = growth >= 0 && width >= dp(ROOMY_WIDTH)
                 && getResources().getConfiguration().fontScale < 1.2f;
-        if (roomy == useRoomy) return;
+        if (roomy == useRoomy && verticalGrowth == growth) return;
         roomy = useRoomy;
+        verticalGrowth = growth;
         applyPresentation();
     }
 
     private void applyPresentation() {
-        int label = roomy ? 15 : LedgerStyle.CAPTION;
+        // Tall screens use bounded control sizes and gaps instead of stretching empty wrappers.
+        boolean tall = verticalGrowth >= 0;
+        int growth = Math.max(verticalGrowth, 0);
+        int sectionGap = LedgerStyle.CONTROL_GAP + growth / 4;
+        int itemGap = LedgerStyle.ITEM_GAP + growth / 8;
+        space(amountArea, tall ? 0 : 1, 0, sectionGap);
+        space(paymentControl, tall ? 0 : .6f, 0, sectionGap);
+        space(noteCaption, 0, 0, itemGap);
+        space(save, tall ? 0 : .2f, itemGap, LedgerStyle.ITEM_GAP);
+        space(cashDivider, 0, sectionGap, itemGap);
+        space(cashCaption, 0, 0, itemGap);
+        space(cashActions, tall ? 0 : 1.15f, 0, 0);
+        setGravity(tall ? Gravity.CENTER_VERTICAL : Gravity.TOP);
+
+        int label = roomy ? 15 + growth / 24 : LedgerStyle.CAPTION;
         amountCaption.setTextSize(label);
         currencyInput.caption.setTextSize(label);
         paymentCaption.setTextSize(label);
         noteCaption.setTextSize(label);
         cashCaption.setTextSize(label);
-        amountArea.setPaddingRelative(dp(12), dp(roomy ? 12 : 6), dp(12), dp(roomy ? 8 : 2));
-        amount.setTextSize(roomy ? 42 : LedgerStyle.QUICK_AMOUNT);
-        currency.setTextSize(roomy ? 20 : 16);
-        currency.setMinimumHeight(dp(roomy ? 54 : LedgerStyle.COMPACT_HEIGHT));
-        currencyInput.historyButton.setTextSize(roomy ? 20 : 16);
+        amountArea.setPaddingRelative(dp(12), dp(tall ? 12 : 6), dp(12), dp(tall ? 8 : 2));
+        amount.setTextSize(roomy ? 42 + growth / 8 : LedgerStyle.QUICK_AMOUNT);
+        int amountHeight = tall ? 70 + growth / 2 : LedgerStyle.COMPACT_HEIGHT;
+        amount.setMinimumHeight(dp(amountHeight));
+        currency.setTextSize(roomy ? 20 + growth / 16 : 16);
+        int currencyHeight = tall ? 54 + growth / 3 : LedgerStyle.COMPACT_HEIGHT;
+        currency.setMinimumHeight(dp(currencyHeight));
+        currencyInput.historyButton.setTextSize(roomy ? 20 + growth / 16 : 16);
         LayoutParams historySize = (LayoutParams) currencyInput.historyButton.getLayoutParams();
-        historySize.height = dp(roomy ? 54 : LedgerStyle.COMPACT_HEIGHT);
+        historySize.height = dp(currencyHeight);
         currencyInput.historyButton.setLayoutParams(historySize);
 
-        paymentControl.setMinimumHeight(dp(roomy ? 84 : 64));
-        paymentSummary.setTextSize(roomy ? 18 : LedgerStyle.BODY);
-        resizeIcon(paymentIcon, roomy ? 44 : 34);
-        note.field.setTextSize(roomy ? 17 : LedgerStyle.BODY);
-        note.field.setMinimumHeight(dp(roomy ? 56 : LedgerStyle.COMPACT_HEIGHT));
-        int attachmentSize = roomy ? 56 : LedgerStyle.CONTROL_HEIGHT;
+        paymentControl.setMinimumHeight(dp(tall ? 80 + 2 * growth / 3 : 64));
+        paymentSummary.setTextSize(roomy ? 18 + growth / 13 : LedgerStyle.BODY);
+        resizeIcon(paymentIcon, tall ? 44 + growth / 7 : 34);
+        note.field.setTextSize(roomy ? 17 + growth / 16 : LedgerStyle.BODY);
+        note.field.setMinimumHeight(dp(tall ? 56 + growth / 3 : LedgerStyle.COMPACT_HEIGHT));
+        int attachmentSize = tall ? 56 + growth / 7 : LedgerStyle.CONTROL_HEIGHT;
         resizeIcon(attachment, attachmentSize);
-        int iconInset = dp(roomy ? 13 : 0);
+        int iconInset = dp(tall ? 13 : 0);
         attachment.setPadding(iconInset, iconInset, iconInset, iconInset);
-        attachment.setScaleType(roomy ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER);
-        save.setTextSize(roomy ? 18 : LedgerStyle.BODY);
-        buttonHeight(save, roomy ? 60 : LedgerStyle.CONTROL_HEIGHT);
+        attachment.setScaleType(tall ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER);
+        save.setTextSize(roomy ? 18 + growth / 12 : LedgerStyle.BODY);
+        buttonHeight(save, tall ? 60 + growth / 3 : LedgerStyle.CONTROL_HEIGHT);
 
-        for (int i = 0; i < cashActions.getChildCount(); i++) ((CashAction) cashActions.getChildAt(i)).fit(roomy);
+        for (int i = 0; i < cashActions.getChildCount(); i++) ((CashAction) cashActions.getChildAt(i)).fit(tall, growth);
+    }
+
+    private void space(View control, float weight, int topGap, int bottomGap) {
+        LayoutParams params = (LayoutParams) control.getLayoutParams();
+        params.weight = weight;
+        params.topMargin = dp(topGap);
+        params.bottomMargin = dp(bottomGap);
+        control.setLayoutParams(params);
     }
 
     private void addCashAction(String label, int icon, Supplier<LedgerStore.Trip> latestTrip,
@@ -283,11 +311,11 @@ final class QuickEntryPanel extends LinearLayout {
             addView(label, new LayoutParams(-1, -2));
         }
 
-        void fit(boolean expanded) {
-            setMinimumHeight(dp(expanded ? 76 : LedgerStyle.CONTROL_HEIGHT));
-            resizeIcon(icon, expanded ? 34 : 24);
-            label.setTextSize(expanded ? 17 : LedgerStyle.CAPTION);
-            label.setPadding(0, dp(expanded ? 5 : 1), 0, 0);
+        void fit(boolean tall, int growth) {
+            setMinimumHeight(dp(tall ? 76 + 3 * growth / 4 : LedgerStyle.CONTROL_HEIGHT));
+            resizeIcon(icon, tall ? 34 + growth / 4 : 24);
+            label.setTextSize(roomy ? 17 + growth / 14 : LedgerStyle.CAPTION);
+            label.setPadding(0, dp(tall ? 5 + growth / 12 : 1), 0, 0);
         }
 
         @Override public CharSequence getAccessibilityClassName() { return Button.class.getName(); }
