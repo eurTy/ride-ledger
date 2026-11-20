@@ -27,6 +27,7 @@
         <provider android:name="com.rideledger.ReceiptCamera" android:authorities="com.rideledger.synctest.receipt-camera"
             android:exported="false" android:grantUriPermissions="true" />
         <activity android:name="com.rideledger.InviteScannerActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name="com.rideledger.ReceiptCaptureActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name="com.rideledger.TeamSetupActivity" android:exported="false" />
         <activity android:name="com.rideledger.MainActivity" android:exported="true">
             <intent-filter>

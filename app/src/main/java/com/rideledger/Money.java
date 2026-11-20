@@ -1,6 +1,7 @@
 package com.rideledger;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.util.Currency;
 import java.util.Locale;
@@ -36,6 +37,20 @@ final class Money {
         return minorUnits(value, code);
     }
 
+    static String applyUnit(String raw, int places) {
+        BigDecimal value = raw.trim().isEmpty() ? BigDecimal.ONE : decimal(raw);
+        BigDecimal amount = value.movePointRight(places);
+        if (amount.abs().compareTo(BigDecimal.valueOf(Long.MAX_VALUE)) > 0)
+            throw new NumberFormatException("金额超出可输入范围");
+        return amount.stripTrailingZeros().toPlainString();
+    }
+
+    static BigDecimal exchangeRate(String raw) {
+        BigDecimal rate = decimal(raw);
+        if (rate.signum() <= 0) throw new IllegalArgumentException("汇率必须大于零");
+        return rate;
+    }
+
     private static BigDecimal decimal(String raw) {
         String text = raw.trim();
         // Pasted exponents can make BigDecimal attempt enormous intermediate allocations.
@@ -51,6 +66,10 @@ final class Money {
 
     static String format(long minor, String code) {
         return amountText(minor, code) + " " + code;
+    }
+
+    static String format(BigInteger minor, String code) {
+        return new BigDecimal(minor, scale(code)).toPlainString() + " " + code;
     }
 
     static String amountText(long minor, String code) {

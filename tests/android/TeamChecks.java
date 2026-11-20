@@ -1,7 +1,9 @@
 package com.rideledger;
 
+import android.content.ClipData;
 import android.content.Context;
 import android.content.ContextWrapper;
+import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -33,6 +35,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.time.LocalDate;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -55,6 +58,8 @@ final class TeamChecks {
     };
 
     static void run(Context base, PeerProtocolChecks.Sink sink) {
+        sink.check("receipt capture: prefer the output, fall back to returned photos, and reject empty results",
+                () -> cameraResult(base));
         sink.check("receipts: offline save, Bluetooth reference, interrupted LAN photo, retry and deduplication", () -> {
             try (Device root = new Device(base); Device guest = new Device(base)) {
                 root.trip = root.store.createOpenTeam("小票测试", "组织者", 2);
@@ -948,6 +953,45 @@ final class TeamChecks {
             };
         } else if (!fault.isEmpty()) wire = new PeerProtocolChecks.FaultOutput(socket, fault);
         return new PeerWire(PeerProtocolChecks.fragment(socket.getInputStream()), wire, () -> { });
+    }
+
+    static void cameraResult(Context context) throws IOException {
+        String capture = UUID.randomUUID().toString();
+        String returned = UUID.randomUUID().toString();
+        File output = ReceiptCamera.file(context, capture);
+        File reply = ReceiptCamera.file(context, returned);
+        Files.createDirectories(output.getParentFile().toPath());
+        Uri uri = ReceiptCamera.uri(context, returned);
+        Bitmap thumbnail = Bitmap.createBitmap(80, 60, Bitmap.Config.ARGB_8888);
+        thumbnail.eraseColor(Color.GREEN);
+        try {
+            Files.write(output.toPath(), receiptPhoto(1).photo);
+            Files.write(reply.toPath(), receiptPhoto(2).photo);
+            Intent result = new Intent().setData(uri).putExtra("data", thumbnail);
+            byte[] full = ReceiptImage.importPhoto(context.getContentResolver(), ReceiptCamera.uri(context, capture));
+            byte[] fallback = ReceiptImage.importPhoto(context.getContentResolver(), uri);
+            require(Arrays.equals(full, ReceiptCamera.readResult(context, capture, result)),
+                    "a thumbnail or another URI replaced the full capture");
+            Files.write(output.toPath(), new byte[0]);
+            require(Arrays.equals(fallback, ReceiptCamera.readResult(context, capture, result)),
+                    "the camera's returned URI was ignored");
+            result.setData(null);
+            result.setClipData(ClipData.newRawUri("photo", uri));
+            require(Arrays.equals(fallback, ReceiptCamera.readResult(context, capture, result)),
+                    "the camera's shared URI was ignored");
+            result.setClipData(null);
+            Files.write(output.toPath(), new byte[]{1, 2, 3});
+            require(Arrays.equals(ReceiptImage.importBitmap(thumbnail), ReceiptCamera.readResult(context, capture, result)),
+                    "a corrupt output prevented the thumbnail fallback");
+            try {
+                ReceiptCamera.readResult(context, capture, null);
+                throw new AssertionError("saved a photo from an empty result");
+            } catch (IOException expected) { /* No valid image was returned. */ }
+        } finally {
+            thumbnail.recycle();
+            Files.deleteIfExists(output.toPath());
+            Files.deleteIfExists(reply.toPath());
+        }
     }
 
     private static ReceiptImage receiptPhoto(int seed) throws IOException {

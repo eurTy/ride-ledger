@@ -44,20 +44,10 @@ final class LedgerReview {
         }
     }
 
-    static final class Debt {
-        final String payer, recipient;
-        final List<String> amounts;
-
-        Debt(String payer, String recipient, List<String> amounts) {
-            this.payer = payer;
-            this.recipient = recipient;
-            this.amounts = Collections.unmodifiableList(amounts);
-        }
-    }
-
     final String spending;
-    final List<Debt> settlement;
-    final boolean hasSpending, incomplete;
+    final LedgerSettlement settlementAmounts;
+    final List<LedgerSettlement.Debt> settlement;
+    final boolean hasSpending, incomplete, financialConflict;
     final List<String> balances;
     final List<Row> records;
     final boolean hasReceipts;
@@ -70,7 +60,8 @@ final class LedgerReview {
     LedgerReview(LedgerStore.Trip trip, LedgerStore.Summary summary, List<LedgerReceipts.Entry> receipts) {
         hasSpending = !summary.spent.isEmpty();
         spending = hasSpending ? formatBalances(summary.spent) : "暂无支出";
-        settlement = teamDebts(trip, summary.teamNet);
+        settlementAmounts = new LedgerSettlement(trip, summary);
+        settlement = settlementAmounts.byCurrency();
         incomplete = summary.incomplete;
         List<String> balanceRows = new ArrayList<>();
         for (int i = 0; i < trip.people(); i++) {
@@ -84,7 +75,7 @@ final class LedgerReview {
         Map<String, LedgerReceipts.Entry> byExpense = new HashMap<>();
         for (LedgerReceipts.Entry receipt : receipts)
             if (!receipt.digest.isEmpty()) byExpense.put(receipt.eventId, receipt);
-        boolean includesReceipts = false;
+        boolean includesReceipts = false, conflicts = false;
         int pendingImages = 0;
         SimpleDateFormat clock = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA);
         for (LedgerStore.Event event : summary.visible) {
@@ -97,8 +88,10 @@ final class LedgerReview {
             if (pending) pendingImages++;
             recordRows.add(describe(trip, event, filter, clock, receipt, pending));
             includesReceipts |= receipt != null;
+            conflicts |= !event.financialOptions.isEmpty();
         }
         records = Collections.unmodifiableList(recordRows);
+        financialConflict = conflicts;
         hasReceipts = includesReceipts;
         pendingReceipts = pendingImages;
     }
@@ -109,38 +102,6 @@ final class LedgerReview {
         for (Map.Entry<String, Long> entry : new TreeMap<>(balances).entrySet())
             parts.add(Money.format(entry.getValue(), entry.getKey()));
         return String.join("、", parts);
-    }
-
-    private static List<Debt> teamDebts(LedgerStore.Trip trip, Map<String, Map<String, Long>> nets) {
-        Map<String, long[]> currencies = new TreeMap<>();
-        int people = trip.people();
-        for (int i = 0; i < people; i++) {
-            Map<String, Long> member = nets.get(trip.member(i));
-            if (member == null) continue;
-            for (Map.Entry<String, Long> entry : member.entrySet())
-                currencies.computeIfAbsent(entry.getKey(), key -> new long[people])[i] = entry.getValue();
-        }
-        Map<Integer, List<String>> byPair = new TreeMap<>();
-        for (Map.Entry<String, long[]> entry : currencies.entrySet()) {
-            long[] remaining = entry.getValue();
-            for (int debtor = 0; debtor < remaining.length; debtor++) {
-                for (int creditor = 0; creditor < remaining.length && remaining[debtor] < 0; creditor++) {
-                    if (remaining[creditor] <= 0) continue;
-                    long amount = remaining[debtor] == Long.MIN_VALUE ? remaining[creditor] : Math.min(-remaining[debtor], remaining[creditor]);
-                    remaining[debtor] += amount;
-                    remaining[creditor] -= amount;
-                    byPair.computeIfAbsent(debtor * people + creditor, pair -> new ArrayList<>())
-                            .add(Money.format(amount, entry.getKey()));
-                }
-            }
-        }
-        List<Debt> debts = new ArrayList<>();
-        for (Map.Entry<Integer, List<String>> entry : byPair.entrySet()) {
-            int pair = entry.getKey();
-            debts.add(new Debt(trip.nameOf(trip.member(pair / people)),
-                    trip.nameOf(trip.member(pair % people)), entry.getValue()));
-        }
-        return Collections.unmodifiableList(debts);
     }
 
     static Row withFields(LedgerStore.Trip trip, Row source, JSONObject fields) {

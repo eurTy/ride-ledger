@@ -41,19 +41,32 @@ final class ReceiptImage {
                 })
                 : decodeLegacy(resolver, uri);
         if (bitmap == null) throw new IOException("无法读取这张照片");
-        try {
-            byte[] photo = jpeg(bitmap, 87);
-            if (photo.length > MAX_BYTES) photo = jpeg(bitmap, 72);
-            if (photo.length > MAX_BYTES) {
-                int width = Math.max(1, bitmap.getWidth() * 2 / 3);
-                int height = Math.max(1, bitmap.getHeight() * 2 / 3);
-                Bitmap scaled = Bitmap.createScaledBitmap(bitmap, width, height, true);
-                try { photo = jpeg(scaled, 75); }
-                finally { if (scaled != bitmap) scaled.recycle(); }
-            }
-            if (photo.length > MAX_BYTES) throw new IOException("照片过大，请选择另一张");
-            return photo;
-        } finally { bitmap.recycle(); }
+        try { return compress(bitmap); }
+        finally { bitmap.recycle(); }
+    }
+
+    static byte[] importBitmap(Bitmap bitmap) throws IOException {
+        int longest = Math.max(bitmap.getWidth(), bitmap.getHeight());
+        if (longest <= MAX_SIDE) return compress(bitmap);
+        int width = Math.max(1, (int) ((long) bitmap.getWidth() * MAX_SIDE / longest));
+        int height = Math.max(1, (int) ((long) bitmap.getHeight() * MAX_SIDE / longest));
+        Bitmap scaled = Bitmap.createScaledBitmap(bitmap, width, height, true);
+        try { return compress(scaled); }
+        finally { scaled.recycle(); }
+    }
+
+    private static byte[] compress(Bitmap bitmap) throws IOException {
+        byte[] photo = jpeg(bitmap, 87);
+        if (photo.length > MAX_BYTES) photo = jpeg(bitmap, 72);
+        if (photo.length > MAX_BYTES) {
+            int width = Math.max(1, bitmap.getWidth() * 2 / 3);
+            int height = Math.max(1, bitmap.getHeight() * 2 / 3);
+            Bitmap scaled = Bitmap.createScaledBitmap(bitmap, width, height, true);
+            try { photo = jpeg(scaled, 75); }
+            finally { if (scaled != bitmap) scaled.recycle(); }
+        }
+        if (photo.length > MAX_BYTES) throw new IOException("照片过大，请选择另一张");
+        return photo;
     }
 
     private static Bitmap decodeLegacy(ContentResolver resolver, Uri uri) throws IOException {

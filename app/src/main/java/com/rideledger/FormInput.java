@@ -1,8 +1,10 @@
 package com.rideledger;
 
+import android.content.Context;
 import android.graphics.Insets;
 import android.graphics.Rect;
 import android.os.Build;
+import android.text.InputType;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -12,6 +14,14 @@ import android.widget.EditText;
 
 final class FormInput {
     private FormInput() { }
+
+    static final class AmountField extends EditText {
+        AmountField(Context context) {
+            super(context);
+            setSingleLine(true);
+            setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        }
+    }
 
     static void next(EditText field, EditText target) {
         if (target.getId() == View.NO_ID) target.setId(View.generateViewId());
@@ -31,6 +41,13 @@ final class FormInput {
 
     static void done(EditText field) {
         field.setImeOptions(EditorInfo.IME_ACTION_DONE);
+    }
+
+    static boolean keyboardVisible(View view) {
+        WindowInsets insets = view.getRootWindowInsets();
+        return insets != null && (Build.VERSION.SDK_INT >= 30
+                ? insets.isVisible(WindowInsets.Type.ime())
+                : insets.getSystemWindowInsetBottom() > insets.getStableInsetBottom());
     }
 
     /** Give an activity's scroll viewport the space left above the keyboard and system bars. */

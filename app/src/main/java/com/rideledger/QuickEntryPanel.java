@@ -135,7 +135,7 @@ final class QuickEntryPanel extends LinearLayout {
         note = forms.expenseNote(card, trip.id, state == null ? "" : state.getString("note", ""), false);
         noteCaption = captionFor(card, note.field);
         style.inputUnderline(note.field, style.stroke);
-        attachment = receipts.besideNote(note.input, trip, null, false);
+        attachment = receipts.besideNote(note.input, trip, null, null);
         FormInput.next(amount, currency);
         FormInput.next(currency, note.field);
         FormInput.done(note.field);
@@ -255,9 +255,6 @@ final class QuickEntryPanel extends LinearLayout {
         note.field.setMinimumHeight(dp(tall ? 56 + growth / 3 : LedgerStyle.COMPACT_HEIGHT));
         int attachmentSize = tall ? 56 + growth / 7 : LedgerStyle.CONTROL_HEIGHT;
         resizeIcon(attachment, attachmentSize);
-        int iconInset = dp(tall ? 13 : 0);
-        attachment.setPadding(iconInset, iconInset, iconInset, iconInset);
-        attachment.setScaleType(tall ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER);
         save.setTextSize(roomy ? 18 + growth / 12 : LedgerStyle.BODY);
         buttonHeight(save, tall ? 60 + growth / 3 : LedgerStyle.CONTROL_HEIGHT);
 

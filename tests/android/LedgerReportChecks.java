@@ -19,6 +19,7 @@ import java.util.UUID;
 final class LedgerReportChecks {
     static void run() throws Exception {
         revisedTrip();
+        exchangesByMember();
         overflowAndEmpty();
     }
 
@@ -85,7 +86,11 @@ final class LedgerReportChecks {
         equal("51", member.amountColumns.get(1).values.get("JPY").toString(), "JPY share stays in its currency row");
         equal("1234", reportEntry(report, "消费分类", "未分类").amountColumns.get(0).values.get("KWD").toString(),
                 "three-decimal currency lost precision");
-        equal("2 笔", reportEntry(report, "资金往来", "现金入账").amountNote, "funds table count");
+        LedgerReport.Entry funds = reportEntry(report, "资金往来", "现金入账");
+        equal("2 笔", funds.amountNote, "funds table count");
+        require(funds.memberTotals.size() == 2, "each cash holder has a subtotal");
+        equal("1 笔 · 300.00 CNY", entry(funds.memberTotals, "阿青"), "initial cash is assigned to its holder");
+        equal("1 笔 · 100.00 CNY", entry(funds.memberTotals, "阿林"), "topup is assigned to its holder");
         LedgerReport.Entry exchange = reportEntry(report, "资金往来", "换汇");
         require(exchange.amountColumns.size() == 2 && "换出".equals(exchange.amountColumns.get(0).label)
                         && "换入".equals(exchange.amountColumns.get(1).label),
@@ -114,6 +119,26 @@ final class LedgerReportChecks {
                 "text export is missing current sections or includes deleted details");
         require(exported.indexOf("个人支出  1.234 KWD") < exported.indexOf("共同支出  101.01 CNY"),
                 "text export details are out of order");
+        require(exported.contains("  阿青：1 笔 · 300.00 CNY") && exported.contains("  阿林：1 笔 · 100.00 CNY"),
+                "cash holder subtotals are missing from the export");
+    }
+
+    private static void exchangesByMember() throws Exception {
+        LedgerStore.Trip trip = new LedgerStore.Trip("legacy", "换汇测试", "甲", "乙", "", "a");
+        List<LedgerStore.Event> events = Arrays.asList(
+                event(trip, "first", "exchange", 1000, new JSONObject().put("person", "a")
+                        .put("fromCurrency", "CNY").put("fromAmount", 5000).put("toCurrency", "JPY").put("toAmount", 103)),
+                event(trip, "second", "exchange", 2000, new JSONObject().put("person", "b")
+                        .put("fromCurrency", "CNY").put("fromAmount", 7000).put("toCurrency", "JPY").put("toAmount", 219)),
+                event(trip, "third", "exchange", 3000, new JSONObject().put("person", "a")
+                        .put("fromCurrency", "CNY").put("fromAmount", 2300).put("toCurrency", "KWD").put("toAmount", 1234)));
+        LedgerReport report = LedgerReport.from(new LedgerStore.Snapshot(trip, events));
+        LedgerReport.Entry exchange = reportEntry(report, "资金往来", "换汇");
+        require(exchange.memberTotals.size() == 2, "each person who exchanged has a subtotal");
+        equal("2 笔\n换出 73.00 CNY\n换入 103 JPY、1.234 KWD", entry(exchange.memberTotals, "甲"),
+                "multiple exchange currencies stay with the correct member");
+        equal("1 笔\n换出 70.00 CNY\n换入 219 JPY", entry(exchange.memberTotals, "乙"),
+                "exchange totals stay separate even with the same currency pair");
     }
 
     private static void overflowAndEmpty() throws Exception {

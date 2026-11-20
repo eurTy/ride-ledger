@@ -148,8 +148,11 @@ final class PeerUiChecks {
                     java.util.Set<android.view.ViewParent> sections = new java.util.HashSet<>();
                     for (String title : new String[]{"总支出", "现金余额", "小队结算", "旅行记录"}) {
                         TextView label = text(review, title);
-                        require(label != null && sections.add(label.getParent()) && ((View) label.getParent()).getBackground() != null,
-                                "review sections are not visually separated");
+                        android.view.ViewParent card = label == null ? null : label.getParent();
+                        while (card instanceof View && ((View) card).getBackground() == null) card = card.getParent();
+                        require(card instanceof View && sections.add(card), "review sections are not visually separated");
+                        if ("小队结算".equals(title)) require(text((View) card, "汇率结算") != null,
+                                "currency conversion is missing from the settlement card");
                     }
                     for (String filter : new String[]{"全部", "共同支出", "换汇记录"}) {
                         TextView chip = text(review, filter);

@@ -25,6 +25,7 @@ final class LedgerReport {
     static final class Entry {
         final String label, value;
         final List<AmountColumn> amountColumns;
+        final List<Entry> memberTotals;
         final String amountNote;
 
         Entry(String label, String value) {
@@ -32,10 +33,15 @@ final class LedgerReport {
         }
 
         Entry(String label, String value, String amountNote, AmountColumn... amountColumns) {
+            this(label, value, amountNote, Collections.emptyList(), amountColumns);
+        }
+
+        Entry(String label, String value, String amountNote, List<Entry> memberTotals, AmountColumn... amountColumns) {
             this.label = label;
             this.value = value;
             this.amountNote = amountNote;
             this.amountColumns = Collections.unmodifiableList(new ArrayList<>(Arrays.asList(amountColumns)));
+            this.memberTotals = Collections.unmodifiableList(new ArrayList<>(memberTotals));
         }
     }
 
@@ -84,8 +90,10 @@ final class LedgerReport {
                 .thenComparing(row -> row.id).reversed());
 
         Amounts spending = new Amounts(), funds = new Amounts(), repayments = new Amounts();
-        Amounts exchangedOut = new Amounts(), exchangedIn = new Amounts();
+        ExchangeAmounts exchanges = new ExchangeAmounts();
         Map<String, Amounts> types = new HashMap<>(), paid = new HashMap<>(), shares = new HashMap<>();
+        Map<String, Amounts> fundsByMember = new HashMap<>();
+        Map<String, ExchangeAmounts> exchangesByMember = new HashMap<>();
         Map<ExpenseCategory, Amounts> categories = new EnumMap<>(ExpenseCategory.class);
         Map<String, Amounts> days = new TreeMap<>(Collections.reverseOrder());
         int conflicts = 0, receipts = 0, received = 0, awaitingSync = 0;
@@ -121,14 +129,17 @@ final class LedgerReport {
                     }
                     break;
                 }
-                case "opening": case "topup": funds.add(code, amount); break;
+                case "opening": case "topup":
+                    funds.add(code, amount);
+                    add(fundsByMember, data.optString("person"), code, amount);
+                    break;
                 case "transfer":
                     repayments.add(code, amount);
                     if (trip.team == null) records.set(index, legacyTransfer(trip, row));
                     break;
                 case "exchange":
-                    exchangedOut.add(data.optString("fromCurrency"), data.optLong("fromAmount"));
-                    exchangedIn.add(data.optString("toCurrency"), data.optLong("toAmount"));
+                    exchanges.add(data);
+                    exchangesByMember.computeIfAbsent(data.optString("person"), ignored -> new ExchangeAmounts()).add(data);
                     break;
             }
         }
@@ -154,15 +165,21 @@ final class LedgerReport {
 
         List<String> memberNames = new ArrayList<>();
         List<Entry> memberSpending = new ArrayList<>(), balances = new ArrayList<>();
+        List<Entry> memberFunds = new ArrayList<>(), memberExchanges = new ArrayList<>();
         for (int i = 0; i < trip.people(); i++) {
             String member = trip.member(i);
             Map<String, Long> cash = cash(trip, summary, member, i);
             Amounts memberPaid = paid.get(member), memberShares = shares.get(member);
+            Amounts contributed = fundsByMember.get(member);
+            ExchangeAmounts converted = exchangesByMember.get(member);
             if (trip.team != null && trip.team.openSeats && !trip.seatNames.containsKey(member) &&
-                    memberPaid == null && memberShares == null && cash.isEmpty() && !summary.teamNet.containsKey(member))
+                    memberPaid == null && memberShares == null && contributed == null && converted == null &&
+                    cash.isEmpty() && !summary.teamNet.containsKey(member))
                 continue;
             String name = trip.nameOf(member);
             memberNames.add(name);
+            if (contributed != null) memberFunds.add(movementEntry(name, contributed, Collections.emptyList()));
+            if (converted != null) memberExchanges.add(converted.entry(name, Collections.emptyList()));
             if (memberPaid != null || memberShares != null) {
                 memberSpending.add(new Entry(name, "已付 " + subtotal(memberPaid) + "\n应承担 " + subtotal(memberShares), "",
                         column("已付", memberPaid), column("分摊", memberShares)));
@@ -178,11 +195,9 @@ final class LedgerReport {
 
         List<Entry> movements = new ArrayList<>();
         movements.add(new Entry("统计口径", "支出总计只计消费，金额按原币种汇总。"));
-        movements.add(new Entry("现金入账", movement(funds), funds.count + " 笔", column("", funds)));
-        movements.add(new Entry("还款", movement(repayments), repayments.count + " 笔", column("", repayments)));
-        movements.add(new Entry("换汇", exchangedOut.count == 0 ? "0 笔" : exchangedOut.count + " 笔\n换出 " +
-                exchangedOut.format() + "\n换入 " + exchangedIn.format(), exchangedOut.count + " 笔",
-                column("换出", exchangedOut), column("换入", exchangedIn)));
+        movements.add(movementEntry("现金入账", funds, memberFunds));
+        movements.add(movementEntry("还款", repayments, Collections.emptyList()));
+        movements.add(exchanges.entry("换汇", memberExchanges));
         sections.add(new Section("资金往来", movements));
         sections.add(section("当前现金", balances, summary.incomplete ? "金额超出汇总范围" : "暂无现金记录"));
         sections.add(section("当前结算", settlement(trip, summary, review),
@@ -214,7 +229,7 @@ final class LedgerReport {
     private static List<Entry> settlement(LedgerStore.Trip trip, LedgerStore.Summary summary, LedgerReview review) {
         List<Entry> entries = new ArrayList<>();
         if (summary.incomplete) return entries;
-        for (LedgerReview.Debt debt : review.settlement)
+        for (LedgerSettlement.Debt debt : review.settlement)
             entries.add(new Entry(debt.payer + " → " + debt.recipient, String.join("、", debt.amounts)));
         if (trip.team == null) {
             for (Map.Entry<String, Long> debt : new TreeMap<>(summary.debtBToA).entrySet()) {
@@ -267,8 +282,10 @@ final class LedgerReport {
 
     private static String subtotal(Amounts amounts) { return amounts == null ? "0" : amounts.format(); }
 
-    private static String movement(Amounts amounts) {
-        return amounts.count == 0 ? "0 笔" : amounts.count + " 笔 · " + amounts.format();
+    private static Entry movementEntry(String label, Amounts amounts, List<Entry> memberTotals) {
+        String count = amounts.count + " 笔";
+        String value = amounts.count == 0 ? count : count + " · " + amounts.format();
+        return new Entry(label, value, count, memberTotals, column("", amounts));
     }
 
     private static String decimal(BigInteger minor, String code) {
@@ -288,6 +305,21 @@ final class LedgerReport {
             List<String> amounts = new ArrayList<>();
             values.forEach((code, amount) -> amounts.add(decimal(amount, code) + " " + code));
             return String.join("、", amounts);
+        }
+    }
+
+    private static final class ExchangeAmounts {
+        final Amounts out = new Amounts(), in = new Amounts();
+
+        void add(JSONObject data) {
+            out.add(data.optString("fromCurrency"), data.optLong("fromAmount"));
+            in.add(data.optString("toCurrency"), data.optLong("toAmount"));
+        }
+
+        Entry entry(String label, List<Entry> memberTotals) {
+            String count = out.count + " 笔";
+            String value = out.count == 0 ? count : count + "\n换出 " + out.format() + "\n换入 " + in.format();
+            return new Entry(label, value, count, memberTotals, column("换出", out), column("换入", in));
         }
     }
 
@@ -340,13 +372,19 @@ final class LedgerReport {
     }
 
     private static void writeEntry(BufferedWriter writer, Entry entry) throws IOException {
+        writeEntry(writer, entry, "");
+    }
+
+    private static void writeEntry(BufferedWriter writer, Entry entry, String indent) throws IOException {
+        writer.write(indent);
         if (!entry.label.isEmpty()) writer.write(entry.label + "：");
         String[] lines = entry.value.split("\\r\\n|\\r|\\n", -1);
         writer.write(lines[0]);
         for (int i = 1; i < lines.length; i++) {
             writer.newLine();
-            writer.write("  " + lines[i]);
+            writer.write(indent + "  " + lines[i]);
         }
         writer.newLine();
+        for (Entry member : entry.memberTotals) writeEntry(writer, member, indent + "  ");
     }
 }

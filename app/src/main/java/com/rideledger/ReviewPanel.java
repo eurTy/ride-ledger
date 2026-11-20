@@ -44,6 +44,7 @@ final class ReviewPanel extends ListView {
         void openReceipt(LedgerReview.Row row);
         void openAll();
         void reconnect();
+        void convertSettlement();
     }
 
     private static final int PREVIEW_SIZE = 5;
@@ -77,23 +78,12 @@ final class ReviewPanel extends ListView {
         setDivider(null);
         setSelector(new ColorDrawable(Color.TRANSPARENT));
         LinearLayout header = column();
-        header.setPadding(0, dp(18), 0, 0);
         LinearLayout ending = column();
         ending.setPadding(0, 0, 0, dp(30));
-        LinearLayout titleRow = new LinearLayout(context);
-        titleRow.setGravity(Gravity.CENTER_VERTICAL);
-        header.addView(titleRow, new LinearLayout.LayoutParams(-1, -2));
-        TextView title = style.heading(tripName, LedgerStyle.PAGE_TITLE);
-        title.setPadding(0, dp(LedgerStyle.CONTROL_GAP), 0, dp(LedgerStyle.CONTROL_GAP));
-        titleRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        title.setMaxLines(2);
-        title.setEllipsize(TextUtils.TruncateAt.END);
         connection = new ConnectionBadge(context, actions::reconnect);
         int availableWidth = dp(getResources().getConfiguration().screenWidthDp) - getPaddingLeft() - getPaddingRight();
         connection.setMaxWidth(Math.max(dp(60), availableWidth / 2));
-        LinearLayout.LayoutParams badgeWidth = new LinearLayout.LayoutParams(-2, -2);
-        badgeWidth.setMarginStart(dp(8));
-        titleRow.addView(connection, badgeWidth);
+        header.addView(style.tripTitleRow(tripName, connection), new LinearLayout.LayoutParams(-1, -2));
         if (model.incomplete) text(header, "部分记录超出金额范围，合计不完整。", LedgerStyle.LABEL, style.warning);
         LinearLayout spending = card(header, "总支出", R.drawable.ic_ledger_receipt);
         TextView total = text(spending, model.spending, model.hasSpending ? 20 : LedgerStyle.BODY,
@@ -106,7 +96,14 @@ final class ReviewPanel extends ListView {
         buildFilters(history);
         preview = column();
         history.addView(preview, fullMargin());
-        buildSettlement(card(ending, "小队结算", R.drawable.ic_ledger_reconcile));
+        Button convert = null;
+        if (!model.incomplete && !model.settlement.isEmpty()) {
+            convert = style.button("汇率结算", LedgerStyle.Action.QUIET, actions::convertSettlement);
+            convert.setTextSize(LedgerStyle.LABEL);
+            convert.setPadding(dp(LedgerStyle.CONTROL_GAP), 0, 0, 0);
+            convert.setMaxWidth(Math.max(dp(96), availableWidth / 2));
+        }
+        buildSettlement(card(ending, "小队结算", R.drawable.ic_ledger_reconcile, convert));
         syncStatus = text(ending, "", LedgerStyle.CAPTION, style.muted);
         header.addView(ending);
         selectFilter(initialFilter);
@@ -131,7 +128,7 @@ final class ReviewPanel extends ListView {
     }
 
     private void buildSettlement(LinearLayout card) {
-        if (model.records.stream().anyMatch(row -> !row.event.financialOptions.isEmpty()))
+        if (model.financialConflict)
             text(card, "有账目待核对，结算暂按当前显示版本计算", LedgerStyle.CAPTION, style.warning);
         if (model.settlement.isEmpty()) {
             text(card, "目前已结清", EMPTY_STATE_TEXT_SIZE, style.muted);
@@ -139,7 +136,7 @@ final class ReviewPanel extends ListView {
         }
         for (int i = 0; i < model.settlement.size(); i++) {
             if (i > 0) divider(card);
-            LedgerReview.Debt debt = model.settlement.get(i);
+            LedgerSettlement.Debt debt = model.settlement.get(i);
             TextView direction = text(card, debt.payer + " → " + debt.recipient, LedgerStyle.LABEL, style.muted);
             direction.setContentDescription(debt.payer + " 应还 " + debt.recipient);
             direction.setPadding(0, dp(10), 0, 0);
@@ -611,6 +608,10 @@ final class ReviewPanel extends ListView {
     }
 
     private LinearLayout card(LinearLayout parent, String title, int icon) {
+        return card(parent, title, icon, null);
+    }
+
+    private LinearLayout card(LinearLayout parent, String title, int icon, Button action) {
         LinearLayout card = column();
         int inset = dp(LedgerStyle.CARD_INSET);
         card.setPadding(inset, dp(10), inset, dp(8));
@@ -620,7 +621,15 @@ final class ReviewPanel extends ListView {
         parent.addView(card, params);
         TextView label = style.heading(title, LedgerStyle.SECTION_TITLE);
         label.setPadding(0, dp(8), 0, dp(8));
-        card.addView(label, fullMargin());
+        if (action == null) card.addView(label, fullMargin());
+        else {
+            LinearLayout heading = new LinearLayout(getContext());
+            heading.setGravity(Gravity.CENTER_VERTICAL);
+            heading.setBaselineAligned(false);
+            heading.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
+            heading.addView(action, new LinearLayout.LayoutParams(-2, -2));
+            card.addView(heading, fullMargin());
+        }
         LedgerIcon.attach(label, icon);
         divider(card);
         return card;

@@ -100,6 +100,26 @@ final class LedgerStyle {
         return view;
     }
 
+    LinearLayout tripTitleRow(String name, View trailing) {
+        LinearLayout row = new LinearLayout(context);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBaselineAligned(false);
+        row.setPadding(0, dp(18), 0, 0);
+        TextView heading = heading(name, PAGE_TITLE);
+        heading.setPadding(0, dp(CONTROL_GAP), 0, dp(CONTROL_GAP));
+        heading.setMaxLines(2);
+        heading.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams titleWidth = new LinearLayout.LayoutParams(0, -2, 1);
+        titleWidth.gravity = Gravity.TOP;
+        row.addView(heading, titleWidth);
+        if (trailing != null) {
+            LinearLayout.LayoutParams trailingSize = new LinearLayout.LayoutParams(-2, -2);
+            trailingSize.setMarginStart(dp(CONTROL_GAP));
+            row.addView(trailing, trailingSize);
+        }
+        return row;
+    }
+
     Button button(CharSequence value, Action action, Runnable click) {
         Button button = new Button(context);
         button.setText(value);

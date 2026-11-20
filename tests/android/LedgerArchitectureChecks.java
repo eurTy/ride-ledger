@@ -4,6 +4,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -73,6 +74,53 @@ final class LedgerArchitectureChecks {
                     "a deleted exchange was used as the default");
         });
 
+        sink.check("settlement conversion: net currencies offset after recorded repayments", () -> {
+            LedgerStore.Trip trip = store.createTeam("汇率结算", Arrays.asList("甲", "乙"));
+            LedgerActions actions = new LedgerActions(store);
+            actions.expense(trip, "m1", "USD", "20", false, "");
+            actions.transfer(trip, "m2", "m1", "USD", "2");
+            actions.expense(trip, "m2", "TJS", "30", false, "");
+            actions.expense(trip, "m2", "CNY", "10", false, "");
+            actions.cash(trip, "m1", "JPY", "500");
+            LedgerSettlement settlement = new LedgerSettlement(trip, store.summary(trip.id));
+            require(settlement.currencies().size() == 3 && !settlement.currencies().contains("JPY"),
+                    "cash without a debt required a rate");
+            Map<String, String> quotes = new java.util.HashMap<>();
+            quotes.put("TJS", "0.7");
+            quotes.put("USD", "7");
+            List<LedgerSettlement.Debt> result = settlement.convert("CNY", quotes);
+            require(result.size() == 1, "opposing balances did not collapse to one transfer");
+            requireDebt(result.get(0), "乙", "甲", "40.50 CNY");
+            quotes.put("TJS", "0.2");
+            quotes.put("USD", "1");
+            require(settlement.convert("CNY", quotes).isEmpty(), "an exact offset still requested payment");
+            for (String invalid : Arrays.asList("", "0", "-1", "1e9", ".")) {
+                quotes.put("USD", invalid);
+                boolean rejected = false;
+                try { settlement.convert("CNY", quotes); }
+                catch (IllegalArgumentException expected) { rejected = expected.getMessage().contains("USD"); }
+                require(rejected, "a missing or invalid rate produced a result");
+            }
+        });
+
+        sink.check("settlement conversion: five member rounding conserves minor units", () -> {
+            LedgerStore.Trip trip = store.createTeam("汇率尾差", Arrays.asList("甲", "乙", "丙", "丁", "戊"));
+            LedgerStore.Summary summary = new LedgerStore.Summary();
+            long[] yen = {2, 1, -1, -1, -1};
+            for (int i = 0; i < yen.length; i++) summary.teamNet.put(trip.member(i), Collections.singletonMap("JPY", yen[i]));
+            LedgerSettlement settlement = new LedgerSettlement(trip, summary);
+            List<LedgerSettlement.Debt> dollars = settlement.convert("USD", Collections.singletonMap("JPY", "0.005"));
+            require(dollars.size() == 2, "half-cent entries changed the rounded total");
+            requireDebt(dollars.get(0), "丙", "甲", "0.01 USD");
+            requireDebt(dollars.get(1), "丁", "乙", "0.01 USD");
+            List<LedgerSettlement.Debt> dinars = settlement.convert("KWD", Collections.singletonMap("JPY", "0.003"));
+            require(dinars.size() == 3, "three decimal currency lost a transfer");
+            requireDebt(dinars.get(0), "丙", "甲", "0.003 KWD");
+            requireDebt(dinars.get(1), "丁", "甲", "0.003 KWD");
+            requireDebt(dinars.get(2), "戊", "乙", "0.003 KWD");
+            require(settlement.convert("JPY", Collections.emptyMap()).size() == 3, "target currency required its own rate");
+        });
+
         sink.check("journal: a large snapshot has a stable row checkpoint independent of the device clock", () -> {
             LedgerStore.Trip trip = store.createOpenTeam("大账本", "甲", 1);
             JSONArray entries = new JSONArray();
@@ -119,6 +167,11 @@ final class LedgerArchitectureChecks {
 
     private static PeerRoutePolicy.Endpoint endpoint(String id) {
         return new PeerRoutePolicy.Endpoint("wifi:reused", PeerRoutePolicy.Channel.WIFI, id, true, null);
+    }
+
+    private static void requireDebt(LedgerSettlement.Debt debt, String payer, String recipient, String amount) {
+        require(debt.payer.equals(payer) && debt.recipient.equals(recipient) &&
+                debt.amounts.equals(Collections.singletonList(amount)), "unexpected payment direction or amount");
     }
 
     private static void require(boolean value, String message) {

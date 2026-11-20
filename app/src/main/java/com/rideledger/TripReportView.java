@@ -29,6 +29,7 @@ final class TripReportView {
     private static final String TITLE = "旅行统计报告";
     private static final int FULL = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
+    private static final int MEMBER_TITLE_SIZE = 16;
 
     private final Activity activity;
     private final LedgerStyle style;
@@ -127,22 +128,38 @@ final class TripReportView {
         for (LedgerReport.Entry entry : rows) {
             divider(card);
             if (entry.amountColumns.isEmpty()) stat(card, entry, LedgerStyle.BODY);
-            else amountGroup(card, entry);
+            else amountGroup(card, entry, false);
         }
     }
 
-    private void amountGroup(LinearLayout card, LedgerReport.Entry entry) {
+    private void amountGroup(LinearLayout card, LedgerReport.Entry entry, boolean member) {
+        boolean singleMember = entry.memberTotals.size() == 1;
         LinearLayout heading = new LinearLayout(activity);
         heading.setGravity(Gravity.CENTER_VERTICAL);
-        heading.setPadding(0, style.dp(LedgerStyle.CONTROL_GAP), 0, style.dp(LedgerStyle.ITEM_GAP));
-        heading.addView(style.heading(entry.label, LedgerStyle.LABEL), new LinearLayout.LayoutParams(0, WRAP, 1));
-        if (!entry.amountNote.isEmpty()) {
+        heading.setBaselineAligned(false);
+        int inset = member ? style.dp(LedgerStyle.CONTROL_GAP) : 0;
+        int gap = style.dp(LedgerStyle.ITEM_GAP);
+        int vertical = member ? style.dp(2) : gap;
+        heading.setPaddingRelative(inset, member ? vertical : style.dp(LedgerStyle.CONTROL_GAP), inset, vertical);
+        LinearLayout.LayoutParams headingSize = new LinearLayout.LayoutParams(FULL, WRAP);
+        if (member) {
+            heading.setBackground(style.rounded(style.soft, 0, LedgerStyle.CONTROL_RADIUS));
+            headingSize.topMargin = gap;
+        }
+        TextView title = style.heading(entry.label, member ? MEMBER_TITLE_SIZE : LedgerStyle.LABEL);
+        heading.addView(title, new LinearLayout.LayoutParams(0, WRAP, 1));
+        if (!singleMember && !entry.amountNote.isEmpty()) {
             TextView note = style.text(entry.amountNote, LedgerStyle.CAPTION, style.muted);
             note.setPadding(style.dp(LedgerStyle.CONTROL_GAP), 0, 0, 0);
             heading.addView(note, new LinearLayout.LayoutParams(WRAP, WRAP));
         }
-        card.addView(heading, new LinearLayout.LayoutParams(FULL, WRAP));
-        card.addView(new AmountTable(entry.amountColumns, LedgerStyle.LABEL), new LinearLayout.LayoutParams(FULL, WRAP));
+        card.addView(heading, headingSize);
+        if (!singleMember) {
+            AmountTable amounts = new AmountTable(entry.amountColumns, LedgerStyle.LABEL);
+            amounts.setPaddingRelative(inset, 0, 0, 0);
+            card.addView(amounts, new LinearLayout.LayoutParams(FULL, WRAP));
+        }
+        for (LedgerReport.Entry subtotal : entry.memberTotals) amountGroup(card, subtotal, true);
     }
 
     /** Keeps metric columns aligned, with a per-currency layout when those columns cannot fit. */

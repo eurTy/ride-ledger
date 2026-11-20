@@ -1,22 +1,28 @@
 package com.rideledger;
 
+import android.content.ClipData;
 import android.content.ContentProvider;
+import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
 import android.database.Cursor;
 import android.database.MatrixCursor;
+import android.graphics.Bitmap;
 import android.net.Uri;
+import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.io.IOException;
 
 /** Gives the system camera temporary access to exactly one capture file. */
 public final class ReceiptCamera extends ContentProvider {
     static Uri uri(Context context, String token) {
         return new Uri.Builder().scheme("content").authority(context.getPackageName() + ".receipt-camera")
-                .appendPath(token).build();
+                .appendPath(token + ".jpg").build();
     }
 
     static File file(Context context, String token) {
@@ -26,7 +32,32 @@ public final class ReceiptCamera extends ContentProvider {
 
     private File file(Uri uri) {
         if (uri.getPathSegments().size() != 1) throw new IllegalArgumentException("Invalid capture URI");
-        return file(getContext(), uri.getLastPathSegment());
+        String name = uri.getLastPathSegment();
+        return file(getContext(), name.endsWith(".jpg") ? name.substring(0, name.length() - 4) : name);
+    }
+
+    static byte[] readResult(Context context, String token, Intent result) throws IOException {
+        ContentResolver resolver = context.getContentResolver();
+        Uri output = uri(context, token);
+        Uri returned = result == null ? null : result.getData();
+        ClipData clip = result == null ? null : result.getClipData();
+        Uri shared = clip == null || clip.getItemCount() == 0 ? null : clip.getItemAt(0).getUri();
+        IOException failure = null;
+        for (Uri candidate : new Uri[]{output, returned, shared}) {
+            if (candidate == null || !ContentResolver.SCHEME_CONTENT.equals(candidate.getScheme())) continue;
+            if (output.equals(candidate) && file(context, token).length() == 0) continue;
+            try {
+                return ReceiptImage.importPhoto(resolver, candidate);
+            } catch (IOException | RuntimeException unreadable) {
+                failure = new IOException("无法读取相机返回的照片", unreadable);
+            }
+        }
+        if (result != null) {
+            Bitmap thumbnail = Build.VERSION.SDK_INT >= 33 ? result.getParcelableExtra("data", Bitmap.class)
+                    : result.getParcelableExtra("data");
+            if (thumbnail != null) return ReceiptImage.importBitmap(thumbnail);
+        }
+        throw new IOException("相机没有返回可用照片，请重新拍照或从相册选择", failure);
     }
 
     @Override public boolean onCreate() { return true; }

@@ -14,7 +14,6 @@ import android.provider.Settings;
 import android.provider.OpenableColumns;
 import android.view.Gravity;
 import android.view.View;
-import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -92,7 +91,7 @@ public final class MainActivity extends Activity {
         Object retained = getLastNonConfigurationInstance();
         quickDrafts = retained instanceof QuickEntryDrafts ? (QuickEntryDrafts) retained : new QuickEntryDrafts(state);
         quickDrafts.listen(quickSaveListener);
-        receipts = new ReceiptUi(this, store, ledgerActions, quickDrafts, state, trip -> afterSave(trip, false), this::error);
+        receipts = new ReceiptUi(this, store, ledgerActions, quickDrafts, trip -> afterSave(trip, false), this::error);
         teamTransport = new TeamTransportAdapter(this, store, new PeerSync.Listener() {
             @Override public void changed(int count) { onSyncChanged(count); }
             @Override public void receiptsChanged() {
@@ -313,6 +312,8 @@ public final class MainActivity extends Activity {
         root.setBackgroundColor(style.page);
         root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
         if (currentTripId != null) root.addView(bottomBar());
+        if (currentTripId != null && screen == QUICK)
+            root.addView(new AmountShortcuts(this, style), new LinearLayout.LayoutParams(-1, -2));
         FormInput.fitActivityWindow(getWindow(), root);
         setContentView(root);
     }
@@ -531,29 +532,18 @@ public final class MainActivity extends Activity {
             @Override protected void onMeasure(int widthSpec, int heightSpec) {
                 QuickEntryPanel panel = quickEntry;
                 if (panel != null && panel.getParent() == getChildAt(0)) {
-                    WindowInsets insets = getRootWindowInsets();
-                    boolean keyboard = insets != null && (Build.VERSION.SDK_INT >= 30
-                            ? insets.isVisible(WindowInsets.Type.ime())
-                            : insets.getSystemWindowInsetBottom() > insets.getStableInsetBottom());
-                    panel.fitViewport(MeasureSpec.getSize(widthSpec), MeasureSpec.getSize(heightSpec), keyboard);
+                    panel.fitViewport(MeasureSpec.getSize(widthSpec), MeasureSpec.getSize(heightSpec),
+                            FormInput.keyboardVisible(this));
                 }
                 super.onMeasure(widthSpec, heightSpec);
             }
         };
         LinearLayout body = page(scroll);
         int inset = dp(LedgerStyle.PAGE_INSET);
-        body.setPadding(inset, dp(LedgerStyle.CONTROL_GAP), inset, dp(LedgerStyle.CONTROL_GAP));
-        LinearLayout header = new LinearLayout(this);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        body.addView(header, fullMargin());
-        TextView tripTitle = style.heading(trip.name, LedgerStyle.PAGE_TITLE);
-        header.addView(tripTitle);
-        tripTitle.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
-        tripTitle.setSingleLine(true);
-        tripTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        TextView quickLabel = text(header, "快速记账", LedgerStyle.CAPTION, style.muted);
-        quickLabel.setLayoutParams(new LinearLayout.LayoutParams(-2, -2));
-        quickLabel.setPadding(dp(8), dp(6), 0, dp(6));
+        body.setPadding(inset, 0, inset, dp(LedgerStyle.CONTROL_GAP));
+        TextView quickLabel = style.text("快速记账", LedgerStyle.CAPTION, style.muted);
+        quickLabel.setPadding(0, dp(6), 0, dp(6));
+        body.addView(style.tripTitleRow(trip.name, quickLabel), fullMargin());
         if (!store.teamReady(trip)) {
             waitingForTeam(body);
             return;
@@ -574,7 +564,8 @@ public final class MainActivity extends Activity {
     private void renderReview(LedgerStore.Trip trip) {
         if (!store.teamReady(trip)) {
             LinearLayout body = page();
-            heading(body, trip.name);
+            body.setPadding(body.getPaddingLeft(), 0, body.getPaddingRight(), body.getPaddingBottom());
+            body.addView(style.tripTitleRow(trip.name, null), fullMargin());
             waitingForTeam(body);
             return;
         }
@@ -583,9 +574,10 @@ public final class MainActivity extends Activity {
         reviewContent = content;
         LinearLayout loading = new LinearLayout(this);
         loading.setOrientation(LinearLayout.VERTICAL);
-        loading.setPadding(dp(18), dp(18), dp(18), 0);
+        int inset = dp(LedgerStyle.PAGE_INSET);
+        loading.setPadding(inset, 0, inset, 0);
         reviewContent.addView(loading, new FrameLayout.LayoutParams(-1, -2));
-        heading(loading, trip.name);
+        loading.addView(style.tripTitleRow(trip.name, null), fullMargin());
         text(loading, "正在读取流水…", LedgerStyle.LABEL, style.muted);
         refreshReview(trip.id);
     }
@@ -642,6 +634,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showReview(LedgerStore.Trip trip, LedgerReview review, long confirmed) {
+        forms.updateSettlement(trip, review);
         ReviewPanel previous = reviewPanel;
         boolean keepAllRecords = recordsOverlay != null;
         if (keepAllRecords) {
@@ -659,6 +652,7 @@ public final class MainActivity extends Activity {
                 teamTransport.reconnect();
                 updateSync();
             }
+            @Override public void convertSettlement() { forms.showSettlement(trip, review); }
             @Override public void edit(LedgerReview.Row row) { forms.editRecord(trip, row); }
             @Override public void thumbnail(LedgerReview.Row row, ImageView view) {
                 receipts.bindThumbnail(trip.id, row.receipt, view);

@@ -20,6 +20,8 @@ import android.widget.LinearLayout;
 import android.widget.PopupWindow;
 import android.widget.ScrollView;
 import android.widget.Spinner;
+import android.widget.TableLayout;
+import android.widget.TableRow;
 import android.widget.TextView;
 import org.json.JSONObject;
 
@@ -42,6 +44,7 @@ final class LedgerForms {
     private final Consumer<Exception> showError;
     private int currencyMenuRequest;
     private Dialog activeForm;
+    private SettlementSheet settlementSheet;
     private PopupWindow historyPopup;
 
     LedgerForms(Activity activity, LedgerActions ledgerActions, CurrencyHistory currencyHistory, NoteHistory noteHistory, ReceiptUi receipts,
@@ -174,19 +177,18 @@ final class LedgerForms {
         EditText amount = compactAmount(amountBox, "支付金额", "");
         setAmount(amount, data, "amount", initialCode);
         EditText currency = currencyField(currencyBox, trip.id, "货币代码", initialCode, false, false);
-        Spinner payer = personChoice(form, trip, "谁付款");
+        TableLayout payment = new TableLayout(activity);
+        payment.setColumnStretchable(1, true);
+        payment.setColumnShrinkable(1, true);
+        form.addView(payment, new LinearLayout.LayoutParams(-1, -2));
+        Spinner payer = personSpinner(trip, trip.localPerson);
         selectPerson(payer, trip, data, "payer");
-        LinearLayout splitRow = new LinearLayout(activity);
-        splitRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView rule = text(splitRow, "分摊规则", LedgerStyle.LABEL, style.muted);
-        rule.setLayoutParams(new LinearLayout.LayoutParams(-2, -2));
-        rule.setPadding(0, 0, dp(LedgerStyle.CONTROL_GAP), 0);
+        addChoiceRow(payment, "谁付款", payer);
         Spinner modes = new Spinner(activity, Spinner.MODE_DROPDOWN);
         modes.setContentDescription("分摊规则");
         style.spinner(modes);
         modes.setAdapter(style.options(Arrays.asList("全员平摊", "仅付款人", "自定义分摊"), modes, -1));
-        splitRow.addView(modes, new LinearLayout.LayoutParams(0, -2, 1));
-        form.addView(splitRow, fullMargin());
+        addChoiceRow(payment, "分摊规则", modes);
         LinearLayout shares = new LinearLayout(activity);
         shares.setOrientation(LinearLayout.VERTICAL);
         shares.setPadding(dp(12), 0, dp(12), 0);
@@ -200,11 +202,9 @@ final class LedgerForms {
             row.setGravity(Gravity.CENTER_VERTICAL);
             TextView name = text(row, personChoiceLabel(trip, member), LedgerStyle.LABEL, style.ink);
             name.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 2));
-            EditText input = new EditText(activity);
+            EditText input = new FormInput.AmountField(activity);
             input.setId(View.generateViewId());
             name.setLabelFor(input.getId());
-            input.setSingleLine(true);
-            input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
             input.setGravity(Gravity.END);
             input.setHint("0");
             style.input(input);
@@ -218,7 +218,7 @@ final class LedgerForms {
         TextView total = text(shares, "", LedgerStyle.BODY, style.title);
         NoteInput noteInput = expenseNote(form, trip.id, data.optString("note"), true);
         EditText note = noteInput.field;
-        receipts.besideNote(noteInput.input, trip, record.id, record.receipt != null);
+        receipts.besideNote(noteInput.input, trip, record.id, record.receipt);
         FormInput.next(amount, currency);
         FormInput.next(inputs[inputs.length - 1], note);
         FormInput.done(note);
@@ -379,6 +379,43 @@ final class LedgerForms {
                         failure -> editError(error, failure)));
     }
 
+    void showSettlement(LedgerStore.Trip trip, LedgerReview review) {
+        LinearLayout form = form();
+        form.setPaddingRelative(form.getPaddingStart(), 0, form.getPaddingEnd(), dp(LedgerStyle.ITEM_GAP));
+        android.content.res.Configuration config = activity.getResources().getConfiguration();
+        int available = dp(config.screenWidthDp) - form.getPaddingStart() - form.getPaddingEnd();
+        int preferred = dp(Math.round(236 * Math.max(1f, config.fontScale)));
+        LinearLayout fields = new LinearLayout(activity);
+        fields.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams fieldsSize = new LinearLayout.LayoutParams(Math.min(available, preferred), -2);
+        fieldsSize.gravity = Gravity.CENTER_HORIZONTAL;
+        form.addView(fields, fieldsSize);
+        LinearLayout targetLine = new LinearLayout(activity);
+        targetLine.setGravity(Gravity.CENTER_VERTICAL);
+        targetLine.setBaselineAligned(false);
+        CurrencyInput currency = currencyInput(targetLine, trip.id, "结算币种", currencyHistory.quickDefault(trip.id), false, false);
+        currency.caption.setPaddingRelative(0, 0, dp(LedgerStyle.CONTROL_GAP), 0);
+        currency.caption.setLayoutParams(new LinearLayout.LayoutParams(-2, -2));
+        int codeWidth = (int) Math.ceil(currency.field.getPaint().measureText("WWW"))
+                + currency.field.getPaddingLeft() + currency.field.getPaddingRight();
+        currency.field.setLayoutParams(new LinearLayout.LayoutParams(Math.max(dp(56), codeWidth), -2));
+        currency.field.setGravity(Gravity.CENTER);
+        currency.row.setLayoutParams(new LinearLayout.LayoutParams(-2, -2));
+        LinearLayout.LayoutParams targetSize = fullMargin();
+        targetSize.width = -2;
+        targetSize.gravity = Gravity.CENTER_HORIZONTAL;
+        fields.addView(targetLine, targetSize);
+        SettlementSheet sheet = new SettlementSheet(trip.id, form, fields, currency.field, style, review);
+        currency.historyButton.setContentDescription("选择结算币种");
+        currency.historyButton.setOnClickListener(sheet::chooseTarget);
+        showSheet("汇率结算", null, form, "计算结算", (dialog, confirm, cancel, error) -> sheet.calculate(error));
+        settlementSheet = sheet;
+    }
+
+    void updateSettlement(LedgerStore.Trip trip, LedgerReview review) {
+        if (settlementSheet != null && settlementSheet.tripId.equals(trip.id)) settlementSheet.update(review);
+    }
+
     Dialog showSheet(String title, String subtitle, View form, String confirmLabel, SheetAction action) {
         dismissCurrencyMenu();
         Dialog dialog = new Dialog(activity);
@@ -428,6 +465,7 @@ final class LedgerForms {
         confirmSize.setMarginStart(dp(LedgerStyle.CONTROL_GAP));
         controls.addView(confirm, confirmSize);
         confirm.setOnClickListener(view -> action.perform(dialog, confirm, cancel, error));
+        sheet.addView(new AmountShortcuts(activity, style), new LinearLayout.LayoutParams(-1, -2));
         dialog.setContentView(sheet);
         dialog.setCanceledOnTouchOutside(true);
         Window window = dialog.getWindow();
@@ -438,7 +476,11 @@ final class LedgerForms {
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         activeForm = dialog;
         dialog.setOnDismissListener(ignored -> {
-            if (activeForm == dialog) { activeForm = null; dismissCurrencyMenu(); }
+            if (activeForm == dialog) {
+                activeForm = null;
+                settlementSheet = null;
+                dismissCurrencyMenu();
+            }
         });
         dialog.show();
         window.setLayout(-1, -2);
@@ -483,6 +525,7 @@ final class LedgerForms {
         dismissCurrencyMenu();
         if (activeForm != null) activeForm.dismiss();
         activeForm = null;
+        settlementSheet = null;
     }
 
     private LinearLayout form() {
@@ -502,12 +545,11 @@ final class LedgerForms {
     }
 
     private EditText field(TextView caption, String hint, boolean decimal) {
-        EditText field = new EditText(activity);
+        EditText field = decimal ? new FormInput.AmountField(activity) : new EditText(activity);
         field.setId(View.generateViewId());
         caption.setLabelFor(field.getId());
-        field.setSingleLine(true);
+        if (!decimal) field.setSingleLine(true);
         field.setHint(hint);
-        if (decimal) field.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
         style.input(field);
         return field;
     }
@@ -545,6 +587,21 @@ final class LedgerForms {
         line.addView(spinner, new LinearLayout.LayoutParams(0, -2, 1));
         form.addView(line, fullMargin());
         return spinner;
+    }
+
+    private void addChoiceRow(TableLayout table, String title, Spinner spinner) {
+        TableRow row = new TableRow(activity);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBaselineAligned(false);
+        TextView caption = style.text(title, LedgerStyle.LABEL, style.muted);
+        caption.setPaddingRelative(0, 0, dp(LedgerStyle.CONTROL_GAP), 0);
+        spinner.setId(View.generateViewId());
+        caption.setLabelFor(spinner.getId());
+        row.addView(caption, new TableRow.LayoutParams(-2, -2));
+        row.addView(spinner, new TableRow.LayoutParams(-2, -2));
+        TableLayout.LayoutParams spacing = new TableLayout.LayoutParams(-1, -2);
+        spacing.bottomMargin = dp(LedgerStyle.ITEM_GAP);
+        table.addView(row, spacing);
     }
 
     Spinner personSpinner(LedgerStore.Trip trip, String selected) {
@@ -589,11 +646,13 @@ final class LedgerForms {
     static final class CurrencyInput {
         final EditText field;
         final TextView caption, historyButton;
+        final LinearLayout row;
 
-        CurrencyInput(EditText field, TextView caption, TextView historyButton) {
+        CurrencyInput(EditText field, TextView caption, TextView historyButton, LinearLayout row) {
             this.field = field;
             this.caption = caption;
             this.historyButton = historyButton;
+            this.row = row;
         }
     }
 
@@ -675,7 +734,7 @@ final class LedgerForms {
                 } catch (RuntimeException error) { SyncLog.write(activity, SyncLog.Event.UI_REFRESH, error); }
             });
         });
-        return new CurrencyInput(currency, caption, historyButton);
+        return new CurrencyInput(currency, caption, historyButton, row);
     }
 
     private void showCurrencyHistory(String tripId, EditText currency, TextView anchor, List<String> history) {

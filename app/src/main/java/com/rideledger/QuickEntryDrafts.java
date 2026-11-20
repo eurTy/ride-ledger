@@ -10,10 +10,12 @@ final class QuickEntryDrafts {
     interface Listener { void finished(String tripId, Exception error); }
 
     private final Bundle forms, photos;
+    final ReceiptUi.Selection receiptSelection;
     private final Set<String> submitting = new HashSet<>();
     private Listener listener;
 
     QuickEntryDrafts(Bundle state) {
+        receiptSelection = new ReceiptUi.Selection(state);
         Bundle savedForms = state == null ? null : state.getBundle("quickForms");
         Bundle savedPhotos = state == null ? null : state.getBundle("quickPhotos");
         forms = savedForms == null ? new Bundle() : new Bundle(savedForms);

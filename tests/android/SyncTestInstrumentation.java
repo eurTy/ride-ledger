@@ -248,12 +248,12 @@ public final class SyncTestInstrumentation extends Instrumentation {
                 // A payment in the opposite direction belongs to a separate group.
                 summary.teamNet.get(trip.member(0)).put("EUR", -200L);
                 summary.teamNet.get(trip.member(1)).put("EUR", 200L);
-                List<LedgerReview.Debt> debts = new LedgerReview(trip, summary).settlement;
+                List<LedgerSettlement.Debt> debts = new LedgerReview(trip, summary).settlement;
                 require(debts.size() == 3 && debts.get(0).payer.equals("甲") && debts.get(0).recipient.equals("乙")
                         && debts.get(0).amounts.equals(java.util.Collections.singletonList("2.00 EUR")),
                         "opposite directions were combined");
                 for (int i = 1; i < 3; i++) {
-                    LedgerReview.Debt debt = debts.get(i);
+                    LedgerSettlement.Debt debt = debts.get(i);
                     require(debt.payer.equals(trip.nameOf(trip.member(i))) && debt.recipient.equals("甲")
                             && debt.amounts.equals(java.util.Arrays.asList("306.00 TJS", "28.66 USD")),
                             "currencies or members were lost during grouping");
