@@ -44,6 +44,15 @@ public final class SyncTestInstrumentation extends Instrumentation {
                 check("journal cursor survives process death after commit before receipt", () ->
                         TeamChecks.crashCursor(getTargetContext(), arguments.getString("runId"),
                                 "prepare".equals(arguments.getString("journalCrash"))));
+            } else if (arguments.containsKey("settlementShare")) {
+                check("settlement share exports a PNG through a read-only URI", () -> SettlementShareChecks.run(getTargetContext()));
+            } else if (arguments.containsKey("bleRecovery")) {
+                check("BLE recovery replaces stale registrations and keeps retrying after repeated failures", () -> {
+                    TestContext context = context();
+                    LedgerStore.Trip trip = store(context).createTeam("BLE recovery",
+                            java.util.Arrays.asList("Organizer", "Teammate"));
+                    TeamBleRecoveryChecks.run(this, context, trip);
+                });
             } else {
                 JSONObject fixture = new JSONObject(new String(Base64.decode(arguments.getString("fixture"),
                         Base64.URL_SAFE | Base64.NO_WRAP), StandardCharsets.UTF_8));
@@ -77,6 +86,7 @@ public final class SyncTestInstrumentation extends Instrumentation {
     }
 
     private void runChecks(JSONObject fixture, Bundle result) throws Exception {
+        check("settlement share exports a PNG through a read-only URI", () -> SettlementShareChecks.run(getTargetContext()));
         String invite = fixture.getString("inviteA");
         JSONObject meta = fixture.getJSONObject("trip");
         String tripId = meta.getString("id");

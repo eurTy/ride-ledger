@@ -19,6 +19,7 @@ import android.os.SystemClock;
 import android.text.InputFilter;
 import android.text.InputType;
 import android.text.Editable;
+import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.View;
 import android.view.Gravity;
@@ -151,7 +152,16 @@ public final class TeamSetupActivity extends Activity {
         qr = null;
         LedgerStore.Trip current = trip();
         String heading = JOIN.equals(mode) ? "加入小队旅行" : current == null ? "创建小队旅行" : "邀请同伴";
-        ScrollView scroll = new ScrollView(this);
+        ScrollView scroll = new ScrollView(this) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                int inset = style.contentInset(MeasureSpec.getSize(widthSpec), LedgerStyle.PAGE_INSET,
+                        LedgerStyle.FORM_MAX_WIDTH);
+                View body = getChildAt(0);
+                if (body != null && body.getPaddingStart() != inset)
+                    body.setPaddingRelative(inset, body.getPaddingTop(), inset, body.getPaddingBottom());
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
         scroll.setFillViewport(true);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -198,6 +208,8 @@ public final class TeamSetupActivity extends Activity {
             return;
         }
         TextView tripTitle = style.heading(current.name, LedgerStyle.SECTION_TITLE);
+        tripTitle.setMaxLines(2);
+        tripTitle.setEllipsize(TextUtils.TruncateAt.END);
         body.addView(tripTitle, new LinearLayout.LayoutParams(-1, -2));
         count = text(body, "", 16, style.primary);
         count.setTypeface(LedgerStyle.MEDIUM);
@@ -206,7 +218,9 @@ public final class TeamSetupActivity extends Activity {
         if (current.people() > 1) {
             qr = new ImageView(this);
             qr.setContentDescription("小队邀请二维码");
-            body.addView(qr, new LinearLayout.LayoutParams(-1, dp(248)));
+            qr.setAdjustViewBounds(true);
+            qr.setMaxHeight(dp(248));
+            body.addView(qr, new LinearLayout.LayoutParams(-1, -2));
             showInvitation(current);
             button(body, "令牌", LedgerStyle.Action.OUTLINE, () -> showTextInvite(current));
         }
@@ -503,6 +517,9 @@ public final class TeamSetupActivity extends Activity {
         field.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
         field.setFilters(new InputFilter[]{new InputFilter.LengthFilter(length)});
         field.setSingleLine(true);
+        // Keep the keyboard's Next/Done actions while allowing long names to wrap on screen.
+        field.setHorizontallyScrolling(false);
+        field.setMaxLines(3);
         style.input(field);
         FormInput.done(field);
         parent.addView(field, new LinearLayout.LayoutParams(-1, -2));

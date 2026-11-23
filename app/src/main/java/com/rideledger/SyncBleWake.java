@@ -60,8 +60,8 @@ public final class SyncBleWake extends BroadcastReceiver {
             ScanSettings settings = new ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
                     .setCallbackType(ScanSettings.CALLBACK_TYPE_FIRST_MATCH).build();
             int error = scanner.startScan(filters, settings, pending(context));
-            if (error == 0 || error == ScanCallback.SCAN_FAILED_ALREADY_STARTED) started = true;
-            else SyncLog.write(context, SyncLog.Event.BLE_SCAN, "Wake " + error);
+            if (error == 0) started = true;
+            else handleStartError(context, error);
         } catch (RuntimeException error) { SyncLog.write(context, SyncLog.Event.BLE_SCAN, error); }
     }
 
@@ -71,17 +71,26 @@ public final class SyncBleWake extends BroadcastReceiver {
             start(context);
             SyncBackground.radioChanged(context);
         } else if (MATCH.equals(intent.getAction())) {
+            if (SyncBackground.isForeground()) return;
             int error = intent.getIntExtra(BluetoothLeScanner.EXTRA_ERROR_CODE, 0);
-            if (error != 0) {
-                started = false;
-                SyncLog.write(context, SyncLog.Event.BLE_SCAN, "Wake " + error);
-            }
+            if (error != 0) handleStartError(context, error);
             else {
                 List<ScanResult> results = intent.getParcelableArrayListExtra(BluetoothLeScanner.EXTRA_LIST_SCAN_RESULT);
                 if (results != null && !results.isEmpty() && !NearbySyncService.deliverDiscovery(results))
                     SyncBackground.radioChanged(context);
             }
         }
+    }
+
+    private static void handleStartError(Context context, int error) {
+        started = error == ScanCallback.SCAN_FAILED_ALREADY_STARTED;
+        if (started) return;
+        SyncLog.write(context, SyncLog.Event.BLE_SCAN, "Wake " + error);
+        if (error == ScanCallback.SCAN_FAILED_APPLICATION_REGISTRATION_FAILED ||
+                error == ScanCallback.SCAN_FAILED_INTERNAL_ERROR ||
+                error == ScanCallback.SCAN_FAILED_OUT_OF_HARDWARE_RESOURCES ||
+                error == ScanCallback.SCAN_FAILED_SCANNING_TOO_FREQUENTLY)
+            SyncBackground.radioChanged(context);
     }
 
     static void radioOff() { started = false; }

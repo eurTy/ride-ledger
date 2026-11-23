@@ -30,7 +30,7 @@ final class LedgerRules {
                 case "expense":
                     if (trip.team != null) return validTeamExpense(trip, d);
                     int share = d.getInt("shareA");
-                    return person(d.getString("payer")) && currency(d.getString("currency"))
+                    return !d.has("payments") && person(d.getString("payer")) && currency(d.getString("currency"))
                             && d.getLong("amount") > 0 && share >= 0 && share <= 10000;
                 case "transfer":
                     if (trip.team != null) return trip.indexOf(d.getString("from")) >= 0 && trip.indexOf(d.getString("to")) >= 0 &&
@@ -69,20 +69,24 @@ final class LedgerRules {
 
     private static boolean validTeamExpense(Trip trip, JSONObject data) throws JSONException {
         long amount = data.getLong("amount");
-        String payer = data.getString("payer");
+        ExpensePayments payments = ExpensePayments.read(data);
         JSONObject shares = data.getJSONObject("shares");
-        if (!validAmount(trip, data, "amount") || trip.indexOf(payer) < 0 || !currency(data.getString("currency")) ||
+        if (!validAmount(trip, data, "amount") || payments.total != amount || !currency(data.getString("currency")) ||
                 shares.length() == 0 || shares.length() > trip.people()) return false;
+        boolean personal = "personal".equals(data.optString("mode"));
+        if (personal && shares.length() != payments.amounts().size()) return false;
+        for (String member : payments.amounts().keySet())
+            if (trip.indexOf(member) < 0) return false;
         long total = 0;
         java.util.Iterator<String> keys = shares.keys();
         while (keys.hasNext()) {
             String member = keys.next();
             long share = exactLong(shares, member);
-            if (trip.indexOf(member) < 0 || share < 0 || share > amount - total) return false;
+            if (trip.indexOf(member) < 0 || share < 0 || share > amount - total ||
+                    (personal && share != payments.minor(member))) return false;
             total += share;
         }
-        return total == amount && (!"personal".equals(data.optString("mode")) ||
-                shares.length() == 1 && shares.optLong(payer, -1) == amount);
+        return total == amount;
     }
 
     private static boolean validAmount(Trip trip, JSONObject data, String field) throws JSONException {
@@ -91,7 +95,7 @@ final class LedgerRules {
         return amount > 0 && amount <= LedgerStore.MAX_TEAM_AMOUNT;
     }
 
-    private static long exactLong(JSONObject data, String field) throws JSONException {
+    static long exactLong(JSONObject data, String field) throws JSONException {
         Object value = data.get(field);
         if (value instanceof Integer || value instanceof Long) return ((Number) value).longValue();
         throw new JSONException("金额应为整数最小货币单位");

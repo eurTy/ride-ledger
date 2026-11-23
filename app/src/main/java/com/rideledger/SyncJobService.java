@@ -36,6 +36,8 @@ public final class SyncJobService extends JobService {
     @Override public boolean onStartJob(JobParameters params) {
         if (Build.VERSION.SDK_INT < 29 || !SyncBackground.acquire(this)) return false;
         try {
+            // The scan registration uses the job's cooldown even when no trip needs a lease.
+            SyncBackground.jobStarted();
             SyncLog.maintain(this);
             SyncTriggerReceiver.install(getApplicationContext());
             SyncBleWake.start(getApplicationContext());
@@ -44,7 +46,6 @@ public final class SyncJobService extends JobService {
             List<LedgerStore.Trip> eligibleTrips = new ArrayList<>();
             for (LedgerStore.Trip trip : store.trips()) if (eligible(trip)) eligibleTrips.add(trip);
             if (eligibleTrips.isEmpty()) { stop(); return false; }
-            SyncBackground.jobStarted();
             android.content.SharedPreferences cursor = getSharedPreferences("background_sync", MODE_PRIVATE);
             LedgerStore.Trip trip = nextTrip(eligibleTrips, cursor.getString("last_attempt", ""));
             int first = eligibleTrips.indexOf(trip);

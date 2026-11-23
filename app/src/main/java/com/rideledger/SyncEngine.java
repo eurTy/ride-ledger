@@ -5,12 +5,17 @@ import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.SystemClock;
 
-import java.util.List;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.HashSet;
 import java.util.function.Consumer;
 
 /** The service and the foreground both drive this scheduler on the main looper. */
@@ -18,6 +23,39 @@ final class SyncEngine {
     private static final long SEARCH_MILLIS = 5000;
 
     enum Phase { SYNCING, COMPLETE, PENDING }
+    enum FailureStage { CONNECT, HANDSHAKE, LEDGER, CONFIRMATION, RECEIPTS }
+
+    static final class Failure {
+        final FailureStage stage;
+        final PeerRoutePolicy.Channel channel;
+
+        Failure(FailureStage stage, PeerRoutePolicy.Channel channel) {
+            this.stage = stage;
+            this.channel = channel;
+        }
+    }
+
+    static final class PeerDetail {
+        final String name;
+        final PeerPresence.Link link;
+        final boolean registered, connecting;
+        final int pending;
+        final long checkedAt;
+        final PeerRoutePolicy.Channel checkedChannel;
+        final Failure failure;
+
+        PeerDetail(String name, boolean registered, boolean connecting, PeerPresence.Link link,
+                   int pending, long checkedAt, PeerRoutePolicy.Channel checkedChannel, Failure failure) {
+            this.name = name;
+            this.registered = registered;
+            this.connecting = connecting;
+            this.link = link;
+            this.pending = pending;
+            this.checkedAt = checkedAt;
+            this.checkedChannel = checkedChannel;
+            this.failure = failure;
+        }
+    }
 
     static final class Status {
         static final Status EMPTY = new Status(Phase.COMPLETE, 0, -1);
@@ -57,6 +95,7 @@ final class SyncEngine {
     private final PeerRoutePolicy routes = new PeerRoutePolicy(SystemClock::elapsedRealtime);
     private final Map<String, PeerRoutePolicy.Channel> lastChannel = new HashMap<>();
     private final Map<PeerConnection, String> activeSessions = new HashMap<>();
+    private final Map<String, Failure> lastFailures = new HashMap<>();
     private final PeerPresence presence = new PeerPresence();
     private long searchUntil;
     private final Dial dial;
@@ -118,6 +157,46 @@ final class SyncEngine {
 
     long revision() { return revision; }
     Status status() { return status; }
+
+    List<PeerDetail> details(LedgerStore.Trip current) throws JSONException {
+        if (!trip.id.equals(current.id) || !trip.team.fingerprint.equals(current.team.fingerprint))
+            return Collections.emptyList();
+        Map<String, String> devices = new HashMap<>();
+        JSONArray seats = store.teamSeats(trip.id);
+        for (int i = 0; i < seats.length(); i++) {
+            JSONObject seat = seats.getJSONObject(i);
+            if (trip.team.fingerprint.equals(seat.optString("team")))
+                devices.put(seat.getString("member"), seat.getString("device"));
+        }
+        Map<String, PeerPresence.Link> links = new HashMap<>();
+        for (PeerPresence.Link link : status.links) links.put(link.member, link);
+        Map<Long, Integer> pendingByPoint = new HashMap<>();
+        List<PeerDetail> details = new ArrayList<>();
+        for (int i = 0; i < current.people(); i++) {
+            String member = current.member(i);
+            if (member.equals(current.localPerson)) continue;
+            String remote = devices.get(member);
+            if (remote == null) {
+                details.add(new PeerDetail(current.nameOf(member), false, false, null, 0, 0, null, null));
+                continue;
+            }
+            String key = prefix + remote;
+            long point = confirmedRow(store, checkpoints, trip.id, key);
+            int pending = pendingByPoint.computeIfAbsent(point, row -> store.countAfter(trip.id, row));
+            String route = TeamProtocol.routeId(trip.team, remote);
+            details.add(new PeerDetail(current.nameOf(member), true, routes.busy(route), links.get(member),
+                    pending, checkpoints.getLong(key + "/checked_at", 0), checkedChannel(key), lastFailures.get(route)));
+        }
+        return details;
+    }
+
+    private PeerRoutePolicy.Channel checkedChannel(String key) {
+        String saved = checkpoints.getString(key + "/checked_channel", "");
+        for (PeerRoutePolicy.Channel channel : PeerRoutePolicy.Channel.values())
+            if (channel.name().equals(saved)) return channel;
+        return null;
+    }
+
     boolean hasContact() {
         return incoming > 0 || !routes.onlinePeers().isEmpty() || routes.hasShortSyncRetry(revision);
     }
@@ -140,14 +219,14 @@ final class SyncEngine {
         activeSessions.put(session, TeamProtocol.routeId(trip.team, peer));
         if (!visible) return;
         try {
-            org.json.JSONObject seat = store.seat(trip.id, peer);
+            JSONObject seat = store.seat(trip.id, peer);
             if (seat == null || !trip.team.fingerprint.equals(seat.optString("team"))) return;
             String member = seat.optString("member");
             if (trip.indexOf(member) < 0 || device.equals(peer)) return;
             presence.authenticated(session, member, channel, route);
             searchUntil = 0;
             schedule();
-        } catch (org.json.JSONException | RuntimeException error) {
+        } catch (JSONException | RuntimeException error) {
             SyncLog.write(context, SyncLog.Event.QUEUE_READ, error);
         }
     }
@@ -180,12 +259,18 @@ final class SyncEngine {
         if (result.complete && result.authenticated && result.durable) {
             String key = prefix + result.remoteId;
             try {
-                SharedPreferences.Editor verified = checkpoints.edit().putLong(prefix + "last_checked_at", System.currentTimeMillis());
+                long now = System.currentTimeMillis();
+                SharedPreferences.Editor verified = checkpoints.edit().putLong(prefix + "last_checked_at", now)
+                        .putLong(key + "/checked_at", now).putString(key + "/checked_channel", channel.name());
                 if (point != null && point.row > confirmedRow(store, checkpoints, trip.id, key))
                     verified.putLong(key, point.row).putString(key + "/event", point.event);
                 verified.apply();
             } catch (RuntimeException error) { SyncLog.write(context, SyncLog.Event.CHECKPOINT_SAVE, error); }
             pendingDirty = true;
+            if (result.receiptError == null) lastFailures.remove(peer);
+            else lastFailures.put(peer, new Failure(FailureStage.RECEIPTS, channel));
+        } else if (result.authenticated) {
+            lastFailures.put(peer, new Failure(FailureStage.CONFIRMATION, channel));
         }
         schedule();
     }
@@ -196,6 +281,22 @@ final class SyncEngine {
             presence.lost(endpoint.key);
         }
         schedule();
+    }
+
+    void recordFailure(PeerConnection session, PeerRoutePolicy.Endpoint endpoint,
+                       PeerRoutePolicy.Channel channel, FailureStage stage) {
+        String route = activeSessions.get(session);
+        if (route == null && endpoint != null && !endpoint.peerId.isEmpty()) {
+            try {
+                for (String peer : store.teammateDevices(trip, device)) {
+                    if (endpoint.peerId.equals(TeamProtocol.routeId(trip.team, peer))) {
+                        route = endpoint.peerId;
+                        break;
+                    }
+                }
+            } catch (RuntimeException error) { SyncLog.write(context, SyncLog.Event.QUEUE_READ, error); }
+        }
+        if (route != null) lastFailures.put(route, new Failure(stage, channel));
     }
 
     private void schedule() {
@@ -278,6 +379,7 @@ final class SyncEngine {
         main.removeCallbacks(retry);
         routes.clear();
         lastChannel.clear();
+        lastFailures.clear();
         activeSessions.clear();
         presence.clear();
         searchUntil = 0;

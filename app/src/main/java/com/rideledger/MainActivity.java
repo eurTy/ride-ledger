@@ -53,9 +53,10 @@ public final class MainActivity extends Activity {
     private FrameLayout reviewContent;
     private View recordsOverlay;
     private String exportTripId;
-    private boolean exportArchive;
+    private ExportFormat exportFormat = ExportFormat.TEXT;
     private boolean deletingRecords;
     private ReviewPanel reviewPanel;
+    private SyncDetailsDialog syncDetails;
     private TeamTransportAdapter teamTransport;
     private final Set<String> shownSyncPeers = new HashSet<>();
     private Map<String, String> renderedSeatNames = Collections.emptyMap();
@@ -86,6 +87,7 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         style = new LedgerStyle(this);
+        syncDetails = new SyncDetailsDialog(this, style);
         store = LedgerStore.application(this);
         ledgerActions = new LedgerActions(store);
         Object retained = getLastNonConfigurationInstance();
@@ -108,10 +110,10 @@ public final class MainActivity extends Activity {
         noteHistory = new NoteHistory(uiPrefs);
         forms = new LedgerForms(this, ledgerActions, currencyHistory, noteHistory, receipts, reviewReader,
                 trip -> afterSave(trip, false), this::error);
-        tripReports = new TripReports(this, store, reviewReader);
+        tripReports = new TripReports(this, store, reviewReader, forms);
         startupPermissionsInFlight = state != null && state.getBoolean("startupPermissionsInFlight");
         exportTripId = state == null ? null : state.getString("exportTripId");
-        exportArchive = state != null && state.getBoolean("exportArchive");
+        if (state != null) exportFormat = ExportFormat.valueOf(state.getString("exportFormat", ExportFormat.TEXT.name()));
         restoredReportTripId = state == null ? null : state.getString("reportTripId");
         currentTripId = uiPrefs.getString("last_trip", null);
         if (currentTripId == null || store.getTrip(currentTripId) == null) {
@@ -143,6 +145,7 @@ public final class MainActivity extends Activity {
         rememberQuickEntry();
         cancelReviewLoad();
         forms.dismissCurrencyMenu();
+        syncDetails.dismiss();
         teamTransport.stop();
         SyncBackground.foregroundLeft(this);
         super.onStop();
@@ -201,7 +204,7 @@ public final class MainActivity extends Activity {
         super.onSaveInstanceState(state);
         state.putBoolean("startupPermissionsInFlight", startupPermissionsInFlight);
         state.putString("exportTripId", exportTripId);
-        state.putBoolean("exportArchive", exportArchive);
+        state.putString("exportFormat", exportFormat.name());
         state.putString("reportTripId", tripReports.openTripId());
         state.putInt("screen", screen);
         state.putString("recordFilter", recordFilter);
@@ -269,8 +272,18 @@ public final class MainActivity extends Activity {
         } else {
             SyncEngine.Status state = teamTransport.syncState();
             if (reviewPanel == null) syncView.setText(state.label());
-            else reviewPanel.updateSync(trip, state, SyncEngine.lastCheckedAt(this, trip));
+            else {
+                reviewPanel.updateSync(trip, state, SyncEngine.lastCheckedAt(this, trip));
+                if (syncDetails.isShowing()) updateSyncDetails(trip, state);
+            }
         }
+    }
+
+    private void updateSyncDetails(LedgerStore.Trip trip, SyncEngine.Status state) {
+        List<SyncEngine.PeerDetail> peers = Collections.emptyList();
+        try { peers = teamTransport.syncDetails(trip); }
+        catch (org.json.JSONException | RuntimeException error) { SyncLog.write(this, SyncLog.Event.QUEUE_READ, error); }
+        syncDetails.update(peers, state.searching, reviewPanel.pendingReceipts());
     }
 
     private void render() {
@@ -299,6 +312,7 @@ public final class MainActivity extends Activity {
 
     private void displayPage(View content) {
         cancelReviewLoad();
+        syncDetails.dismiss();
         tripReports.invalidatePendingReport();
         reviewContent = null;
         rememberQuickEntry();
@@ -382,6 +396,8 @@ public final class MainActivity extends Activity {
 
     private void renderTrips() {
         LinearLayout body = page();
+        int inset = style.contentInset(style.windowWidth(), LedgerStyle.PAGE_INSET, LedgerStyle.PAGE_MAX_WIDTH);
+        body.setPadding(inset, body.getPaddingTop(), inset, body.getPaddingBottom());
         heading(body, "我的旅行");
         List<LedgerStore.Trip> trips = store.trips();
         Button createTrip = style.button("新建小队旅行", LedgerStyle.Action.PRIMARY, () -> openTeam(TeamSetupActivity.CREATE, null));
@@ -414,14 +430,12 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void addTripReportAction(LinearLayout row, LedgerStore.Trip trip) {
+    private Button tripReportAction(LedgerStore.Trip trip) {
         Button report = style.button("查看报告", LedgerStyle.Action.QUIET, () -> tripReports.show(trip.id));
         report.setTextSize(LedgerStyle.LABEL);
         report.setPadding(dp(LedgerStyle.CONTROL_GAP), report.getPaddingTop(), 0, report.getPaddingBottom());
-        int available = getResources().getConfiguration().screenWidthDp
-                - 2 * (LedgerStyle.PAGE_INSET + LedgerStyle.CARD_INSET);
-        report.setMaxWidth(dp(Math.max(96, available / 2)));
-        row.addView(report, new LinearLayout.LayoutParams(-2, -2));
+        report.setSingleLine();
+        return report;
     }
 
     private void addTripCard(LinearLayout body, LedgerStore.Trip trip) {
@@ -472,8 +486,24 @@ public final class MainActivity extends Activity {
         detail.setEllipsize(android.text.TextUtils.TruncateAt.END);
         LinearLayout memberRow = new LinearLayout(this);
         memberRow.setGravity(Gravity.CENTER_VERTICAL);
-        memberRow.addView(detail, new LinearLayout.LayoutParams(0, -2, 1));
-        if (showReports) addTripReportAction(memberRow, trip);
+        if (showReports) {
+            Button report = tripReportAction(trip);
+            int available = tripContentWidth(body) - 2 * inset - dp(LedgerStyle.CONTROL_GAP) - LedgerStyle.textWidth(report);
+            CharSequence label = detail.getText();
+            boolean fitsBesideReport = available > 0
+                    && android.text.StaticLayout.Builder.obtain(label, 0, label.length(), detail.getPaint(), available)
+                            .setBreakStrategy(detail.getBreakStrategy()).build().getLineCount() <= detail.getMaxLines();
+            if (fitsBesideReport) {
+                memberRow.addView(detail, new LinearLayout.LayoutParams(0, -2, 1));
+                memberRow.addView(report, new LinearLayout.LayoutParams(-2, -2));
+            } else {
+                memberRow.setOrientation(LinearLayout.VERTICAL);
+                memberRow.addView(detail, new LinearLayout.LayoutParams(-1, -2));
+                LinearLayout.LayoutParams action = new LinearLayout.LayoutParams(-2, -2);
+                action.gravity = Gravity.END;
+                memberRow.addView(report, action);
+            }
+        } else memberRow.addView(detail, new LinearLayout.LayoutParams(-1, -2));
         info.addView(memberRow, new LinearLayout.LayoutParams(-1, -2));
         info.setContentDescription(trip.name + (current ? "，当前旅行" : "") + "，" + members);
         if (deletingTrips) {
@@ -530,11 +560,14 @@ public final class MainActivity extends Activity {
     private void renderQuick(LedgerStore.Trip trip) {
         ScrollView scroll = new ScrollView(this) {
             @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                int width = MeasureSpec.getSize(widthSpec);
+                int inset = style.contentInset(width, LedgerStyle.PAGE_INSET, LedgerStyle.FORM_MAX_WIDTH);
+                View body = getChildAt(0);
+                if (body != null && body.getPaddingStart() != inset)
+                    body.setPaddingRelative(inset, body.getPaddingTop(), inset, body.getPaddingBottom());
                 QuickEntryPanel panel = quickEntry;
-                if (panel != null && panel.getParent() == getChildAt(0)) {
-                    panel.fitViewport(MeasureSpec.getSize(widthSpec), MeasureSpec.getSize(heightSpec),
-                            FormInput.keyboardVisible(this));
-                }
+                if (panel != null && panel.getParent() == body)
+                    panel.fitViewport(width - 2 * inset, MeasureSpec.getSize(heightSpec), FormInput.keyboardVisible(this));
                 super.onMeasure(widthSpec, heightSpec);
             }
         };
@@ -551,7 +584,7 @@ public final class MainActivity extends Activity {
 
         quickEntry = new QuickEntryPanel(this, trip, uiPrefs, currencyHistory, noteHistory, ledgerActions, forms, receipts, quickDrafts,
                 () -> store.getTrip(trip.id), this::error);
-        body.addView(quickEntry, new LinearLayout.LayoutParams(-1, -2, 1));
+        body.addView(quickEntry, new LinearLayout.LayoutParams(-1, -2));
     }
 
     private void waitingForTeam(LinearLayout body) {
@@ -562,9 +595,10 @@ public final class MainActivity extends Activity {
     }
 
     private void renderReview(LedgerStore.Trip trip) {
+        int inset = style.contentInset(style.windowWidth(), LedgerStyle.PAGE_INSET, LedgerStyle.FORM_MAX_WIDTH);
         if (!store.teamReady(trip)) {
             LinearLayout body = page();
-            body.setPadding(body.getPaddingLeft(), 0, body.getPaddingRight(), body.getPaddingBottom());
+            body.setPadding(inset, 0, inset, body.getPaddingBottom());
             body.addView(style.tripTitleRow(trip.name, null), fullMargin());
             waitingForTeam(body);
             return;
@@ -574,7 +608,6 @@ public final class MainActivity extends Activity {
         reviewContent = content;
         LinearLayout loading = new LinearLayout(this);
         loading.setOrientation(LinearLayout.VERTICAL);
-        int inset = dp(LedgerStyle.PAGE_INSET);
         loading.setPadding(inset, 0, inset, 0);
         reviewContent.addView(loading, new FrameLayout.LayoutParams(-1, -2));
         loading.addView(style.tripTitleRow(trip.name, null), fullMargin());
@@ -652,6 +685,10 @@ public final class MainActivity extends Activity {
                 teamTransport.reconnect();
                 updateSync();
             }
+            @Override public void showConnectionDetails() {
+                syncDetails.show();
+                updateSync();
+            }
             @Override public void convertSettlement() { forms.showSettlement(trip, review); }
             @Override public void edit(LedgerReview.Row row) { forms.editRecord(trip, row); }
             @Override public void thumbnail(LedgerReview.Row row, ImageView view) {
@@ -698,45 +735,62 @@ public final class MainActivity extends Activity {
         reviewPanel.setVisibility(View.VISIBLE);
     }
 
-    private void chooseExportFormat(LedgerStore.Trip trip, boolean hasReceipts) {
-        if (hasReceipts) {
-            AlertDialog options = new AlertDialog.Builder(this).setTitle("导出")
-                    .setItems(new String[]{"旅行日志（文本）", "账本备份（含小票）"},
-                            (dialog, choice) -> chooseExportFile(trip, choice == 1))
-                    .setNegativeButton("取消", null).show();
-            style.alertActions(options, LedgerStyle.Action.OUTLINE);
-        } else chooseExportFile(trip, false);
+    private enum ExportFormat {
+        TEXT("旅行日志（文本）", "text/plain", "-旅行日志.txt"),
+        CSV("旅行日志（CSV）", "text/csv", "-旅行日志.csv"),
+        BACKUP("账本备份", "text/plain", ".rlbackup.txt"),
+        ARCHIVE("账本备份（含小票）", "application/zip", ".rlbackup.zip");
+
+        final String label, mime, suffix;
+
+        ExportFormat(String label, String mime, String suffix) {
+            this.label = label;
+            this.mime = mime;
+            this.suffix = suffix;
+        }
     }
 
-    private void chooseExportFile(LedgerStore.Trip trip, boolean archive) {
+    private void chooseExportFormat(LedgerStore.Trip trip, boolean hasReceipts) {
+        ExportFormat backup = hasReceipts ? ExportFormat.ARCHIVE : ExportFormat.BACKUP;
+        ExportFormat[] formats = {ExportFormat.TEXT, ExportFormat.CSV, backup};
+        AlertDialog options = new AlertDialog.Builder(this).setTitle("导出")
+                .setItems(new String[]{formats[0].label, formats[1].label, formats[2].label},
+                        (dialog, choice) -> chooseExportFile(trip, formats[choice]))
+                .setNegativeButton("取消", null).show();
+        style.alertActions(options, LedgerStyle.Action.OUTLINE);
+    }
+
+    private void chooseExportFile(LedgerStore.Trip trip, ExportFormat format) {
         String name = trip.name.replace('/', '_').replace('\\', '_');
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
-                .setType(archive ? "application/zip" : "text/plain")
-                .putExtra(Intent.EXTRA_TITLE, name + (archive ? ".rlbackup.zip" : "-旅行日志.txt"));
+                .setType(format.mime).putExtra(Intent.EXTRA_TITLE, name + format.suffix);
         exportTripId = trip.id;
-        exportArchive = archive;
+        exportFormat = format;
         try { startActivityForResult(intent, REQUEST_EXPORT); }
         catch (android.content.ActivityNotFoundException error) {
             exportTripId = null;
-            exportArchive = false;
+            exportFormat = ExportFormat.TEXT;
             toast("系统文件选择器不可用");
         }
     }
 
-    private void exportRecords(Uri destination, String tripId, boolean archiveSelected) {
+    private void exportRecords(Uri destination, String tripId, ExportFormat selected) {
         new Thread(() -> {
             String status;
             try {
-                String name = exportFileName(destination);
-                boolean archive = archiveSelected || LedgerBackup.isArchiveName(name);
-                boolean backup = archive || LedgerBackup.isBackupName(name);
-                if (archive) {
+                ExportFormat format = selected;
+                if (format == ExportFormat.TEXT) {
+                    String name = exportFileName(destination);
+                    if (LedgerBackup.isArchiveName(name)) format = ExportFormat.ARCHIVE;
+                    else if (LedgerBackup.isBackupName(name)) format = ExportFormat.BACKUP;
+                }
+                if (format == ExportFormat.ARCHIVE) {
                     LedgerStore.Snapshot snapshot = store.snapshotWithReceipts(tripId);
                     if (snapshot.trip == null) throw new IOException("旅行不存在");
                     writeReceiptBackup(destination, snapshot);
                     status = snapshot.receipts.stream().anyMatch(entry -> !entry.digest.isEmpty() && !entry.available)
                             ? "已备份，部分图片待同步" : "账本备份已保存";
-                } else if (backup) {
+                } else if (format == ExportFormat.BACKUP) {
                     LedgerStore.Snapshot snapshot = store.snapshot(tripId);
                     if (snapshot.trip == null) throw new IOException("旅行不存在");
                     try (OutputStream stream = getContentResolver().openOutputStream(destination, "wt")) {
@@ -745,7 +799,7 @@ public final class MainActivity extends Activity {
                     }
                     status = "账本备份已保存";
                 } else {
-                    writeReportText(destination, tripId);
+                    writeVisibleRecords(destination, tripId, format);
                     status = "旅行日志已导出";
                 }
             } catch (Exception error) { status = "导出失败，请重试"; }
@@ -776,14 +830,16 @@ public final class MainActivity extends Activity {
         return destination.getLastPathSegment();
     }
 
-    private void writeReportText(Uri destination, String tripId) throws IOException {
+    private void writeVisibleRecords(Uri destination, String tripId, ExportFormat format)
+            throws IOException, org.json.JSONException {
         LedgerStore.Snapshot snapshot = store.snapshotWithReceipts(tripId);
         if (snapshot.trip == null) throw new IOException("旅行不存在");
-        LedgerReport report = LedgerReport.from(snapshot);
+        LedgerReport report = format == ExportFormat.TEXT ? LedgerReport.from(snapshot) : null;
         try (OutputStream stream = getContentResolver().openOutputStream(destination, "wt")) {
             if (stream == null) throw new IOException("无法打开文件");
             try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(stream, StandardCharsets.UTF_8))) {
-                report.write(writer);
+                if (report == null) LedgerCsv.write(writer, snapshot);
+                else report.write(writer);
             }
         }
     }
@@ -822,11 +878,11 @@ public final class MainActivity extends Activity {
         if (receipts.activityResult(request, result, data)) return;
         if (request == REQUEST_EXPORT) {
             String tripId = exportTripId;
-            boolean archive = exportArchive;
+            ExportFormat format = exportFormat;
             exportTripId = null;
-            exportArchive = false;
+            exportFormat = ExportFormat.TEXT;
             if (tripId != null && result == RESULT_OK && data != null && data.getData() != null)
-                exportRecords(data.getData(), tripId, archive);
+                exportRecords(data.getData(), tripId, format);
             return;
         }
         if (request != REQUEST_TEAM) return;
@@ -855,16 +911,29 @@ public final class MainActivity extends Activity {
         return style.button(value, LedgerStyle.Action.OUTLINE, onClick);
     }
 
-    private LinearLayout row(LinearLayout body, Button... buttons) {
+    private int tripContentWidth(LinearLayout body) {
+        return style.windowWidth() - body.getPaddingLeft() - body.getPaddingRight();
+    }
+
+    private void row(LinearLayout body, Button first, Button second) {
         LinearLayout line = new LinearLayout(this);
-        line.setOrientation(LinearLayout.HORIZONTAL);
-        for (Button button : buttons) {
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
-            if (line.getChildCount() > 0) params.setMarginStart(dp(LedgerStyle.CONTROL_GAP));
-            line.addView(button, params);
+        int gap = dp(LedgerStyle.CONTROL_GAP);
+        int width = tripContentWidth(body) - gap;
+        int firstWidth = LedgerStyle.textWidth(first), secondWidth = LedgerStyle.textWidth(second);
+        if (firstWidth + secondWidth <= width) {
+            boolean equal = Math.max(firstWidth, secondWidth) <= width / 2;
+            line.addView(first, new LinearLayout.LayoutParams(equal ? 0 : firstWidth, -2, 1));
+            LinearLayout.LayoutParams next = new LinearLayout.LayoutParams(equal ? 0 : secondWidth, -2, 1);
+            next.setMarginStart(gap);
+            line.addView(second, next);
+        } else {
+            line.setOrientation(LinearLayout.VERTICAL);
+            line.addView(first, new LinearLayout.LayoutParams(-1, -2));
+            LinearLayout.LayoutParams next = new LinearLayout.LayoutParams(-1, -2);
+            next.topMargin = gap;
+            line.addView(second, next);
         }
         body.addView(line, fullMargin());
-        return line;
     }
 
     private LinearLayout.LayoutParams fullMargin() {

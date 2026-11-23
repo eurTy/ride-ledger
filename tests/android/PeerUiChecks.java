@@ -151,6 +151,7 @@ final class PeerUiChecks {
                         android.view.ViewParent card = label == null ? null : label.getParent();
                         while (card instanceof View && ((View) card).getBackground() == null) card = card.getParent();
                         require(card instanceof View && sections.add(card), "review sections are not visually separated");
+                        if ("现金余额".equals(title)) checkCashBalanceGroups((ViewGroup) card);
                         if ("小队结算".equals(title)) require(text((View) card, "汇率结算") != null,
                                 "currency conversion is missing from the settlement card");
                     }
@@ -356,7 +357,8 @@ final class PeerUiChecks {
                     View dialog = windowWithText("完成");
                     require(dialog != null, "payment settings are missing");
                     Spinner payer = paymentPayer(dialog);
-                    require(payer.getCount() == 2, "payer dropdown did not include all members");
+                    require(payer.getCount() == 3 && "多人付款".equals(payer.getItemAtPosition(2)),
+                            "payer dropdown did not include both members and multiple payment");
                     payer.setSelection(1);
                     View equal = description(dialog, "分摊规则，全员平摊");
                     View personal = description(dialog, "分摊规则，仅付款人");
@@ -421,6 +423,43 @@ final class PeerUiChecks {
                 require(summary.spent.get("CNY") == 5900L && summary.teamNet.get("m1").get("CNY") == -3600L
                         && summary.teamCash.get("m2").get("CNY") == -5900L,
                         "custom split changed the total, payer cash or repayment amount");
+                instrumentation.runOnMainSync(() -> {
+                    View root = activity.getWindow().getDecorView();
+                    text(root, "记账").performClick();
+                    paymentControl(root).performClick();
+                });
+                instrumentation.waitForIdleSync();
+                instrumentation.runOnMainSync(() -> {
+                    View dialog = windowWithText("完成");
+                    require(text(dialog, "多人付款") == null, "multiple payment was displayed outside the dropdown");
+                    paymentPayer(dialog).setSelection(2);
+                });
+                instrumentation.waitForIdleSync();
+                instrumentation.runOnMainSync(() -> {
+                    View dialog = windowWithText("完成");
+                    require("多人付款".equals(paymentPayer(dialog).getSelectedItem()) &&
+                            fullyVisible(description(dialog, "实付金额，甲（我）")),
+                            "multiple payment did not reveal the payment fields below the dropdown");
+                    ((EditText) description(dialog, "实付金额，甲（我）")).setText("600");
+                    ((EditText) description(dialog, "实付金额，乙")).setText("400");
+                    require(text(dialog, "实付合计 1000.00 CNY") != null, "multiple payment total was not displayed");
+                    text(dialog, "完成").performClick();
+                    View root = activity.getWindow().getDecorView();
+                    require("1000.00".contentEquals(amount(root).getText()) && !amount(root).isEnabled() &&
+                            paymentControl(root).getContentDescription().toString().contains("2 人付款"),
+                            "multiple payments did not populate quick entry");
+                    text(root, "旅行").performClick();
+                    text(activity.getWindow().getDecorView(), "记账").performClick();
+                    root = activity.getWindow().getDecorView();
+                    require(paymentControl(root).getContentDescription().toString().contains("2 人付款"),
+                            "multi-payer draft was lost across tabs");
+                    text(root, "保存这笔支出").performClick();
+                    text(activity.getWindow().getDecorView(), "复盘").performClick();
+                });
+                waitForText(instrumentation, activity, "2 笔");
+                LedgerStore.Event multi = store.summary(trip.id).visible.get(0);
+                require(ExpensePayments.read(multi.data).minor("m1") == 60000L &&
+                        ExpensePayments.read(multi.data).minor("m2") == 40000L, "quick entry lost an actual payment");
             } finally { instrumentation.runOnMainSync(activity::finish); instrumentation.waitForIdleSync(); }
         }
     }
@@ -554,8 +593,22 @@ final class PeerUiChecks {
                                 .anyMatch(row -> "36.50 CNY".equals(row.amount) && "【餐食】 午餐".equals(row.note)) &&
                                 pending.report.records.stream().anyMatch(row -> "200 JPY".equals(row.amount)),
                         "pending edits or deletions changed the confirmed report before sync");
+                List<LedgerSettlement.Debt> reportDebts = pending.report.settlement.byCurrency();
+                require(reportDebts.size() == 1 && reportDebts.get(0).amounts.equals(java.util.List.of("18.25 CNY")) &&
+                                pending.settlementShareScope().get(0).contains("待同步"),
+                        "the share used unconfirmed changes rather than the displayed report");
                 instrumentation.runOnMainSync(() -> openTripReport(activity, trip.name));
-                clickWindow(instrumentation, "消费分类", "返回");
+                clickWindow(instrumentation, "消费分类", "汇率结算");
+                clickWindow(instrumentation, "计算结算", "取消");
+                instrumentation.runOnMainSync(() -> {
+                    View window = windowWithText("旅行统计报告");
+                    View share = window == null ? null : text(window, "一键分享结算");
+                    require(share != null, "the report has no share button");
+                    ViewGroup footerParent = (ViewGroup) share.getParent();
+                    require(footerParent.getChildAt(footerParent.getChildCount() - 1) == share,
+                            "the share button is not at the report's bottom");
+                    text(window, "返回").performClick();
+                });
 
                 teamExchange(sync, companion, peer, other);
                 waitForTripConfirmation(context, store, trip.id);
@@ -636,8 +689,7 @@ final class PeerUiChecks {
                 waitForText(instrumentation, activity, "1 笔");
                 instrumentation.runOnMainSync(() -> text(activity.getWindow().getDecorView(), "查看全部").performClick());
                 waitForText(instrumentation, activity, "全部旅行记录");
-                instrumentation.runOnMainSync(() -> require(text(activity.getWindow().getDecorView(), "日志导出").performClick(),
-                        "existing export action unavailable"));
+                chooseExport(instrumentation, activity, "账本备份");
                 long deadline = SystemClock.elapsedRealtime() + 5000;
                 String contents;
                 do {
@@ -855,6 +907,16 @@ final class PeerUiChecks {
                     TextView badge = (TextView) description(root, badgeDescription);
                     require(badge != null && badge.getText().toString().contains("同行乙的超长…"),
                             "review badge did not show the authenticated teammate with a shortened label");
+                    require(badge.performLongClick(), "review badge did not open sync details on long press");
+                });
+                instrumentation.waitForIdleSync();
+                instrumentation.runOnMainSync(() -> {
+                    View dialog = windowWithText("同步详情");
+                    require(dialog != null && text(dialog, teammate) != null && containsText(dialog, "上次核对") &&
+                            containsText(dialog, "Wi-Fi"), "sync details did not show full name and verified Wi-Fi check");
+                    require(description(activity.getWindow().getDecorView(), badgeDescription) != null,
+                            "opening details also triggered a reconnect");
+                    text(dialog, "关闭").performClick();
                 });
                 PeerSync sync = transport(activity).nearby;
                 teamExchange(sync, companion, peer, other, PeerRoutePolicy.Channel.HOTSPOT);
@@ -1043,8 +1105,7 @@ final class PeerUiChecks {
         Instrumentation.ActivityMonitor picker = instrumentation.addMonitor(createDocument,
                 new Instrumentation.ActivityResult(Activity.RESULT_OK, new Intent().setData(android.net.Uri.fromFile(export))), true);
         try {
-            instrumentation.runOnMainSync(() ->
-                    require(text(activity.getWindow().getDecorView(), "日志导出").performClick(), "export action missing"));
+            chooseExport(instrumentation, activity, "旅行日志（文本）");
             long deadline = SystemClock.elapsedRealtime() + 5000;
             String contents;
             do {
@@ -1063,11 +1124,65 @@ final class PeerUiChecks {
             instrumentation.removeMonitor(picker);
             export.delete();
         }
+        java.io.File csv = java.io.File.createTempFile("ride-records-", ".csv", activity.getCacheDir());
+        android.content.IntentFilter createCsv = new android.content.IntentFilter(Intent.ACTION_CREATE_DOCUMENT);
+        createCsv.addCategory(Intent.CATEGORY_OPENABLE);
+        createCsv.addDataType("text/csv");
+        Instrumentation.ActivityMonitor csvPicker = instrumentation.addMonitor(createCsv,
+                new Instrumentation.ActivityResult(Activity.RESULT_OK, new Intent().setData(android.net.Uri.fromFile(csv))), true);
+        try {
+            chooseExport(instrumentation, activity, "旅行日志（CSV）");
+            long deadline = SystemClock.elapsedRealtime() + 5000;
+            String contents;
+            do {
+                contents = new String(java.nio.file.Files.readAllBytes(csv.toPath()), java.nio.charset.StandardCharsets.UTF_8);
+                if (contents.split("\r\n").length == 72) break;
+                SystemClock.sleep(40);
+            } while (SystemClock.elapsedRealtime() < deadline);
+            require(csvPicker.getHits() == 1 && contents.startsWith("\ufeff记账时间,类型,分类,币种,金额,") &&
+                            contents.split("\r\n").length == 72 && contents.contains("弹层打开后收到"),
+                    "CSV job omitted records outside the visible page, or did not use the CSV document picker");
+        } finally {
+            instrumentation.removeMonitor(csvPicker);
+            csv.delete();
+        }
         instrumentation.runOnMainSync(() -> {
             View root = activity.getWindow().getDecorView();
             require(text(root, "退出").performClick() && text(root, "全部旅行记录") == null &&
                     text(root, "小队结算") != null, "exit did not return to the review preview");
         });
+    }
+
+    private static void chooseExport(Instrumentation instrumentation, Activity activity, String format) {
+        instrumentation.runOnMainSync(() ->
+                require(text(activity.getWindow().getDecorView(), "日志导出").performClick(), "export action missing"));
+        instrumentation.waitForIdleSync();
+        instrumentation.runOnMainSync(() -> {
+            View dialog = windowWithText(format);
+            View row = dialog == null ? null : text(dialog, format);
+            while (row != null && row.getParent() instanceof View &&
+                    !(row.getParent() instanceof android.widget.ListView)) row = (View) row.getParent();
+            require(row != null && row.getParent() instanceof android.widget.ListView, "export format missing: " + format);
+            android.widget.ListView list = (android.widget.ListView) row.getParent();
+            int position = list.getPositionForView(row);
+            require(list.performItemClick(row, position, list.getItemIdAtPosition(position)), "export format not selectable");
+        });
+    }
+
+    private static void checkCashBalanceGroups(ViewGroup card) {
+        TextView total = text(card, "总计"), local = text(card, "骑手甲（我）"), teammate = text(card, "骑手乙");
+        require(total != null && local != null && teammate != null, "cash balance groups are missing");
+        int totalIndex = card.indexOfChild((View) total.getParent());
+        int localIndex = card.indexOfChild((View) local.getParent());
+        int teammateIndex = card.indexOfChild((View) teammate.getParent());
+        require(totalIndex >= 0 && totalIndex + 1 < localIndex && localIndex < teammateIndex,
+                "cash total is not displayed before the member balances");
+        View amounts = card.getChildAt(totalIndex + 1);
+        TextView cny = text(amounts, "CNY"), usd = text(amounts, "USD");
+        TextView cnyValue = text(amounts, "-1.01"), usdValue = text(amounts, "-5.00");
+        require(cny != null && usd != null && cnyValue != null && usdValue != null &&
+                        cny.getParent() == cnyValue.getParent() && usd.getParent() == usdValue.getParent() &&
+                        cny.getParent() != usd.getParent(), "cash total does not show one complete row per currency");
     }
 
     private static void checkCurrencyForms(Instrumentation instrumentation, Activity activity, LedgerStore store,

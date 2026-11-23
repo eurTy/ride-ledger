@@ -58,6 +58,47 @@ final class TeamChecks {
     };
 
     static void run(Context base, PeerProtocolChecks.Sink sink) {
+        sink.check("multiple payers: exact cash and debt, offline edit, durable replay and original time", () -> {
+            try (Device root = new Device(base); Device guest = new Device(base)) {
+                root.trip = root.store.createOpenTeam("共同付款", "甲", 2);
+                guest.trip = guest.store.joinTrip(root.store.inviteCode(root.trip), "乙");
+                require(exchange(guest, root).complete(), "second payer could not register");
+                root.reopen();
+                guest.reopen();
+                LedgerActions actions = new LedgerActions(root.store);
+                String[] shares = {"360", "640"};
+                LedgerActions.CustomSplit split = LedgerActions.customSplit(root.trip, "CNY", shares);
+                ExpensePayments payments = LedgerActions.payments(root.trip, "CNY", new String[]{"600", "400"});
+                actions.expense(root.trip, "", "CNY", "", false, split, payments, "住宿", null);
+                LedgerStore.Event original = root.store.summary(root.trip.id).visible.get(0);
+                LedgerStore.Summary local = root.store.summary(root.trip.id);
+                require(local.spent.get("CNY") == 100000L && local.teamCash.get("m1").get("CNY") == -60000L &&
+                        local.teamCash.get("m2").get("CNY") == -40000L &&
+                        local.teamNet.get("m1").get("CNY") == 24000L && local.teamNet.get("m2").get("CNY") == -24000L,
+                        "a payer was overcharged or the split created money");
+                require(exchange(root, guest).complete(), "multi-payer expense did not sync");
+                require(ExpensePayments.read(guest.store.summary(guest.trip.id).visible.get(0).data).amounts()
+                        .equals(payments.amounts()), "the remote lost an actual payment");
+
+                JSONObject wrongTotal = new JSONObject(original.data.toString()).put("amount", 99999L);
+                LedgerStore.Event invalid = new LedgerStore.Event(UUID.randomUUID().toString(), root.trip.id,
+                        "expense", original.at, wrongTotal);
+                require(!LedgerRules.validEvent(root.trip, invalid), "an unbalanced expense passed validation");
+                ExpensePayments changed = LedgerActions.payments(guest.trip, "CNY", new String[]{"700", "300"});
+                new LedgerActions(guest.store).editExpense(guest.trip, guest.store.summary(guest.trip.id).visible.get(0),
+                        "", "CNY", "", 2, shares, changed, "住宿改账");
+                guest.reopen();
+                require(exchange(guest, root).complete() && exchange(root, guest).complete(), "reconnect did not sync the edit");
+                for (Device device : Arrays.asList(root, guest)) {
+                    LedgerStore.Summary totals = device.store.summary(device.trip.id);
+                    LedgerStore.Event revised = totals.visible.get(0);
+                    require(device.count() == 2 && totals.visible.size() == 1 && original.id.equals(revised.id) &&
+                            original.at == revised.at && changed.amounts().equals(ExpensePayments.read(revised.data).amounts()) &&
+                            totals.teamNet.get("m1").get("CNY") == 34000L && totals.teamNet.get("m2").get("CNY") == -34000L,
+                            "repeated sync changed the amount, row count or original time");
+                }
+            }
+        });
         sink.check("receipt capture: prefer the output, fall back to returned photos, and reject empty results",
                 () -> cameraResult(base));
         sink.check("receipts: offline save, Bluetooth reference, interrupted LAN photo, retry and deduplication", () -> {
@@ -612,6 +653,25 @@ final class TeamChecks {
             require(only(routes.readyForRevision(2, ""), "ble"), "new work should reactivate the route");
         });
 
+        sink.check("team routes: a changed address replaces an in-flight route after completion", () -> {
+            for (PeerRoutePolicy.Channel channel : PeerRoutePolicy.Channel.values()) {
+                for (boolean success : new boolean[]{false, true}) {
+                    PeerRoutePolicy routes = new PeerRoutePolicy(() -> 100);
+                    String peer = java.util.UUID.randomUUID().toString();
+                    PeerRoutePolicy.Endpoint old = new PeerRoutePolicy.Endpoint("old", channel, peer, true, null);
+                    PeerRoutePolicy.Endpoint current = new PeerRoutePolicy.Endpoint("current", channel, peer, true, null);
+                    routes.offer(old);
+                    require(only(routes.readyForRevision(1, ""), "old"), "first attempt should use the known address");
+                    routes.offer(current);
+                    require(routes.readyForRevision(1, "").isEmpty(), "replacement started a concurrent dial");
+                    if (success) routes.syncSuccess(old, 1);
+                    else routes.syncFailure(old);
+                    routes.newSyncRequest();
+                    require(only(routes.readyForRevision(2, ""), "current"), "new work used the superseded address");
+                }
+            }
+        });
+
         sink.check("team routes: slow recovery tries Wi-Fi then falls back to Bluetooth", () -> {
             AtomicLong clock = new AtomicLong(100);
             PeerRoutePolicy routes = new PeerRoutePolicy(clock::get);
@@ -711,6 +771,42 @@ final class TeamChecks {
                 a.openCoordinator();
                 await(() -> a.sync.status().equals("待同伴确认 1 条"), 3000, "checkpoint did not survive coordinator and database reopen");
                 require(SyncEngine.lastCheckedAt(a.context, a.trip) == checkedAt, "offline work changed the previous check time");
+                SyncEngine.PeerDetail reopened = syncDetails(a).get(0);
+                require(reopened.pending == 1 && reopened.link == null && reopened.checkedAt == checkedAt &&
+                        reopened.checkedChannel == PeerRoutePolicy.Channel.WIFI,
+                        "offline details lost the previous verified check or claimed a current connection");
+            }
+        });
+
+        sink.check("team sync details: failure and durable confirmation stay scoped to each teammate", () -> {
+            try (Device a = new Device(base); Device b = new Device(base); Device c = new Device(base)) {
+                a.trip = a.store.createTeam("同步详情", MEMBERS.subList(0, 3));
+                b.enroll(a, 1);
+                c.enroll(a, 2);
+                record(a, "CNY", 660, "one offline operation");
+                a.openCoordinator(); b.openCoordinator(); c.openCoordinator();
+                AtomicInteger failedWifi = new AtomicInteger();
+                onMain(() -> {
+                    a.link(b, PeerRoutePolicy.Channel.WIFI, failedWifi, true);
+                    a.link(c, PeerRoutePolicy.Channel.HOTSPOT, null, false);
+                });
+                await(() -> failedWifi.get() > 0 && c.count() == 1 && a.sync.syncState().phase != SyncEngine.Phase.SYNCING,
+                        10000, "isolated Wi-Fi and successful hotspot sessions did not settle");
+                List<SyncEngine.PeerDetail> peers = syncDetails(a);
+                SyncEngine.PeerDetail failed = peers.get(0), checked = peers.get(1);
+                require(failed.name.equals(MEMBERS.get(1)) && failed.pending == 1 && failed.checkedAt == 0 &&
+                        failed.link == null && failed.failure != null && failed.failure.stage == SyncEngine.FailureStage.CONNECT &&
+                        failed.failure.channel == PeerRoutePolicy.Channel.WIFI, "Wi-Fi failure was missing, mislabeled or assigned to the wrong teammate");
+                require(checked.name.equals(MEMBERS.get(2)) && checked.pending == 0 && checked.checkedAt > 0 &&
+                        checked.checkedChannel == PeerRoutePolicy.Channel.HOTSPOT && checked.failure == null,
+                        "verified hotspot teammate inherited the other teammate's failure or pending count");
+                onMain(() -> a.link(b, PeerRoutePolicy.Channel.BLUETOOTH, null, false));
+                await(() -> b.count() == 1 && a.sync.status().equals("本机已保存"),
+                        10000, "Bluetooth fallback did not reach durable confirmation");
+                SyncEngine.PeerDetail recovered = syncDetails(a).get(0);
+                require(recovered.pending == 0 && recovered.checkedAt > 0 &&
+                        recovered.checkedChannel == PeerRoutePolicy.Channel.BLUETOOTH && recovered.failure == null,
+                        "successful Bluetooth confirmation did not replace the previous Wi-Fi failure");
             }
         });
 
@@ -1092,6 +1188,12 @@ final class TeamChecks {
         FutureTask<Void> task = new FutureTask<>(action, null);
         new Handler(Looper.getMainLooper()).post(task);
         task.get(5, TimeUnit.SECONDS);
+    }
+
+    private static List<SyncEngine.PeerDetail> syncDetails(Device device) throws Exception {
+        FutureTask<List<SyncEngine.PeerDetail>> task = new FutureTask<>(() -> device.sync.syncDetails(device.trip));
+        new Handler(Looper.getMainLooper()).post(task);
+        return task.get(5, TimeUnit.SECONDS);
     }
 
     private static void await(BooleanSupplier done, long timeout, String message) {

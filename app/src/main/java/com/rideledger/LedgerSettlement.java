@@ -44,6 +44,8 @@ final class LedgerSettlement {
 
     Set<String> currencies() { return Collections.unmodifiableSet(balances.keySet()); }
 
+    boolean isComplete() { return !incomplete; }
+
     boolean sameBalances(LedgerSettlement other) {
         if (incomplete != other.incomplete || !members.equals(other.members) || !currencies().equals(other.currencies()))
             return false;

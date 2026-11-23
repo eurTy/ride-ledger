@@ -2,6 +2,11 @@ package com.rideledger;
 
 import android.content.Context;
 
+import org.json.JSONException;
+
+import java.util.Collections;
+import java.util.List;
+
 /** Owns the foreground LAN/hotspot/BLE coordinator. */
 final class TeamTransportAdapter {
     private final Context context;
@@ -42,6 +47,10 @@ final class TeamTransportAdapter {
 
     SyncEngine.Status syncState() {
         return nearby == null ? SyncEngine.Status.EMPTY : nearby.syncState();
+    }
+
+    List<SyncEngine.PeerDetail> syncDetails(LedgerStore.Trip trip) throws JSONException {
+        return nearby == null ? Collections.emptyList() : nearby.syncDetails(trip);
     }
 
     void recordsChanged() { if (nearby != null) nearby.syncNow(); }

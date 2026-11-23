@@ -30,6 +30,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
+import java.util.function.IntConsumer;
+import java.util.function.Supplier;
 
 /** Renders cash and split forms. LedgerActions is the only write entry point. */
 final class LedgerForms {
@@ -181,9 +183,23 @@ final class LedgerForms {
         payment.setColumnStretchable(1, true);
         payment.setColumnShrinkable(1, true);
         form.addView(payment, new LinearLayout.LayoutParams(-1, -2));
-        Spinner payer = personSpinner(trip, trip.localPerson);
-        selectPerson(payer, trip, data, "payer");
+        ExpensePayments initialPayments;
+        try {
+            ExpensePayments recorded = ExpensePayments.read(data);
+            initialPayments = recorded.isMultiple() ? recorded : null;
+        } catch (Exception invalid) {
+            showError.accept(invalid);
+            return;
+        }
+        Spinner payer = new Spinner(activity, Spinner.MODE_DROPDOWN);
+        style.spinner(payer);
+        payer.setContentDescription("付款人");
+        int selection = initialPayments != null ? trip.people() : Math.max(0, trip.indexOf(data.optString("payer")));
+        updateExpensePayer(payer, trip, selection, false);
         addChoiceRow(payment, "谁付款", payer);
+        ExpensePaymentFields actual = new ExpensePaymentFields(activity, this, style, trip,
+                () -> value(currency), initialCode, initialPayments);
+        payment.addView(actual, new TableLayout.LayoutParams(-1, -2));
         Spinner modes = new Spinner(activity, Spinner.MODE_DROPDOWN);
         modes.setContentDescription("分摊规则");
         style.spinner(modes);
@@ -237,28 +253,43 @@ final class LedgerForms {
         for (EditText input : inputs) input.addTextChangedListener(watcher);
         Consumer<Integer> showMode = position -> {
             shares.setVisibility(position == 2 ? View.VISIBLE : View.GONE);
-            amountBox.setVisibility(position == 2 ? View.GONE : View.VISIBLE);
+            amountBox.setVisibility(position == 2 || payer.getSelectedItemPosition() == trip.people() ? View.GONE : View.VISIBLE);
             FormInput.next(currency, position == 2 ? inputs[0] : note);
         };
-        modes.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                showMode.accept(position);
-            }
-            @Override public void onNothingSelected(AdapterView<?> parent) { }
-        });
+        listenToSelection(modes, showMode::accept);
         String initialMode = data.optString("mode");
         int position = "custom".equals(initialMode) ? 2 : "personal".equals(initialMode) ? 1 : 0;
         modes.setSelection(position);
-        showMode.accept(position);
+        IntConsumer updatePayment = selected -> {
+            boolean multiple = selected == trip.people();
+            actual.showPayments(multiple);
+            int mode = Math.max(0, modes.getSelectedItemPosition());
+            String personalOption = multiple ? "各自承担" : "仅付款人";
+            if (!personalOption.equals(modes.getItemAtPosition(1))) {
+                modes.setAdapter(style.options(Arrays.asList("全员平摊", personalOption, "自定义分摊"), modes, -1));
+                modes.setSelection(mode);
+            }
+            showMode.accept(mode);
+        };
+        listenToSelection(payer, updatePayment);
+        updatePayment.accept(selection);
+        currency.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) { }
+            @Override public void afterTextChanged(Editable s) { actual.refresh(); }
+        });
         updateTotal.run();
         showRecordForm(trip, record, "编辑记录", form, () -> {
             String code = Money.code(value(currency));
             String[] values = new String[inputs.length];
             for (int i = 0; i < inputs.length; i++) values[i] = value(inputs[i]);
-            String member = trip.member(payer.getSelectedItemPosition()), rawAmount = value(amount), rawNote = noteInput.value();
+            int payerPosition = payer.getSelectedItemPosition();
+            boolean multiple = payerPosition == trip.people();
+            String member = multiple ? "" : trip.member(payerPosition), rawAmount = value(amount), rawNote = noteInput.value();
             int mode = modes.getSelectedItemPosition();
+            ExpensePayments payments = multiple ? actual.read(code) : null;
             return () -> {
-                ledgerActions.editExpense(trip, record.event, member, code, rawAmount, mode, values, rawNote);
+                ledgerActions.editExpense(trip, record.event, member, code, rawAmount, mode, values, payments, rawNote);
                 currencyHistory.remember(trip.id, code, initialCode);
             };
         });
@@ -380,11 +411,23 @@ final class LedgerForms {
     }
 
     void showSettlement(LedgerStore.Trip trip, LedgerReview review) {
+        showSettlement(trip, review.settlementAmounts, review.financialConflict, null);
+    }
+
+    void showReportSettlement(TripStatistics statistics) {
+        LedgerReport report = statistics.report;
+        showSettlement(statistics.trip, report.settlement, report.financialConflict, statistics.settlementShareScope());
+    }
+
+    private void showSettlement(LedgerStore.Trip trip, LedgerSettlement settlement, boolean financialConflict,
+                                List<String> shareScope) {
         LinearLayout form = form();
         form.setPaddingRelative(form.getPaddingStart(), 0, form.getPaddingEnd(), dp(LedgerStyle.ITEM_GAP));
-        android.content.res.Configuration config = activity.getResources().getConfiguration();
-        int available = dp(config.screenWidthDp) - form.getPaddingStart() - form.getPaddingEnd();
-        int preferred = dp(Math.round(236 * Math.max(1f, config.fontScale)));
+        int available = Math.min(style.windowWidth(), dp(LedgerStyle.FORM_MAX_WIDTH))
+                - form.getPaddingStart() - form.getPaddingEnd();
+        TextView rateSample = style.text("", 16, style.ink);
+        int preferred = Math.max(dp(236), LedgerStyle.textWidth(rateSample, "1 WWW = 0.00000000 WWW")
+                + dp(2 * LedgerStyle.CONTROL_GAP));
         LinearLayout fields = new LinearLayout(activity);
         fields.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams fieldsSize = new LinearLayout.LayoutParams(Math.min(available, preferred), -2);
@@ -396,8 +439,7 @@ final class LedgerForms {
         CurrencyInput currency = currencyInput(targetLine, trip.id, "结算币种", currencyHistory.quickDefault(trip.id), false, false);
         currency.caption.setPaddingRelative(0, 0, dp(LedgerStyle.CONTROL_GAP), 0);
         currency.caption.setLayoutParams(new LinearLayout.LayoutParams(-2, -2));
-        int codeWidth = (int) Math.ceil(currency.field.getPaint().measureText("WWW"))
-                + currency.field.getPaddingLeft() + currency.field.getPaddingRight();
+        int codeWidth = LedgerStyle.textWidth(currency.field, "WWW");
         currency.field.setLayoutParams(new LinearLayout.LayoutParams(Math.max(dp(56), codeWidth), -2));
         currency.field.setGravity(Gravity.CENTER);
         currency.row.setLayoutParams(new LinearLayout.LayoutParams(-2, -2));
@@ -405,11 +447,12 @@ final class LedgerForms {
         targetSize.width = -2;
         targetSize.gravity = Gravity.CENTER_HORIZONTAL;
         fields.addView(targetLine, targetSize);
-        SettlementSheet sheet = new SettlementSheet(trip.id, form, fields, currency.field, style, review);
+        SettlementSheet sheet = new SettlementSheet(activity, trip, form, fields, currency.field, style,
+                settlement, financialConflict, readExecutor, shareScope);
         currency.historyButton.setContentDescription("选择结算币种");
         currency.historyButton.setOnClickListener(sheet::chooseTarget);
         showSheet("汇率结算", null, form, "计算结算", (dialog, confirm, cancel, error) -> sheet.calculate(error));
-        settlementSheet = sheet;
+        settlementSheet = shareScope == null ? sheet : null;
     }
 
     void updateSettlement(LedgerStore.Trip trip, LedgerReview review) {
@@ -423,10 +466,17 @@ final class LedgerForms {
         LinearLayout sheet = new LinearLayout(activity);
         sheet.setOrientation(LinearLayout.VERTICAL);
         sheet.setBackground(style.sheet());
+        ScrollView scroll = new ScrollView(activity);
+        LinearLayout content = new LinearLayout(activity);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setFocusableInTouchMode(true);
+        content.setDescendantFocusability(LinearLayout.FOCUS_BEFORE_DESCENDANTS);
+        scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
+        sheet.addView(scroll, new LinearLayout.LayoutParams(-1, -2, 1));
         LinearLayout header = new LinearLayout(activity);
         header.setOrientation(LinearLayout.VERTICAL);
         header.setPadding(dp(20), dp(12), dp(20), dp(4));
-        sheet.addView(header, fullMargin());
+        content.addView(header, fullMargin());
         View handle = new View(activity);
         handle.setBackground(style.rounded(style.stroke, 0, LedgerStyle.CONTROL_RADIUS));
         handle.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -440,9 +490,7 @@ final class LedgerForms {
             TextView caption = text(header, subtitle, LedgerStyle.CAPTION, style.muted);
             caption.setPadding(0, 0, 0, dp(LedgerStyle.ITEM_GAP));
         }
-        ScrollView scroll = new ScrollView(activity);
-        scroll.addView(form);
-        sheet.addView(scroll, new LinearLayout.LayoutParams(-1, -2, 1));
+        content.addView(form, new LinearLayout.LayoutParams(-1, -2));
         View rule = new View(activity);
         rule.setBackgroundColor(style.divider);
         sheet.addView(rule, new LinearLayout.LayoutParams(-1, dp(1)));
@@ -483,8 +531,9 @@ final class LedgerForms {
             }
         });
         dialog.show();
-        window.setLayout(-1, -2);
-        form.requestFocus();
+        int maximum = dp(LedgerStyle.FORM_MAX_WIDTH);
+        window.setLayout(style.windowWidth() > maximum ? maximum : -1, -2);
+        content.requestFocus();
         return dialog;
     }
 
@@ -558,11 +607,6 @@ final class LedgerForms {
         TextView caption = style.text("备注（可选）", multipleLines ? LedgerStyle.LABEL : LedgerStyle.CAPTION, style.muted);
         if (!multipleLines) caption.setIncludeFontPadding(false);
         EditText field = field(caption, "", false);
-        android.content.res.Configuration configuration = activity.getResources().getConfiguration();
-        if (!multipleLines && configuration.screenWidthDp <= 320 && configuration.fontScale >= 1.2f) {
-            caption.setVisibility(View.GONE);
-            field.setHint(caption.getText());
-        }
         if (multipleLines) {
             field.setSingleLine(false);
             field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
@@ -612,10 +656,32 @@ final class LedgerForms {
     }
 
     void updatePeople(Spinner spinner, LedgerStore.Trip trip, String selected) {
-        List<String> people = new ArrayList<>();
-        for (int i = 0; i < trip.people(); i++) people.add(personChoiceLabel(trip, trip.member(i)));
-        spinner.setAdapter(style.options(people, spinner, -1));
+        spinner.setAdapter(style.options(memberChoices(trip), spinner, -1));
         spinner.setSelection(Math.max(0, trip.indexOf(selected)));
+    }
+
+    void updateExpensePayer(Spinner spinner, LedgerStore.Trip trip, int selected, boolean alignEnd) {
+        List<String> choices = memberChoices(trip);
+        boolean hasChoices = trip.people() > 1;
+        if (hasChoices) choices.add("多人付款");
+        spinner.setAdapter(style.options(choices, spinner, -1, alignEnd, hasChoices));
+        spinner.setSelection(Math.max(0, Math.min(selected, choices.size() - 1)));
+        spinner.setEnabled(hasChoices);
+    }
+
+    private List<String> memberChoices(LedgerStore.Trip trip) {
+        List<String> choices = new ArrayList<>();
+        for (int i = 0; i < trip.people(); i++) choices.add(personChoiceLabel(trip, trip.member(i)));
+        return choices;
+    }
+
+    static void listenToSelection(Spinner spinner, IntConsumer selection) {
+        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                selection.accept(position);
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) { }
+        });
     }
 
     private String personChoiceLabel(LedgerStore.Trip trip, String person) {
@@ -742,8 +808,11 @@ final class LedgerForms {
         list.setOrientation(LinearLayout.VERTICAL);
         ScrollView scroll = new ScrollView(activity);
         scroll.addView(list);
-        android.content.res.Configuration config = activity.getResources().getConfiguration();
-        int width = dp(Math.min(config.screenWidthDp - 2 * LedgerStyle.PAGE_INSET, Math.round(164 * config.fontScale)));
+        String emptyMessage = "暂无曾用货币";
+        TextView sample = style.text("", LedgerStyle.LABEL, style.muted);
+        int preferred = Math.max(dp(164), LedgerStyle.textWidth(sample, emptyMessage)
+                + dp(2 * LedgerStyle.CONTROL_GAP));
+        int width = Math.min(style.windowWidth() - 2 * dp(LedgerStyle.PAGE_INSET), preferred);
         int gap = dp(LedgerStyle.ITEM_GAP);
         PopupWindow popup = new PopupWindow(scroll, width, -2, true);
         popup.setInputMethodMode(PopupWindow.INPUT_METHOD_NEEDED);
@@ -752,7 +821,7 @@ final class LedgerForms {
         popup.setElevation(dp(6));
         popup.setOutsideTouchable(true);
         if (history.isEmpty()) {
-            TextView empty = text(list, "暂无曾用货币", LedgerStyle.LABEL, style.muted);
+            TextView empty = text(list, emptyMessage, LedgerStyle.LABEL, style.muted);
             empty.setGravity(Gravity.CENTER);
         }
         for (String code : history) {

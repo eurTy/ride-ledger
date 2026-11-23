@@ -29,7 +29,7 @@ final class PeerRoutePolicy {
         }
     }
     private static final class State {
-        Endpoint endpoint; int failures; long retryAt, succeededAt; boolean busy;
+        Endpoint endpoint; int failures; long retryAt, succeededAt; boolean busy, superseded;
         Endpoint attempt;
         long revision = -1;
         long lastSeen;
@@ -73,10 +73,13 @@ final class PeerRoutePolicy {
             }
             return rediscovered;
         }
-        // A new address for the same authenticated/advertised device replaces stale LAN coordinates.
-        if (PeerIdentity.valid(endpoint.peerId)) states.entrySet().removeIf(entry -> !entry.getValue().busy &&
-                entry.getValue().endpoint.channel == endpoint.channel && endpoint.peerId.equals(entry.getValue().endpoint.peerId));
+        boolean knownPeer = PeerIdentity.valid(endpoint.peerId);
+        if (knownPeer) states.values().removeIf(state -> !state.busy && samePeerChannel(state, endpoint));
         if (states.size() >= 16) return false;
+        // An in-flight exchange still holds its peer's slot. Retire its old address when it finishes.
+        if (knownPeer) for (State state : states.values()) {
+            if (samePeerChannel(state, endpoint)) state.superseded = true;
+        }
         states.put(endpoint.key, new State(endpoint, now));
         // A newly advertised address can be a recovered link with a different port.
         syncFailures.remove(group(endpoint));
@@ -138,7 +141,7 @@ final class PeerRoutePolicy {
     }
     synchronized void syncFailure(Endpoint endpoint) {
         State state = states.get(endpoint.key);
-        if (state == null || state.attempt != endpoint) return;
+        if (state == null || state.attempt != endpoint || retire(endpoint.key, state)) return;
         state.busy = false;
         state.attempt = null;
         String peer = group(endpoint);
@@ -154,7 +157,7 @@ final class PeerRoutePolicy {
     }
     synchronized void syncSuccess(Endpoint endpoint, long revision) {
         State state = states.get(endpoint.key);
-        if (state != null && state.attempt == endpoint) {
+        if (state != null && state.attempt == endpoint && !retire(endpoint.key, state)) {
             syncFailures.remove(group(endpoint));
             recoveryAt.remove(group(endpoint));
             success(endpoint.key, revision);
@@ -263,7 +266,7 @@ final class PeerRoutePolicy {
     }
     synchronized void success(String key, long revision) {
         State state = states.get(key);
-        if (state != null) {
+        if (state != null && !retire(key, state)) {
             state.busy = false;
             state.attempt = null;
             state.failures = 0;
@@ -295,12 +298,23 @@ final class PeerRoutePolicy {
     }
     synchronized void failure(String key) {
         State state = states.get(key);
-        if (state != null) {
+        if (state != null && !retire(key, state)) {
             state.busy = false; state.failures = Math.min(5, state.failures + 1);
             state.retryAt = clock.getAsLong() + Math.min(60000, 5000L << (state.failures - 1));
         }
     }
     synchronized void resetBackoff() { for (State state : states.values()) state.retryAt = 0; }
     synchronized void clear() { states.clear(); syncFailures.clear(); recoveryAt.clear(); }
+
+    private boolean retire(String key, State state) {
+        if (!state.superseded) return false;
+        remove(key);
+        return true;
+    }
+
+    private static boolean samePeerChannel(State state, Endpoint endpoint) {
+        return state.endpoint.channel == endpoint.channel && endpoint.peerId.equals(state.endpoint.peerId);
+    }
+
     private String group(Endpoint endpoint) { return PeerIdentity.valid(endpoint.peerId) ? endpoint.peerId : endpoint.key; }
 }

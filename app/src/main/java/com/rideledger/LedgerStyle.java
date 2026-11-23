@@ -9,6 +9,7 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.text.Layout;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
@@ -29,6 +30,7 @@ final class LedgerStyle {
     static final int PAGE_INSET = 16, CARD_INSET = 14, SECTION_GAP = 12, CONTROL_GAP = 8, ITEM_GAP = 4;
     static final int CONTROL_HEIGHT = 48, COMPACT_HEIGHT = 44;
     static final int CARD_RADIUS = 14, CONTROL_RADIUS = 10, SHEET_RADIUS = 20;
+    static final int FORM_MAX_WIDTH = 560, PAGE_MAX_WIDTH = 600;
     static final int PAGE_TITLE = 24, SECTION_TITLE = 18, LABEL = 14, BODY = 15, CAPTION = 13, QUICK_AMOUNT = 32;
     static final Typeface MEDIUM = Typeface.create("sans-serif-medium", Typeface.NORMAL);
 
@@ -61,6 +63,19 @@ final class LedgerStyle {
     }
 
     int dp(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
+
+    int windowWidth() { return dp(context.getResources().getConfiguration().screenWidthDp); }
+
+    int contentInset(int windowWidth, int minimumDp, int maximumContentDp) {
+        return Math.max(dp(minimumDp), (windowWidth - dp(maximumContentDp)) / 2);
+    }
+
+    static int textWidth(TextView view) { return textWidth(view, view.getText()); }
+
+    static int textWidth(TextView view, CharSequence text) {
+        return (int) Math.ceil(Layout.getDesiredWidth(text, view.getPaint()))
+                + view.getCompoundPaddingLeft() + view.getCompoundPaddingRight();
+    }
 
     GradientDrawable rounded(int fill, int outline, int radius) {
         GradientDrawable background = new GradientDrawable();
@@ -194,8 +209,10 @@ final class LedgerStyle {
         row.setMinimumHeight(dp(COMPACT_HEIGHT));
         row.setPadding(dp(dropdown ? 10 : ITEM_GAP), dp(ITEM_GAP), dp(CONTROL_GAP), dp(ITEM_GAP));
         TextView name = text(label, BODY, current ? primary : title);
-        name.setMaxLines(dropdown ? 2 : 1);
-        name.setEllipsize(TextUtils.TruncateAt.END);
+        if (!dropdown) {
+            name.setMaxLines(1);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+        }
         if (current) name.setTypeface(MEDIUM);
         if (alignEnd) name.setGravity(Gravity.END);
         LinearLayout.LayoutParams width = new LinearLayout.LayoutParams(0, -2, 1);
@@ -222,10 +239,14 @@ final class LedgerStyle {
     }
 
     ArrayAdapter<String> options(List<String> choices, Spinner spinner, int selected) {
+        return options(choices, spinner, selected, false, true);
+    }
+
+    ArrayAdapter<String> options(List<String> choices, Spinner spinner, int selected, boolean alignEnd, boolean showArrow) {
         return new ArrayAdapter<String>(context, android.R.layout.simple_list_item_1, choices) {
             @Override public View getView(int position, View convert, ViewGroup parent) {
                 if (spinner == null) return getDropDownView(position, convert, parent);
-                return option(getItem(position), "⌄", false, false, false);
+                return option(getItem(position), showArrow ? "⌄" : "", false, false, alignEnd);
             }
 
             @Override public View getDropDownView(int position, View convert, ViewGroup parent) {

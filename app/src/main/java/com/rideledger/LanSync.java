@@ -77,7 +77,8 @@ final class LanSync {
     private final Runnable checkGateway = this::probeGateway;
     private final Runnable updateNetwork = this::networkChanged;
     private String networkSignature = "";
-    private boolean resolving;
+    private NsdServiceInfo resolving;
+    private boolean resolutionLost;
     private volatile boolean gatewayIsPeer;
 
     LanSync(Context context, String deviceId, Events events) {
@@ -315,6 +316,7 @@ final class LanSync {
         String signature = localNetworkSignature();
         if (networkSignature.equals(signature)) return;
         networkSignature = signature;
+        stopDiscovery();
         requestGatewayRecovery();
         gatewayGeneration++;
         probingGateway = false;
@@ -348,7 +350,10 @@ final class LanSync {
             @Override public void onServiceLost(NsdServiceInfo service) {
                 main.post(() -> {
                     if (!running || epoch != discoveryEpoch) return;
-                    PeerRoutePolicy.Endpoint endpoint = peers.remove(service.getServiceName());
+                    String name = service.getServiceName();
+                    resolveQueue.removeIf(pending -> name.equals(pending.getServiceName()));
+                    if (resolving != null && name.equals(resolving.getServiceName())) resolutionLost = true;
+                    PeerRoutePolicy.Endpoint endpoint = peers.remove(name);
                     if (endpoint != null && events != null) events.lost(endpoint.key);
                 });
             }
@@ -366,8 +371,10 @@ final class LanSync {
         }
     }
     private void resolveNext(int epoch) {
-        if (!running || epoch != discoveryEpoch || resolving || resolveQueue.isEmpty()) return;
-        resolving = true; NsdServiceInfo service = resolveQueue.remove();
+        if (!running || epoch != discoveryEpoch || resolving != null || resolveQueue.isEmpty()) return;
+        NsdServiceInfo service = resolveQueue.remove();
+        resolving = service;
+        resolutionLost = false;
         try {
             nsd.resolveService(service, new NsdManager.ResolveListener() {
                 @Override public void onResolveFailed(NsdServiceInfo value, int code) {
@@ -377,9 +384,9 @@ final class LanSync {
                 @Override public void onServiceResolved(NsdServiceInfo value) { finished(value); }
                 private void finished(NsdServiceInfo value) {
                     main.post(() -> {
-                        if (!running || epoch != discoveryEpoch) return;
-                        resolving = false;
-                        if (value != null && value.getHost() != null && value.getPort() > 0) {
+                        if (!running || epoch != discoveryEpoch || resolving != service) return;
+                        resolving = null;
+                        if (!resolutionLost && value != null && value.getHost() != null && value.getPort() > 0) {
                             String peer = attribute(value, "id"); boolean modern = "2".equals(attribute(value, "p"));
                             if (!deviceId.equals(peer)) offer(value.getServiceName(), new InetSocketAddress(value.getHost(), value.getPort()), peer, modern);
                         }
@@ -389,7 +396,7 @@ final class LanSync {
             });
         } catch (Exception error) {
             if (gatewayProbe != null) SyncLog.write(context, SyncLog.Event.LAN_RESOLVE, error);
-            resolving = false; main.postDelayed(() -> resolveNext(epoch), 500);
+            resolving = null; main.postDelayed(() -> resolveNext(epoch), 500);
         }
     }
     private static String attribute(NsdServiceInfo service, String key) {
@@ -398,7 +405,7 @@ final class LanSync {
     private void stopDiscovery() {
         discoveryEpoch++;
         if (discovery != null && nsd != null) try { nsd.stopServiceDiscovery(discovery); } catch (Exception ignored) { }
-        discovery = null; resolveQueue.clear(); resolving = false;
+        discovery = null; resolveQueue.clear(); resolving = null; resolutionLost = false;
     }
     private void offer(String name, InetSocketAddress address, String peerId, boolean modern) {
         if (!running) return;

@@ -1,6 +1,7 @@
 package com.rideledger;
 
 import org.json.JSONObject;
+import java.math.BigInteger;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -14,6 +15,16 @@ import java.util.TreeMap;
 /** Display snapshot derived from one trip and its ledger totals. No Android views or database handles. */
 final class LedgerReview {
     static final String CASH_FILTER = "cash", CASH_LABEL = "现金入账";
+
+    static final class Balance {
+        final String name;
+        final Map<String, BigInteger> amounts;
+
+        Balance(String name, Map<String, BigInteger> amounts) {
+            this.name = name;
+            this.amounts = Collections.unmodifiableMap(amounts);
+        }
+    }
 
     static final class Row {
         final LedgerStore.Event event;
@@ -48,7 +59,8 @@ final class LedgerReview {
     final LedgerSettlement settlementAmounts;
     final List<LedgerSettlement.Debt> settlement;
     final boolean hasSpending, incomplete, financialConflict;
-    final List<String> balances;
+    final Map<String, BigInteger> cashTotal;
+    final List<Balance> balances;
     final List<Row> records;
     final boolean hasReceipts;
     final int pendingReceipts;
@@ -63,13 +75,23 @@ final class LedgerReview {
         settlementAmounts = new LedgerSettlement(trip, summary);
         settlement = settlementAmounts.byCurrency();
         incomplete = summary.incomplete;
-        List<String> balanceRows = new ArrayList<>();
+        List<Balance> balanceRows = new ArrayList<>();
+        Map<String, BigInteger> totalByCurrency = new TreeMap<>();
         for (int i = 0; i < trip.people(); i++) {
             String member = trip.member(i);
-            if (trip.team != null && !trip.seatNames.containsKey(member)) continue;
+            Map<String, Long> cash = trip.team == null ? (i == 0 ? summary.cashA : summary.cashB)
+                    : summary.teamCash.getOrDefault(member, Collections.emptyMap());
+            if (trip.team != null && !trip.seatNames.containsKey(member) && cash.isEmpty()) continue;
             String name = trip.nameOf(member) + (member.equals(trip.localPerson) ? "（我）" : "");
-            balanceRows.add(name + "：" + formatBalances(summary.teamCash.getOrDefault(member, Collections.emptyMap())));
+            Map<String, BigInteger> amounts = new TreeMap<>();
+            cash.forEach((code, minor) -> {
+                BigInteger value = BigInteger.valueOf(minor);
+                amounts.put(code, value);
+                totalByCurrency.merge(code, value, BigInteger::add);
+            });
+            balanceRows.add(new Balance(name, amounts));
         }
+        cashTotal = Collections.unmodifiableMap(totalByCurrency);
         balances = Collections.unmodifiableList(balanceRows);
         List<Row> recordRows = new ArrayList<>();
         Map<String, LedgerReceipts.Entry> byExpense = new HashMap<>();
@@ -97,7 +119,6 @@ final class LedgerReview {
     }
 
     private static String formatBalances(Map<String, Long> balances) {
-        if (balances.isEmpty()) return "尚未填写";
         List<String> parts = new ArrayList<>();
         for (Map.Entry<String, Long> entry : new TreeMap<>(balances).entrySet())
             parts.add(Money.format(entry.getValue(), entry.getKey()));
@@ -127,12 +148,24 @@ final class LedgerReview {
                 case "expense": {
                     String mode = d.optString("mode");
                     String code = d.getString("currency");
-                    String payer = trip.nameOf(d.getString("payer"));
-                    type = "personal".equals(mode) ? "个人支出" : "custom".equals(mode) ? "自定义分摊" : "共同支出";
-                    people = payer + " 付款";
+                    ExpensePayments payments = ExpensePayments.read(d);
+                    type = expenseType(mode, payments.isMultiple());
                     amount = Money.format(d.getLong("amount"), code);
-                    export = payer + " 支付 " + amount +
-                            ("personal".equals(mode) ? " · 个人" : "custom".equals(mode) ? " · 自定义分摊" : " · 共同");
+                    if (payments.isMultiple()) {
+                        List<String> paid = new ArrayList<>();
+                        for (int i = 0; i < trip.people(); i++) {
+                            String member = trip.member(i);
+                            long value = payments.minor(member);
+                            if (value > 0) paid.add(trip.nameOf(member) + " " + Money.amountText(value, code));
+                        }
+                        people = "实付 " + String.join(" · ", paid);
+                        export = type + " " + amount + " · " + people;
+                    } else {
+                        String payer = trip.nameOf(d.getString("payer"));
+                        people = payer + " 付款";
+                        export = payer + " 支付 " + amount +
+                                ("personal".equals(mode) ? " · 个人" : "custom".equals(mode) ? " · 自定义分摊" : " · 共同");
+                    }
                     if ("custom".equals(mode)) {
                         JSONObject shares = d.getJSONObject("shares");
                         List<String> parts = new ArrayList<>();
@@ -167,6 +200,11 @@ final class LedgerReview {
             people = amount = received = split = "";
         }
         return new Row(event, filter, time, type, people, amount, received, split, note, export, receipt, receiptPending);
+    }
+
+    static String expenseType(String mode, boolean multiple) {
+        if ("personal".equals(mode)) return multiple ? "各自承担" : "个人支出";
+        return "custom".equals(mode) ? "自定义分摊" : "共同支出";
     }
 
 }

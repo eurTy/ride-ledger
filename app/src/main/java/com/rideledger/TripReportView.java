@@ -2,11 +2,13 @@ package com.rideledger;
 
 import android.app.Activity;
 import android.app.Dialog;
+import android.content.Context;
 import android.os.Build;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.widget.Button;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -19,10 +21,12 @@ import java.math.BigInteger;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.SortedSet;
 import java.util.TreeSet;
+import java.util.concurrent.Executor;
 
 /** Displays only aggregate figures from the confirmed part of a trip's ledger. */
 final class TripReportView {
@@ -39,11 +43,11 @@ final class TripReportView {
         style = new LedgerStyle(activity);
     }
 
-    static Dialog show(Activity activity, TripStatistics statistics) {
-        return new TripReportView(activity).display(statistics);
+    static Dialog show(Activity activity, TripStatistics statistics, Executor executor, Runnable convert) {
+        return new TripReportView(activity).display(statistics, executor, convert);
     }
 
-    private Dialog display(TripStatistics statistics) {
+    private Dialog display(TripStatistics statistics, Executor executor, Runnable convert) {
         Dialog dialog = new Dialog(activity, R.style.LedgerTheme);
         dialog.setTitle(TITLE);
         LinearLayout root = column();
@@ -56,11 +60,11 @@ final class TripReportView {
 
         ScrollView scroll = new ScrollView(activity);
         LinearLayout body = column();
-        int inset = style.dp(LedgerStyle.PAGE_INSET);
-        body.setPadding(inset, inset, inset, style.dp(24));
+        int inset = style.contentInset(style.windowWidth(), LedgerStyle.PAGE_INSET, LedgerStyle.PAGE_MAX_WIDTH);
+        body.setPadding(inset, style.dp(LedgerStyle.PAGE_INSET), inset, style.dp(24));
         scroll.addView(body, new ScrollView.LayoutParams(FULL, WRAP));
         root.addView(scroll, new LinearLayout.LayoutParams(FULL, 0, 1));
-        buildReport(body, statistics);
+        buildReport(body, statistics, executor, convert);
 
         Window window = dialog.getWindow();
         FormInput.fitActivityWindow(window, root);
@@ -70,7 +74,7 @@ final class TripReportView {
         return dialog;
     }
 
-    private void buildReport(LinearLayout body, TripStatistics statistics) {
+    private void buildReport(LinearLayout body, TripStatistics statistics, Executor executor, Runnable convert) {
         LinearLayout summary = card(body, true);
         summary.addView(style.heading(statistics.trip.name, 22));
         boolean solo = statistics.trip.people() == 1;
@@ -99,6 +103,20 @@ final class TripReportView {
         }
         addSection(body, section(report, "资金往来"));
         addSection(body, section(report, "账本提醒"));
+        if (report.settlement.isComplete()) addSettlementActions(body, statistics, executor, convert);
+    }
+
+    private void addSettlementActions(LinearLayout body, TripStatistics statistics, Executor executor, Runnable convert) {
+        List<LedgerSettlement.Debt> debts = statistics.report.settlement.byCurrency();
+        if (!debts.isEmpty()) {
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(WRAP, WRAP);
+            size.gravity = Gravity.END;
+            body.addView(style.button("汇率结算", LedgerStyle.Action.QUIET, convert), size);
+        }
+        Button share = style.button("一键分享结算", LedgerStyle.Action.PRIMARY, null);
+        body.addView(share, new LinearLayout.LayoutParams(FULL, WRAP));
+        share.setOnClickListener(view -> SettlementShare.send(activity, executor, share, statistics.trip.name, "",
+                debts, Collections.emptyMap(), statistics.settlementShareScope()));
     }
 
     private void addTotals(LinearLayout summary, LedgerReport.Section totals) {
@@ -109,7 +127,7 @@ final class TripReportView {
             if ("支出笔数".equals(entry.label)) {
                 caption(summary, entry.value + "支出", style.muted);
             } else {
-                summary.addView(new AmountTable(entry.amountColumns, 20), new LinearLayout.LayoutParams(FULL, WRAP));
+                addAmountTable(summary, style, entry.amountColumns, 20, false);
             }
         }
     }
@@ -134,7 +152,13 @@ final class TripReportView {
 
     private void amountGroup(LinearLayout card, LedgerReport.Entry entry, boolean member) {
         boolean singleMember = entry.memberTotals.size() == 1;
-        LinearLayout heading = new LinearLayout(activity);
+        addAmountHeading(card, style, entry.label, singleMember ? "" : entry.amountNote, member);
+        if (!singleMember) addAmountTable(card, style, entry.amountColumns, LedgerStyle.LABEL, member);
+        for (LedgerReport.Entry subtotal : entry.memberTotals) amountGroup(card, subtotal, true);
+    }
+
+    static void addAmountHeading(LinearLayout card, LedgerStyle style, String label, String detail, boolean member) {
+        LinearLayout heading = new LinearLayout(card.getContext());
         heading.setGravity(Gravity.CENTER_VERTICAL);
         heading.setBaselineAligned(false);
         int inset = member ? style.dp(LedgerStyle.CONTROL_GAP) : 0;
@@ -146,33 +170,37 @@ final class TripReportView {
             heading.setBackground(style.rounded(style.soft, 0, LedgerStyle.CONTROL_RADIUS));
             headingSize.topMargin = gap;
         }
-        TextView title = style.heading(entry.label, member ? MEMBER_TITLE_SIZE : LedgerStyle.LABEL);
+        TextView title = style.heading(label, member ? MEMBER_TITLE_SIZE : LedgerStyle.LABEL);
         heading.addView(title, new LinearLayout.LayoutParams(0, WRAP, 1));
-        if (!singleMember && !entry.amountNote.isEmpty()) {
-            TextView note = style.text(entry.amountNote, LedgerStyle.CAPTION, style.muted);
+        if (!detail.isEmpty()) {
+            TextView note = style.text(detail, LedgerStyle.CAPTION, style.muted);
             note.setPadding(style.dp(LedgerStyle.CONTROL_GAP), 0, 0, 0);
             heading.addView(note, new LinearLayout.LayoutParams(WRAP, WRAP));
         }
         card.addView(heading, headingSize);
-        if (!singleMember) {
-            AmountTable amounts = new AmountTable(entry.amountColumns, LedgerStyle.LABEL);
-            amounts.setPaddingRelative(inset, 0, 0, 0);
-            card.addView(amounts, new LinearLayout.LayoutParams(FULL, WRAP));
-        }
-        for (LedgerReport.Entry subtotal : entry.memberTotals) amountGroup(card, subtotal, true);
+    }
+
+    static void addAmountTable(LinearLayout card, LedgerStyle style, List<LedgerReport.AmountColumn> columns,
+                               int valueSize, boolean member) {
+        AmountTable amounts = new AmountTable(card.getContext(), style, columns, valueSize);
+        int inset = member ? style.dp(LedgerStyle.CONTROL_GAP) : 0;
+        amounts.setPaddingRelative(inset, 0, 0, 0);
+        card.addView(amounts, new LinearLayout.LayoutParams(FULL, WRAP));
     }
 
     /** Keeps metric columns aligned, with a per-currency layout when those columns cannot fit. */
-    private final class AmountTable extends LinearLayout {
+    private static final class AmountTable extends LinearLayout {
+        private final LedgerStyle style;
         private final List<LedgerReport.AmountColumn> columns;
         private final SortedSet<String> currencies = new TreeSet<>();
         private final int valueSize, tableWidth;
         private final HorizontalScrollView table;
         private Boolean stacked;
 
-        AmountTable(List<LedgerReport.AmountColumn> columns, int valueSize) {
-            super(TripReportView.this.activity);
+        AmountTable(Context context, LedgerStyle style, List<LedgerReport.AmountColumn> columns, int valueSize) {
+            super(context);
             setOrientation(VERTICAL);
+            this.style = style;
             this.columns = columns;
             this.valueSize = valueSize;
             for (LedgerReport.AmountColumn column : columns) currencies.addAll(column.values.keySet());
@@ -196,20 +224,20 @@ final class TripReportView {
         }
 
         private TableLayout grid() {
-            TableLayout grid = new TableLayout(activity);
+            TableLayout grid = new TableLayout(getContext());
             for (int i = 1; i <= columns.size(); i++) grid.setColumnStretchable(i, true);
             List<TableRow> rows = new ArrayList<>();
             if (columns.size() > 1) {
                 List<String> headers = new ArrayList<>();
                 headers.add("币种");
                 for (LedgerReport.AmountColumn column : columns) headers.add(column.label);
-                rows.add(amountRow(headers, true, valueSize));
+                rows.add(amountRow(getContext(), style, headers, true, valueSize));
             }
             for (String code : currencies) {
                 List<String> values = new ArrayList<>();
                 values.add(code);
                 for (LedgerReport.AmountColumn column : columns) values.add(amount(column, code));
-                TableRow row = amountRow(values, false, valueSize);
+                TableRow row = amountRow(getContext(), style, values, false, valueSize);
                 describe(row, description(code));
                 rows.add(row);
             }
@@ -224,7 +252,7 @@ final class TripReportView {
                 }
             }
             TextView currency = style.text("WWW", LedgerStyle.LABEL, style.muted);
-            int currencyWidth = (int) Math.ceil(currency.getPaint().measureText("WWW"));
+            int currencyWidth = LedgerStyle.textWidth(currency);
             for (TableRow row : rows) {
                 ((TextView) row.getChildAt(0)).setMinWidth(currencyWidth);
                 for (int i = 1; i < row.getChildCount(); i++) ((TextView) row.getChildAt(i)).setMinWidth(metricWidth);
@@ -234,20 +262,20 @@ final class TripReportView {
         }
 
         private LinearLayout stacked() {
-            LinearLayout stack = column();
+            LinearLayout stack = column(getContext());
             for (String code : currencies) {
-                LinearLayout group = column();
+                LinearLayout group = column(getContext());
                 TextView currency = style.heading(code, LedgerStyle.LABEL);
                 currency.setTextColor(style.muted);
                 currency.setPadding(0, style.dp(LedgerStyle.ITEM_GAP), 0, style.dp(LedgerStyle.ITEM_GAP));
                 group.addView(currency);
-                TableLayout metrics = new TableLayout(activity);
+                TableLayout metrics = new TableLayout(getContext());
                 metrics.setColumnStretchable(1, true);
                 for (LedgerReport.AmountColumn column : columns) {
                     List<String> values = new ArrayList<>();
                     values.add(column.label);
                     values.add(amount(column, code));
-                    metrics.addView(amountRow(values, false, valueSize));
+                    metrics.addView(amountRow(getContext(), style, values, false, valueSize));
                 }
                 group.addView(overflow(metrics), new LinearLayout.LayoutParams(FULL, WRAP));
                 describe(group, description(code));
@@ -265,8 +293,8 @@ final class TripReportView {
         }
     }
 
-    private TableRow amountRow(List<String> values, boolean header, int valueSize) {
-        TableRow row = new TableRow(activity);
+    private static TableRow amountRow(Context context, LedgerStyle style, List<String> values, boolean header, int valueSize) {
+        TableRow row = new TableRow(context);
         row.setGravity(Gravity.CENTER_VERTICAL);
         int gap = style.dp(LedgerStyle.ITEM_GAP);
         row.setPadding(0, gap, 0, gap);
@@ -288,9 +316,9 @@ final class TripReportView {
         return row;
     }
 
-    private HorizontalScrollView overflow(TableLayout table) {
+    private static HorizontalScrollView overflow(TableLayout table) {
         // Normal figures fill the available width; only exceptionally long integers need scrolling.
-        HorizontalScrollView scroll = new HorizontalScrollView(activity);
+        HorizontalScrollView scroll = new HorizontalScrollView(table.getContext());
         scroll.setFillViewport(true);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         scroll.addView(table, new HorizontalScrollView.LayoutParams(WRAP, WRAP));
@@ -359,7 +387,11 @@ final class TripReportView {
     }
 
     private LinearLayout column() {
-        LinearLayout layout = new LinearLayout(activity);
+        return column(activity);
+    }
+
+    private static LinearLayout column(Context context) {
+        LinearLayout layout = new LinearLayout(context);
         layout.setOrientation(LinearLayout.VERTICAL);
         return layout;
     }

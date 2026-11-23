@@ -6,6 +6,7 @@ import org.json.JSONObject;
 import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStreamWriter;
+import java.io.StringWriter;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPairGenerator;
@@ -21,6 +22,7 @@ final class LedgerReportChecks {
         revisedTrip();
         exchangesByMember();
         overflowAndEmpty();
+        csvExport();
     }
 
     private static void revisedTrip() throws Exception {
@@ -55,7 +57,15 @@ final class LedgerReportChecks {
                 new LedgerReceipts.Entry("custom", 1, "photo2", false, 0),
                 new LedgerReceipts.Entry("personal", 2, "", false, 0),
                 new LedgerReceipts.Entry("deleted", 1, "photo3", true, 2));
-        LedgerReport report = LedgerReport.from(new LedgerStore.Snapshot(trip, events, receipts));
+        LedgerStore.Snapshot snapshot = new LedgerStore.Snapshot(trip, events, receipts);
+        LedgerReport report = LedgerReport.from(snapshot);
+        LedgerReview cashReview = new LedgerReview(trip, snapshot.totals());
+
+        equal("24899", cashReview.cashTotal.get("CNY").toString(), "cash total adds member balances");
+        equal("2", cashReview.cashTotal.get("JPY").toString(), "cash total keeps JPY separate");
+        equal("-1234", cashReview.cashTotal.get("KWD").toString(), "cash total retains negative balances");
+        equal("17899", cashReview.balances.get(0).amounts.get("CNY").toString(), "first member cash is unchanged");
+        equal("7000", cashReview.balances.get(1).amounts.get("CNY").toString(), "second member cash is unchanged");
 
         equal("冬日旅行", report.tripName, "trip name");
         equal("阿青、阿林、阿海", report.members, "member order");
@@ -75,6 +85,9 @@ final class LedgerReportChecks {
         equal("1 笔\n换出 50.00 CNY\n换入 103 JPY", entry(report, "资金往来", "换汇"), "exchange legs");
         equal("178.99 CNY、103 JPY", entry(report, "当前现金", "阿青"), "cash arithmetic");
         equal("3.67 CNY", entry(report, "当前结算", "阿林 → 阿青"), "settlement after repayment");
+        require(report.settlement.isComplete() && report.settlement.byCurrency().stream().anyMatch(debt ->
+                "阿林".equals(debt.payer) && "阿青".equals(debt.recipient) && debt.amounts.contains("3.67 CNY")),
+                "shareable settlement diverged from report totals");
         LedgerReport.Entry member = reportEntry(report, "成员付款与承担", "阿青");
         require(member.amountColumns.size() == 2 && "已付".equals(member.amountColumns.get(0).label)
                         && "分摊".equals(member.amountColumns.get(1).label),
@@ -155,8 +168,47 @@ final class LedgerReportChecks {
         equal("184467440737095516.14", entry(large, "支出总计", "CNY"), "overflow expense total");
         equal("金额超出汇总范围", entry(large, "当前现金", ""), "overflow cash warning");
         equal("金额超出汇总范围", entry(large, "当前结算", ""), "overflow settlement warning");
+        require(!large.settlement.isComplete(), "incomplete balances were shareable");
         require(large.records.size() == 2 && entry(large, "账本提醒", "汇总范围").contains("汇总范围"),
                 "overflow hid records or omitted the warning");
+    }
+
+    private static void csvExport() throws Exception {
+        String id = UUID.randomUUID().toString();
+        String key = Team.encode(KeyPairGenerator.getInstance("EC").generateKeyPair().getPublic().getEncoded());
+        Team team = new Team(id, UUID.randomUUID().toString(), key, Arrays.asList("=阿,青", "阿林"));
+        LedgerStore.Trip trip = new LedgerStore.Trip(id, "表格导出", "", "", "", "m1", team);
+        long at = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).parse("2026-01-10 12:00:17").getTime();
+        JSONObject multiple = money("KWD", 1234).put("mode", "custom")
+                .put("payments", new JSONObject().put("m1", 123).put("m2", 1111))
+                .put("shares", new JSONObject().put("m1", 617).put("m2", 617));
+        List<LedgerStore.Event> events = Arrays.asList(
+                event(trip, "initial", "expense", at, multiple),
+                event(trip, "opening", "opening", at + 1000, money("CNY", 30000).put("person", "m2")),
+                event(trip, "repayment", "transfer", at + 2000,
+                        money("USD", 1123).put("from", "m2").put("to", "m1")),
+                event(trip, "exchange", "exchange", at + 3000, new JSONObject().put("person", "m2")
+                        .put("fromCurrency", "CNY").put("fromAmount", 5000).put("toCurrency", "JPY").put("toAmount", 103)),
+                event(trip, "deleted", "expense", at + 4000,
+                        expense("m1", "USD", 99, "personal", "已删除的备注", team.shares(99, "m1", true))),
+                event(trip, "delete-marker", "delete", at + 5000, new JSONObject().put("target", "deleted")),
+                noteEdit(trip, "note-edit", at + 6000, multiple, "【餐食】 =1+1,\"晚餐\"\n次日"));
+        StringWriter writer = new StringWriter();
+        LedgerCsv.write(writer, new LedgerStore.Snapshot(trip, events));
+        String csv = writer.toString();
+        String[] rows = csv.split("\r\n");
+        require(csv.startsWith("\ufeff记账时间,类型,分类,币种,金额,") &&
+                        rows[0].endsWith("\"实付 · =阿,青\",\"分摊 · =阿,青\",实付 · 阿林,分摊 · 阿林"),
+                "CSV omitted UTF-8 BOM or member columns did not escape the member name");
+        require(rows.length == 5 && !csv.contains("已删除的备注"), "CSV did not export one row per visible record");
+        require(rows[1].contains(",换汇,,CNY,50.00,,,阿林,JPY,103,") &&
+                        rows[2].contains(",还款,,USD,11.23,阿林,\"'=阿,青\",") &&
+                        rows[3].contains(",现金入账,,CNY,300.00,,,阿林,"),
+                "CSV omitted cash movement members, currencies or amounts");
+        require(rows[4].startsWith("2026-01-10 12:00:17,自定义分摊,餐食,KWD,1.234,\"'=阿,青、阿林\",") &&
+                        rows[4].contains("\"'=1+1,\"\"晚餐\"\"\n次日\"") &&
+                        rows[4].endsWith(",0.123,0.617,1.111,0.617"),
+                "CSV lost the original time, revised note, formula protection or exact contributions");
     }
 
     private static JSONObject money(String code, long amount) throws Exception {

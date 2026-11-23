@@ -199,6 +199,7 @@ final class PeerSync {
     private static final class Transfer {
         boolean stored, receiptsChanged;
         String verifiedRoute;
+        SyncEngine.FailureStage stage = SyncEngine.FailureStage.CONNECT;
     }
 
     private void outgoing(PeerRoutePolicy.Endpoint endpoint, long captured, boolean ledgerSync) {
@@ -213,6 +214,7 @@ final class PeerSync {
                 try {
                     if (!running || epoch != generation) return;
                     connection = endpoint.dial.call();
+                    transfer.stage = SyncEngine.FailureStage.HANDSHAKE;
                     ScheduledExecutorService watchdog = track(connection, endpoint.channel, generation);
                     if (watchdog == null) return;
                     boolean admission = team != null && !ledgerSync;
@@ -227,7 +229,10 @@ final class PeerSync {
                                     admission ? () -> channel.watch(watchdog) : () -> { }).exchange(connection.wire(), endpoint.peerId)
                             : legacy.exchange(connection.wire(), endpoint.modern);
                     if (!running || epoch != generation) return;
-                    if (!result.complete || !result.authenticated) throw new IllegalStateException("保存确认待重试");
+                    if (!result.complete || !result.authenticated) {
+                        if (result.authenticated) transfer.stage = SyncEngine.FailureStage.CONFIRMATION;
+                        throw new IllegalStateException("保存确认待重试");
+                    }
                     PeerRoutePolicy.Endpoint reverse = callbackEndpoint(connection, result);
                     if (result.receiptError == null) transfer.verifiedRoute = endpoint.key;
                     onMain(generation, () -> {
@@ -240,8 +245,12 @@ final class PeerSync {
                     });
                 } catch (Exception error) {
                     int added = legacy == null ? 0 : legacy.progress().added;
+                    PeerConnection failedConnection = connection;
                     onMain(generation, () -> {
-                        if (ledgerSync) engine.failed(endpoint); else routes.failure(endpoint.key);
+                        if (ledgerSync) {
+                            engine.recordFailure(failedConnection, endpoint, endpoint.channel, transfer.stage);
+                            engine.failed(endpoint);
+                        } else routes.failure(endpoint.key);
                         failed(endpoint.channel, error, added);
                     });
                 } finally {
@@ -274,6 +283,7 @@ final class PeerSync {
                 PeerProtocol legacy = null;
                 boolean[] counted = {false};
                 Transfer transfer = new Transfer();
+                transfer.stage = SyncEngine.FailureStage.HANDSHAKE;
                 try (PeerConnection peer = connection) {
                     if (!running || epoch != generation) return;
                     PeerProtocol.Listener callbacks = callbacks(peer, "", channel, address, generation, transfer, () -> {
@@ -286,7 +296,10 @@ final class PeerSync {
                     PeerProtocol.Result result = legacy == null ? teamProtocol(callbacks, generation, peer.listenerPort, channel, () -> { }).accept(peer.wire())
                             : legacy.accept(peer.wire());
                     if (result == null || !running || epoch != generation) return;
-                    if (!result.complete) throw new IllegalStateException("保存确认待重试");
+                    if (!result.complete) {
+                        if (result.authenticated) transfer.stage = SyncEngine.FailureStage.CONFIRMATION;
+                        throw new IllegalStateException("保存确认待重试");
+                    }
                     if (result.authenticated) {
                         PeerRoutePolicy.Endpoint reverse = callbackEndpoint(peer, result);
                         if (result.receiptError == null) transfer.verifiedRoute = reverse == null ? "" : reverse.key;
@@ -297,7 +310,10 @@ final class PeerSync {
                     }
                 } catch (Exception error) {
                     int added = legacy == null ? 0 : legacy.progress().added;
-                    onMain(generation, () -> failed(channel, error, added));
+                    onMain(generation, () -> {
+                        if (ledgerSync) engine.recordFailure(connection, null, channel, transfer.stage);
+                        failed(channel, error, added);
+                    });
                 } finally {
                     connections.remove(connection);
                     finishTransfer(generation, connection, channel, transfer, ledgerSync ? captured : -1);
@@ -341,6 +357,7 @@ final class PeerSync {
         return new PeerProtocol.Listener() {
             @Override public void authenticated(String peerId) {
                 if (!running || epoch != generation) return;
+                transfer.stage = SyncEngine.FailureStage.LEDGER;
                 if (team == null && !key.isEmpty()) routes.remember(key, peerId, true);
                 if (channel == PeerRoutePolicy.Channel.BLUETOOTH) radios.rememberBluetooth(address, peerId);
                 if (engine != null)
@@ -413,6 +430,9 @@ final class PeerSync {
     }
     String status() { return engine != null && enrolled ? syncState().label() : summary; }
     SyncEngine.Status syncState() { return engine == null ? SyncEngine.Status.EMPTY : engine.status(); }
+    List<SyncEngine.PeerDetail> syncDetails(LedgerStore.Trip trip) throws org.json.JSONException {
+        return engine == null ? java.util.Collections.emptyList() : engine.details(trip);
+    }
     void refreshBluetooth() { radios.refreshTeamBluetooth(); }
     boolean initialHistoryReceived() { return initialHistory; }
     boolean hasContact() { return engine != null && engine.hasContact(); }

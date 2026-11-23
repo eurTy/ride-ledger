@@ -26,6 +26,9 @@
         <receiver android:name="com.rideledger.SyncBleWake" android:exported="false" />
         <provider android:name="com.rideledger.ReceiptCamera" android:authorities="com.rideledger.synctest.receipt-camera"
             android:exported="false" android:grantUriPermissions="true" />
+        <provider android:name="com.rideledger.SettlementShareProvider"
+            android:authorities="com.rideledger.synctest.settlement-share"
+            android:exported="false" android:grantUriPermissions="true" />
         <activity android:name="com.rideledger.InviteScannerActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name="com.rideledger.ReceiptCaptureActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name="com.rideledger.TeamSetupActivity" android:exported="false" />

@@ -25,7 +25,7 @@ final class ConnectionBadge extends TextView {
     private enum Symbol { WIFI, HOTSPOT, BLUETOOTH, OFFLINE, REFRESH, SEARCH }
     private boolean searching;
 
-    ConnectionBadge(Context context, Runnable reconnect) {
+    ConnectionBadge(Context context, Runnable reconnect, Runnable details) {
         super(context);
         style = new LedgerStyle(context);
         setTextSize(11);
@@ -37,6 +37,10 @@ final class ConnectionBadge extends TextView {
         setPadding(dp(4), 0, dp(4), 0);
         setBackground(style.ripple(null, LedgerStyle.CONTROL_RADIUS));
         setOnClickListener(view -> reconnect.run());
+        setOnLongClickListener(view -> {
+            details.run();
+            return true;
+        });
     }
 
     void update(LedgerStore.Trip trip, SyncEngine.Status state) {
@@ -87,7 +91,11 @@ final class ConnectionBadge extends TextView {
 
     @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
         super.onInitializeAccessibilityNodeInfo(info);
-        if (isEnabled()) info.setClassName(Button.class.getName());
+        if (isEnabled()) {
+            info.setClassName(Button.class.getName());
+            info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                    AccessibilityNodeInfo.ACTION_LONG_CLICK, "查看同步详情"));
+        }
     }
 
     private static String shortName(String name) {
@@ -95,7 +103,7 @@ final class ConnectionBadge extends TextView {
         return name.substring(0, name.offsetByCodePoints(0, NAME_LIMIT)) + "…";
     }
 
-    private static String channelName(PeerRoutePolicy.Channel channel) {
+    static String channelName(PeerRoutePolicy.Channel channel) {
         if (channel == PeerRoutePolicy.Channel.BLUETOOTH) return "蓝牙";
         return channel == PeerRoutePolicy.Channel.HOTSPOT ? "热点" : "Wi-Fi";
     }

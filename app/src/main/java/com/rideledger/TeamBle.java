@@ -53,6 +53,9 @@ final class TeamBle {
 
     private static final long ADVERTISEMENT_AGE = 35000;
     private static final long SCAN_INTERVAL = 60000, SCAN_WINDOW = 12000;
+    private static final long SCAN_LIFETIME = 60000, SCAN_RESTART_PAUSE = 1000;
+    private static final long SCAN_START_INTERVAL = 8000, SCAN_QUOTA_COOLDOWN = 30000;
+    private static final long FIRST_RADIO_RETRY = 5000, MAX_RADIO_RETRY = 60000;
     private final Context context;
     private final BluetoothAdapter adapter;
     private final ParcelUuid scope;
@@ -67,19 +70,20 @@ final class TeamBle {
     private BluetoothLeScanner scanner;
     private AdvertiseCallback advertisement;
     private ScanCallback scan;
-    private long retryScan, retryAdvertise;
-    private int scanFailures, advertiseFailures;
+    private long retryScan, retryAdvertise, nextScanStart;
+    private long scanRetryDelay = FIRST_RADIO_RETRY, advertiseRetryDelay = FIRST_RADIO_RETRY;
     private boolean background, receiverRegistered, windowedDiscovery, scanWindowOpen;
     private volatile ScheduledExecutorService timer;
     private final Runnable expire = this::refresh;
     private final Runnable retryRadio = this::refresh;
+    private final Runnable renewScan = this::renewScan;
     private final Runnable beginWindow = this::beginDiscoveryWindow;
     private final Runnable endWindow = this::endDiscoveryWindow;
     private final BroadcastReceiver radio = new BroadcastReceiver() {
         @Override public void onReceive(Context ignored, Intent intent) {
             int state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR);
             if (state != BluetoothAdapter.STATE_ON && state != BluetoothAdapter.STATE_OFF) return;
-            scanFailures = advertiseFailures = 0;
+            scanRetryDelay = advertiseRetryDelay = FIRST_RADIO_RETRY;
             retryScan = retryAdvertise = 0;
             if (state == BluetoothAdapter.STATE_ON && windowedDiscovery) beginDiscoveryWindow();
             else refresh();
@@ -117,7 +121,7 @@ final class TeamBle {
         this.background = background;
         this.windowedDiscovery = windowedDiscovery;
         active = true;
-        scanFailures = advertiseFailures = 0;
+        scanRetryDelay = advertiseRetryDelay = FIRST_RADIO_RETRY;
         retryScan = 0;
         retryAdvertise = 0;
         IntentFilter filter = new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED);
@@ -143,21 +147,30 @@ final class TeamBle {
     private void endDiscoveryWindow() {
         scanWindowOpen = false;
         stopScan();
-        if (active && retryScan != Long.MAX_VALUE)
-            main.postDelayed(beginWindow, SCAN_INTERVAL - SCAN_WINDOW);
+        if (active) main.postDelayed(beginWindow, SCAN_INTERVAL - SCAN_WINDOW);
+        scheduleRadioRetry();
     }
 
     void permissionsChanged() {
-        if (windowedDiscovery && !scanWindowOpen && !main.hasCallbacks(beginWindow) && retryScan != Long.MAX_VALUE)
+        if (windowedDiscovery && !scanWindowOpen && !main.hasCallbacks(beginWindow))
             beginDiscoveryWindow();
         else refresh();
     }
 
     void rediscover() {
+        if (!active) return;
         retryScan = retryAdvertise = 0;
-        scanFailures = advertiseFailures = 0;
-        main.removeCallbacks(retryRadio);
-        refresh();
+        scanRetryDelay = advertiseRetryDelay = FIRST_RADIO_RETRY;
+        long wait = nextScanStart - SystemClock.elapsedRealtime();
+        if (scan != null && wait > 0) {
+            // Give a newly registered scan time to run before registering another callback.
+            main.removeCallbacks(renewScan);
+            main.postDelayed(renewScan, wait);
+        } else stopScan();
+        // Rebind an idle listener with its advertisement. An active exchange may still advertise its port.
+        if (sockets.isEmpty()) stopAdvertising();
+        if (windowedDiscovery) beginDiscoveryWindow();
+        else refresh();
     }
 
     void refresh() {
@@ -181,8 +194,9 @@ final class TeamBle {
         }
         main.removeCallbacks(expire);
         if (next != Long.MAX_VALUE) main.postDelayed(expire, next - now);
-        if (scan == null && now >= retryScan && canDiscover()) startScan();
+        if (scan == null && now >= Math.max(retryScan, nextScanStart) && canDiscover()) startScan();
         if (server == null && now >= retryAdvertise) startAdvertising();
+        scheduleRadioRetry();
     }
 
     static boolean canScan(Context context, boolean background) {
@@ -202,25 +216,38 @@ final class TeamBle {
     }
 
     private void startScan() {
-        retryScan = SystemClock.elapsedRealtime() + 15000;
+        nextScanStart = SystemClock.elapsedRealtime() + SCAN_START_INTERVAL;
         try {
             scanner = adapter.getBluetoothLeScanner();
             if (scanner == null) { radioFailed(true, "Unavailable"); return; }
             scan = new ScanCallback() {
                 @Override public void onScanResult(int type, ScanResult result) {
                     main.post(() -> {
-                        if (active && scan == this && found(result, false)) scanFailures = 0;
+                        if (active && scan == this && found(result, false)) scanRetryDelay = FIRST_RADIO_RETRY;
                     });
                 }
                 @Override public void onScanFailed(int errorCode) {
-                    main.post(() -> { if (scan == this) radioFailed(true, Integer.toString(errorCode)); });
+                    main.post(() -> {
+                        if (scan != this) return;
+                        if (errorCode == ScanCallback.SCAN_FAILED_SCANNING_TOO_FREQUENTLY)
+                            nextScanStart = SystemClock.elapsedRealtime() + SCAN_QUOTA_COOLDOWN;
+                        radioFailed(true, Integer.toString(errorCode));
+                    });
                 }
             };
             ScanFilter filter = new ScanFilter.Builder().setServiceData(scope, new byte[0]).build();
             scanner.startScan(Collections.singletonList(filter),
                     new ScanSettings.Builder().setScanMode(background ? ScanSettings.SCAN_MODE_LOW_POWER :
                             ScanSettings.SCAN_MODE_LOW_LATENCY).build(), scan);
+            // A long-lived registration can stop delivering results without an onScanFailed callback.
+            if (!windowedDiscovery) main.postDelayed(renewScan, SCAN_LIFETIME);
         } catch (Exception error) { radioFailed(true, error.getClass().getSimpleName()); }
+    }
+
+    private void renewScan() {
+        stopScan();
+        retryScan = SystemClock.elapsedRealtime() + SCAN_RESTART_PAUSE;
+        refresh();
     }
 
     boolean discovered(List<ScanResult> results) {
@@ -267,7 +294,6 @@ final class TeamBle {
     }
 
     private void startAdvertising() {
-        retryAdvertise = SystemClock.elapsedRealtime() + 15000;
         try {
             advertiser = adapter.getBluetoothLeAdvertiser();
             if (advertiser == null) { radioFailed(false, "Unavailable"); return; }
@@ -279,6 +305,9 @@ final class TeamBle {
             payload[1] = (byte) psm;
             for (int i = 0; i < 6; i++) payload[i + 2] = (byte) Integer.parseInt(hint.substring(i * 2, i * 2 + 2), 16);
             advertisement = new AdvertiseCallback() {
+                @Override public void onStartSuccess(AdvertiseSettings settings) {
+                    main.post(() -> { if (advertisement == this) advertiseRetryDelay = FIRST_RADIO_RETRY; });
+                }
                 @Override public void onStartFailure(int errorCode) {
                     main.post(() -> { if (advertisement == this) radioFailed(false, Integer.toString(errorCode)); });
                 }
@@ -340,6 +369,7 @@ final class TeamBle {
     }
 
     private void stopScan() {
+        main.removeCallbacks(renewScan);
         ScanCallback previous = scan;
         scan = null;
         if (previous != null && scanner != null) try { scanner.stopScan(previous); } catch (Exception ignored) { }
@@ -378,13 +408,23 @@ final class TeamBle {
     }
 
     private void radioFailed(boolean scanning, String code) {
-        if (scanning) stopScan(); else stopAdvertising();
-        int failures = scanning ? ++scanFailures : ++advertiseFailures;
+        long now = SystemClock.elapsedRealtime();
+        if (scanning) {
+            stopScan();
+            retryScan = now + scanRetryDelay;
+            scanRetryDelay = Math.min(MAX_RADIO_RETRY, scanRetryDelay * 2);
+        } else {
+            stopAdvertising();
+            retryAdvertise = now + advertiseRetryDelay;
+            advertiseRetryDelay = Math.min(MAX_RADIO_RETRY, advertiseRetryDelay * 2);
+        }
         SyncLog.write(context, scanning ? SyncLog.Event.BLE_SCAN : SyncLog.Event.BLE_ADVERTISE, code);
-        long retryAt = failures <= 3 ? SystemClock.elapsedRealtime() + (5000L << (failures - 1)) : Long.MAX_VALUE;
-        if (scanning) retryScan = retryAt; else retryAdvertise = retryAt;
+        scheduleRadioRetry();
+    }
+
+    private void scheduleRadioRetry() {
         main.removeCallbacks(retryRadio);
-        long next = Math.min(scan == null && canDiscover() ? retryScan : Long.MAX_VALUE,
+        long next = Math.min(scan == null && canDiscover() ? Math.max(retryScan, nextScanStart) : Long.MAX_VALUE,
                 server == null ? retryAdvertise : Long.MAX_VALUE);
         if (active && next != Long.MAX_VALUE)
             main.postDelayed(retryRadio, Math.max(1, next - SystemClock.elapsedRealtime()));

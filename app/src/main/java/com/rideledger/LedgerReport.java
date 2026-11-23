@@ -69,15 +69,20 @@ final class LedgerReport {
     final String tripName, members, period, generatedAt;
     final List<Section> sections;
     final List<LedgerReview.Row> records;
+    final LedgerSettlement settlement;
+    final boolean financialConflict;
 
     private LedgerReport(String tripName, String members, String period, String generatedAt,
-                         List<Section> sections, List<LedgerReview.Row> records) {
+                         List<Section> sections, List<LedgerReview.Row> records,
+                         LedgerSettlement settlement, boolean financialConflict) {
         this.tripName = tripName;
         this.members = members;
         this.period = period;
         this.generatedAt = generatedAt;
         this.sections = Collections.unmodifiableList(sections);
         this.records = Collections.unmodifiableList(records);
+        this.settlement = settlement;
+        this.financialConflict = financialConflict;
     }
 
     static LedgerReport from(LedgerStore.Snapshot snapshot) {
@@ -105,14 +110,18 @@ final class LedgerReport {
             if (row.event.conflicted()) conflicts++;
             switch (row.event.kind) {
                 case "expense": {
+                    ExpensePayments payments;
+                    try { payments = ExpensePayments.read(data); }
+                    catch (org.json.JSONException | IllegalArgumentException invalid) { break; }
                     spending.add(code, amount);
                     add(types, row.type, code, amount);
                     add(categories, ExpenseCategory.fromNote(row.note), code, amount);
                     add(days, day(row), code, amount);
-                    add(paid, data.optString("payer"), code, amount);
                     List<String> split = new ArrayList<>();
                     for (int i = 0; i < trip.people(); i++) {
                         String member = trip.member(i);
+                        long payment = payments.minor(member);
+                        if (payment > 0) add(paid, member, code, payment);
                         long share = share(trip, data, member, i);
                         if (share == 0) continue;
                         add(shares, member, code, share);
@@ -157,7 +166,8 @@ final class LedgerReport {
         sections.add(new Section("支出总计", totals));
 
         List<Entry> byType = new ArrayList<>(), byCategory = new ArrayList<>(), byDay = new ArrayList<>();
-        for (String type : new String[]{"共同支出", "个人支出", "自定义分摊"}) addSubtotal(byType, type, types.get(type));
+        for (String type : new String[]{"共同支出", "个人支出", "各自承担", "自定义分摊"})
+            addSubtotal(byType, type, types.get(type));
         categories.forEach((category, amounts) -> addSubtotal(byCategory, category.label, amounts));
         days.forEach((date, amounts) -> addSubtotal(byDay, date, amounts));
         sections.add(section("支出类型", byType, "暂无支出"));
@@ -218,7 +228,8 @@ final class LedgerReport {
             period = first.equals(last) ? first : first + " 至 " + last;
         }
         String generated = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA).format(new Date());
-        return new LedgerReport(trip.name, String.join("、", memberNames), period, generated, sections, records);
+        return new LedgerReport(trip.name, String.join("、", memberNames), period, generated, sections, records,
+                review.settlementAmounts, review.financialConflict);
     }
 
     private static Map<String, Long> cash(LedgerStore.Trip trip, LedgerStore.Summary summary, String member, int index) {
@@ -242,7 +253,7 @@ final class LedgerReport {
         return entries;
     }
 
-    private static long share(LedgerStore.Trip trip, JSONObject data, String member, int index) {
+    static long share(LedgerStore.Trip trip, JSONObject data, String member, int index) {
         if (trip.team != null) return data.optJSONObject("shares").optLong(member);
         long amount = data.optLong("amount"), first = Money.shareA(amount, data.optInt("shareA"));
         return index == 0 ? first : amount - first;

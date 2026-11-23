@@ -18,6 +18,15 @@ final class TripStatistics {
         this.canVerifyTeam = canVerifyTeam;
     }
 
+    List<String> settlementShareScope() {
+        List<String> scope = new ArrayList<>();
+        scope.add(pending ? "仅包含已同步账目 · 还有账目待同步"
+                : trip.people() == 1 ? "按本机账目计算" : "按已同步账目计算");
+        if (report.financialConflict) scope.add("有账目待核对，暂按当前显示版本计算");
+        scope.add("报告生成于 " + report.generatedAt);
+        return scope;
+    }
+
     static TripStatistics load(Context context, LedgerStore store, String tripId) {
         LedgerStore.Snapshot snapshot = store.snapshot(tripId);
         LedgerStore.Trip trip = snapshot.trip;

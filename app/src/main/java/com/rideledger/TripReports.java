@@ -13,16 +13,18 @@ final class TripReports {
     private final Activity activity;
     private final LedgerStore store;
     private final Executor reader;
+    private final LedgerForms forms;
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean foreground;
     private int reportRequest;
     private Dialog reportDialog;
     private String openTripId;
 
-    TripReports(Activity activity, LedgerStore store, Executor reader) {
+    TripReports(Activity activity, LedgerStore store, Executor reader, LedgerForms forms) {
         this.activity = activity;
         this.store = store;
         this.reader = reader;
+        this.forms = forms;
     }
 
     void start() { foreground = true; }
@@ -61,7 +63,7 @@ final class TripReports {
 
     private void showResult(TripStatistics statistics) {
         if (reportDialog != null) reportDialog.dismiss();
-        Dialog dialog = TripReportView.show(activity, statistics);
+        Dialog dialog = TripReportView.show(activity, statistics, reader, () -> forms.showReportSettlement(statistics));
         reportDialog = dialog;
         openTripId = statistics.trip.id;
         dialog.setOnDismissListener(ignored -> {

@@ -79,10 +79,13 @@ final class LedgerTotals {
                 changes.add(summary.teamCash.computeIfAbsent(d.getString("person"), id -> new HashMap<>()), currency, amount);
                 break;
             case "expense": {
-                String payer = d.getString("payer");
-                changes.add(summary.teamCash.computeIfAbsent(payer, id -> new HashMap<>()), currency, -amount);
                 changes.add(summary.spent, currency, amount);
-                changes.add(summary.teamNet.computeIfAbsent(payer, id -> new HashMap<>()), currency, amount);
+                for (Map.Entry<String, Long> payment : ExpensePayments.read(d).amounts().entrySet()) {
+                    String member = payment.getKey();
+                    long paid = payment.getValue();
+                    changes.add(summary.teamCash.computeIfAbsent(member, id -> new HashMap<>()), currency, -paid);
+                    changes.add(summary.teamNet.computeIfAbsent(member, id -> new HashMap<>()), currency, paid);
+                }
                 JSONObject shares = d.getJSONObject("shares");
                 java.util.Iterator<String> keys = shares.keys();
                 while (keys.hasNext()) {

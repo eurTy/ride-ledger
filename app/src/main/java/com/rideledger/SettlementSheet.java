@@ -1,5 +1,6 @@
 package com.rideledger;
 
+import android.app.Activity;
 import android.graphics.Rect;
 import android.text.Editable;
 import android.text.InputType;
@@ -7,6 +8,7 @@ import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TableLayout;
@@ -20,10 +22,15 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executor;
 
 /** Edits the rates for one on-screen settlement estimate. */
 final class SettlementSheet {
     final String tripId;
+    private final Activity activity;
+    private final LedgerStore.Trip trip;
+    private final Executor executor;
+    private final List<String> shareScope;
     private final LinearLayout form, result;
     private final TableLayout rates;
     private final EditText target;
@@ -35,15 +42,21 @@ final class SettlementSheet {
     private TextView error;
     private String targetCode = "";
 
-    SettlementSheet(String tripId, LinearLayout form, LinearLayout fields, EditText target, LedgerStyle style, LedgerReview review) {
-        this.tripId = tripId;
+    SettlementSheet(Activity activity, LedgerStore.Trip trip, LinearLayout form, LinearLayout fields, EditText target,
+                    LedgerStyle style, LedgerSettlement settlement, boolean financialConflict,
+                    Executor executor, List<String> shareScope) {
+        tripId = trip.id;
+        this.activity = activity;
+        this.trip = trip;
+        this.executor = executor;
+        this.shareScope = shareScope;
         this.form = form;
         this.target = target;
         this.style = style;
         rateWidthLimit = Math.max(style.dp(56), fields.getLayoutParams().width * 2 / 5);
-        settlement = review.settlementAmounts;
+        this.settlement = settlement;
         conflict = style.text("有账目待核对，暂按当前显示版本计算", LedgerStyle.CAPTION, style.warning);
-        conflict.setVisibility(review.financialConflict ? View.VISIBLE : View.GONE);
+        conflict.setVisibility(financialConflict ? View.VISIBLE : View.GONE);
         fields.addView(conflict, new LinearLayout.LayoutParams(-1, -2));
         rates = new TableLayout(form.getContext());
         rates.setColumnStretchable(0, true);
@@ -86,8 +99,13 @@ final class SettlementSheet {
     void calculate(TextView error) {
         this.error = error;
         clearResult();
+        String currency;
+        Map<String, String> usedQuotes = quotes();
         List<LedgerSettlement.Debt> debts;
-        try { debts = settlement.convert(target.getText().toString(), quotes()); }
+        try {
+            currency = Money.code(target.getText().toString());
+            debts = settlement.convert(currency, usedQuotes);
+        }
         catch (IllegalArgumentException invalid) { showError(invalid.getMessage()); return; }
 
         TextView title = style.heading("结算结果", LedgerStyle.LABEL);
@@ -102,6 +120,14 @@ final class SettlementSheet {
             result.addView(direction);
             TextView amount = style.heading(debt.amounts.get(0), 20);
             result.addView(amount, new LinearLayout.LayoutParams(-1, -2));
+        }
+        if (shareScope != null) {
+            Button share = style.button("分享结算单", LedgerStyle.Action.OUTLINE, null);
+            LinearLayout.LayoutParams shareSize = new LinearLayout.LayoutParams(-2, -2);
+            shareSize.topMargin = style.dp(LedgerStyle.CONTROL_GAP);
+            result.addView(share, shareSize);
+            share.setOnClickListener(view ->
+                    SettlementShare.send(activity, executor, share, trip.name, currency, debts, usedQuotes, shareScope));
         }
         form.requestFocus();
         InputMethodManager keyboard = form.getContext().getSystemService(InputMethodManager.class);
@@ -153,8 +179,7 @@ final class SettlementSheet {
         input.setHint("汇率");
         input.setText(previous);
         style.input(input);
-        int digitsWidth = (int) Math.ceil(input.getPaint().measureText("0.00000000"))
-                + input.getPaddingLeft() + input.getPaddingRight();
+        int digitsWidth = LedgerStyle.textWidth(input, "0.00000000");
         int inputWidth = Math.min(Math.max(style.dp(96), digitsWidth), rateWidthLimit);
         row.addView(input, new TableRow.LayoutParams(inputWidth, -2));
         TextView code = style.text(targetCode, LedgerStyle.LABEL, style.muted);

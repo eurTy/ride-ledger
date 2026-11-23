@@ -2,7 +2,6 @@ package com.rideledger;
 
 import android.app.AlertDialog;
 import android.content.Context;
-import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
@@ -26,11 +25,14 @@ import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
 
-import java.util.ArrayList;
+import java.math.BigInteger;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.List;
 
@@ -44,6 +46,7 @@ final class ReviewPanel extends ListView {
         void openReceipt(LedgerReview.Row row);
         void openAll();
         void reconnect();
+        void showConnectionDetails();
         void convertSettlement();
     }
 
@@ -74,14 +77,15 @@ final class ReviewPanel extends ListView {
         this.editable = editable;
         this.actions = actions;
         this.confirmedThrough = confirmedThrough;
-        setPadding(dp(LedgerStyle.PAGE_INSET), 0, dp(LedgerStyle.PAGE_INSET), 0);
+        int inset = style.contentInset(style.windowWidth(), LedgerStyle.PAGE_INSET, LedgerStyle.FORM_MAX_WIDTH);
+        setPadding(inset, 0, inset, 0);
         setDivider(null);
         setSelector(new ColorDrawable(Color.TRANSPARENT));
         LinearLayout header = column();
         LinearLayout ending = column();
         ending.setPadding(0, 0, 0, dp(30));
-        connection = new ConnectionBadge(context, actions::reconnect);
-        int availableWidth = dp(getResources().getConfiguration().screenWidthDp) - getPaddingLeft() - getPaddingRight();
+        connection = new ConnectionBadge(context, actions::reconnect, actions::showConnectionDetails);
+        int availableWidth = style.windowWidth() - getPaddingLeft() - getPaddingRight();
         connection.setMaxWidth(Math.max(dp(60), availableWidth / 2));
         header.addView(style.tripTitleRow(tripName, connection), new LinearLayout.LayoutParams(-1, -2));
         if (model.incomplete) text(header, "部分记录超出金额范围，合计不完整。", LedgerStyle.LABEL, style.warning);
@@ -90,7 +94,9 @@ final class ReviewPanel extends ListView {
                 model.hasSpending ? style.title : style.muted);
         if (model.hasSpending) total.setTypeface(LedgerStyle.MEDIUM);
         LinearLayout balances = card(header, "现金余额", R.drawable.ic_ledger_balance);
-        for (String balance : model.balances) text(balances, balance, 16, style.ink);
+        addBalanceGroup(balances, "总计", model.cashTotal, false);
+        for (LedgerReview.Balance balance : model.balances)
+            addBalanceGroup(balances, balance.name, balance.amounts, true);
         LinearLayout history = card(header, "旅行记录", R.drawable.ic_ledger_book);
         count = text(history, "", LedgerStyle.CAPTION, style.muted);
         buildFilters(history);
@@ -111,6 +117,16 @@ final class ReviewPanel extends ListView {
         setAdapter(new ArrayAdapter<String>(context, android.R.layout.simple_list_item_1));
     }
 
+    private void addBalanceGroup(LinearLayout card, String label, Map<String, BigInteger> amounts, boolean member) {
+        String empty = amounts.isEmpty() ? (member ? "尚未填写" : "暂无现金记录") : "";
+        TripReportView.addAmountHeading(card, style, label, empty, member);
+        if (!amounts.isEmpty()) {
+            TripReportView.addAmountTable(card, style,
+                    Collections.singletonList(new LedgerReport.AmountColumn("", amounts)),
+                    member ? LedgerStyle.LABEL : LedgerStyle.BODY, member);
+        }
+    }
+
     void updateSync(LedgerStore.Trip trip, SyncEngine.Status state, long lastCheckedAt) {
         connection.update(trip, state);
         StringBuilder status = new StringBuilder("本机已保存");
@@ -126,6 +142,8 @@ final class ReviewPanel extends ListView {
         }
         if (!status.toString().contentEquals(syncStatus.getText())) syncStatus.setText(status.toString());
     }
+
+    int pendingReceipts() { return model.pendingReceipts; }
 
     private void buildSettlement(LinearLayout card) {
         if (model.financialConflict)
@@ -153,8 +171,13 @@ final class ReviewPanel extends ListView {
         filters.setOrientation(LinearLayout.VERTICAL);
         filters.setPadding(0, dp(8), 0, dp(6));
         history.addView(filters, fullMargin());
-        Configuration configuration = getResources().getConfiguration();
-        int perRow = configuration.screenWidthDp >= 360 && configuration.fontScale <= 1.15f ? 4 : 2;
+        int available = style.windowWidth()
+                - getPaddingStart() - getPaddingEnd() - history.getPaddingStart() - history.getPaddingEnd();
+        TextView sample = style.text("", LedgerStyle.LABEL, style.muted);
+        int chipWidth = 0;
+        for (String label : LABELS)
+            chipWidth = Math.max(chipWidth, LedgerStyle.textWidth(sample, label) + dp(4));
+        int perRow = chipWidth * LABELS.length + dp(5) * (LABELS.length - 1) <= available ? LABELS.length : 2;
         LinearLayout row = null;
         for (int i = 0; i < KEYS.length; i++) {
             if (i % perRow == 0) {
@@ -240,7 +263,8 @@ final class ReviewPanel extends ListView {
             super(ReviewPanel.this.getContext());
             setOrientation(VERTICAL);
             setBackgroundColor(style.surface);
-            setPadding(dp(LedgerStyle.PAGE_INSET), dp(LedgerStyle.ITEM_GAP), dp(LedgerStyle.PAGE_INSET), 0);
+            int inset = style.contentInset(style.windowWidth(), LedgerStyle.PAGE_INSET, LedgerStyle.PAGE_MAX_WIDTH);
+            setPadding(inset, dp(LedgerStyle.ITEM_GAP), inset, 0);
             setClickable(true);
             if (android.os.Build.VERSION.SDK_INT >= 28) setAccessibilityPaneTitle("全部旅行记录");
 
@@ -315,9 +339,8 @@ final class ReviewPanel extends ListView {
             int gap = dp(LedgerStyle.ITEM_GAP);
             LinearLayout toolbar = new LinearLayout(getContext()) {
                 @Override protected void onMeasure(int widthSpec, int heightSpec) {
-                    title.measure(0, 0);
                     controls.measure(0, 0);
-                    int needed = title.getMeasuredWidth() + gap + controls.getMeasuredWidth();
+                    int needed = LedgerStyle.textWidth(title) + gap + controls.getMeasuredWidth();
                     boolean stack = MeasureSpec.getMode(widthSpec) != MeasureSpec.UNSPECIFIED
                             && MeasureSpec.getSize(widthSpec) < needed;
                     setOrientation(stack ? VERTICAL : HORIZONTAL);
@@ -438,25 +461,19 @@ final class ReviewPanel extends ListView {
             int horizontalPadding = dp(compact ? 10 : 12);
             int verticalPadding = dp(compact ? 6 : 10);
             setPadding(horizontalPadding, verticalPadding, horizontalPadding, verticalPadding);
-            LinearLayout meta = new LinearLayout(getContext());
-            meta.setGravity(Gravity.TOP);
-            LinearLayout.LayoutParams metaSize = new LinearLayout.LayoutParams(-1, -2);
-            metaSize.bottomMargin = dp(compact ? 2 : 3);
-            addView(meta, metaSize);
             type = new TextView(getContext());
             type.setTextSize(compact ? 11 : 12);
             type.setIncludeFontPadding(!compact);
             type.setTypeface(type.getTypeface(), Typeface.BOLD);
             type.setTextColor(style.primary);
-            LinearLayout.LayoutParams typeSize = new LinearLayout.LayoutParams(0, -2, 1);
-            typeSize.setMarginEnd(dp(8));
-            meta.addView(type, typeSize);
+            LinearLayout timeAndArrow = new LinearLayout(getContext());
+            timeAndArrow.setGravity(Gravity.TOP | Gravity.END);
             time = new TextView(getContext());
             time.setTextSize(compact ? 11 : 12);
             time.setIncludeFontPadding(!compact);
             time.setTextColor(style.muted);
             time.setGravity(Gravity.END);
-            meta.addView(time, new LinearLayout.LayoutParams(-2, -2));
+            timeAndArrow.addView(time, new LinearLayout.LayoutParams(-2, -2));
             arrow = new TextView(getContext());
             arrow.setText("›");
             arrow.setTextSize(compact ? 14 : 16);
@@ -464,7 +481,11 @@ final class ReviewPanel extends ListView {
             arrow.setTextColor(style.muted);
             LinearLayout.LayoutParams arrowSize = new LinearLayout.LayoutParams(-2, -2);
             arrowSize.setMarginStart(dp(8));
-            meta.addView(arrow, arrowSize);
+            timeAndArrow.addView(arrow, arrowSize);
+            LinearLayout meta = fittingRow(type, timeAndArrow);
+            LinearLayout.LayoutParams metaSize = new LinearLayout.LayoutParams(-1, -2);
+            metaSize.bottomMargin = dp(compact ? 2 : 3);
+            addView(meta, metaSize);
             LinearLayout body = new LinearLayout(getContext());
             body.setGravity(Gravity.CENTER_VERTICAL);
             addView(body, new LinearLayout.LayoutParams(-1, -2));
@@ -484,9 +505,8 @@ final class ReviewPanel extends ListView {
             copy.addView(note, new LinearLayout.LayoutParams(-1, -2));
             receipt = column();
             receipt.setGravity(Gravity.CENTER);
-            receipt.setMinimumWidth(dp(48));
             receipt.setMinimumHeight(dp(48));
-            LinearLayout.LayoutParams receiptSize = new LinearLayout.LayoutParams(-2, -2);
+            LinearLayout.LayoutParams receiptSize = new LinearLayout.LayoutParams(dp(48), -2);
             receiptSize.setMarginStart(dp(compact ? 8 : 10));
             body.addView(receipt, receiptSize);
             thumbnail = new ImageView(getContext());
@@ -495,11 +515,11 @@ final class ReviewPanel extends ListView {
             thumbnail.setClipToOutline(true);
             receipt.addView(thumbnail, new LinearLayout.LayoutParams(dp(36), dp(36)));
             receiptStatus = new TextView(getContext());
-            receiptStatus.setText("图片待同步");
+            receiptStatus.setText("待同步");
             receiptStatus.setTextSize(10);
             receiptStatus.setTextColor(style.muted);
             receiptStatus.setGravity(Gravity.CENTER);
-            receipt.addView(receiptStatus, new LinearLayout.LayoutParams(-2, -2));
+            receipt.addView(receiptStatus, new LinearLayout.LayoutParams(-1, -2));
             setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
             meta.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
             copy.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
@@ -605,6 +625,32 @@ final class ReviewPanel extends ListView {
         LinearLayout column = new LinearLayout(getContext());
         column.setOrientation(LinearLayout.VERTICAL);
         return column;
+    }
+
+    private LinearLayout fittingRow(TextView leading, View trailing) {
+        int gap = dp(LedgerStyle.CONTROL_GAP);
+        LinearLayout.LayoutParams leadSize = new LinearLayout.LayoutParams(0, -2, 1);
+        LinearLayout.LayoutParams trailSize = new LinearLayout.LayoutParams(-2, -2);
+        trailSize.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
+        leadSize.setMarginEnd(gap);
+        LinearLayout row = new LinearLayout(getContext()) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                trailing.measure(0, 0);
+                int width = MeasureSpec.getSize(widthSpec) - getPaddingStart() - getPaddingEnd();
+                boolean stacked = MeasureSpec.getMode(widthSpec) != MeasureSpec.UNSPECIFIED
+                        && LedgerStyle.textWidth(leading) + gap + trailing.getMeasuredWidth() > width;
+                setOrientation(stacked ? VERTICAL : HORIZONTAL);
+                leadSize.width = stacked ? -1 : 0;
+                leadSize.weight = stacked ? 0 : 1;
+                leadSize.setMarginEnd(stacked ? 0 : gap);
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
+        row.setBaselineAligned(false);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(leading, leadSize);
+        row.addView(trailing, trailSize);
+        return row;
     }
 
     private LinearLayout card(LinearLayout parent, String title, int icon) {

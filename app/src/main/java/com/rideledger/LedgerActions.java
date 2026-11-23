@@ -57,17 +57,25 @@ final class LedgerActions {
 
     void expense(LedgerStore.Trip trip, String payer, String rawCurrency, String rawAmount,
                  boolean personal, String note, ReceiptImage receipt) throws Exception {
-        String code = Money.code(rawCurrency);
-        long amount = Money.parse(rawAmount, code);
-        saveExpense(trip, payer, code, amount, personal ? "personal" : "shared", note,
-                trip.team.shares(amount, payer, personal), receipt);
+        expense(trip, payer, rawCurrency, rawAmount, personal, null, null, note, receipt);
     }
 
     static CustomSplit customSplit(LedgerStore.Trip trip, String code, String[] inputs) throws Exception {
         code = Money.code(code);
+        JSONObject shares = memberAmounts(trip, code, inputs, "分摊");
+        long total = 0;
+        for (int i = 0; i < trip.people(); i++) total += shares.getLong(trip.member(i));
+        return new CustomSplit(trip, code, total, shares);
+    }
+
+    static ExpensePayments payments(LedgerStore.Trip trip, String code, String[] inputs) throws Exception {
+        return ExpensePayments.fromAmounts(memberAmounts(trip, code, inputs, "付款"));
+    }
+
+    private static JSONObject memberAmounts(LedgerStore.Trip trip, String code, String[] inputs, String label) throws Exception {
         if (inputs == null || inputs.length != trip.people())
-            throw new IllegalArgumentException("分摊人数与小队不一致，请重新填写");
-        JSONObject shares = new JSONObject();
+            throw new IllegalArgumentException(label + "人数与小队不一致，请重新填写");
+        JSONObject amounts = new JSONObject();
         long total = 0;
         for (int i = 0; i < trip.people(); i++) {
             long share;
@@ -75,12 +83,15 @@ final class LedgerActions {
             catch (NumberFormatException | ArithmeticException error) {
                 throw new IllegalArgumentException(trip.nameOf(trip.member(i)) + "的金额格式有误，请检查小数位数");
             }
+            catch (IllegalArgumentException error) {
+                throw new IllegalArgumentException(label + "金额不能小于零");
+            }
             if (share > LedgerStore.MAX_TEAM_AMOUNT - total)
-                throw new IllegalArgumentException("分摊合计超出金额范围");
+                throw new IllegalArgumentException(label + "合计超出金额范围");
             total += share;
-            shares.put(trip.member(i), share);
+            amounts.put(trip.member(i), share);
         }
-        return new CustomSplit(trip, code, total, shares);
+        return amounts;
     }
 
     void expense(LedgerStore.Trip trip, String payer, CustomSplit split, String note) throws Exception {
@@ -88,43 +99,58 @@ final class LedgerActions {
     }
 
     void expense(LedgerStore.Trip trip, String payer, CustomSplit split, String note, ReceiptImage receipt) throws Exception {
-        if (!trip.id.equals(split.tripId) || !trip.team.fingerprint.equals(split.team))
-            throw new IllegalArgumentException("分摊属于另一趟旅行，请重新填写");
-        if (split.total <= 0) throw new IllegalArgumentException("分摊合计必须大于零");
-        saveExpense(trip, payer, split.currency, split.total, "custom", note, split.shares, receipt);
+        expense(trip, payer, split.currency, "", false, split, null, note, receipt);
     }
 
-    private void saveExpense(LedgerStore.Trip trip, String payer, String code, long amount,
-                             String mode, String note, JSONObject shares, ReceiptImage receipt) throws Exception {
-        store.addExpense(trip.id, expenseData(payer, code, amount, mode, note, shares), receipt);
+    void expense(LedgerStore.Trip trip, String payer, String code, String rawAmount, boolean personal,
+                 CustomSplit split, ExpensePayments payments, String note, ReceiptImage receipt) throws Exception {
+        store.addExpense(trip.id, expenseData(trip, null, payer, Money.code(code), rawAmount, personal,
+                split, payments, note), receipt);
     }
 
     void receipt(LedgerStore.Trip trip, String eventId, ReceiptImage image) {
         store.receipts.change(trip.id, eventId, image);
     }
 
-    private static JSONObject expenseData(String payer, String code, long amount, String mode,
-                                          String note, JSONObject shares) throws Exception {
-        return new JSONObject().put("payer", payer).put("currency", code)
-                .put("amount", amount).put("mode", mode).put("note", note.trim()).put("shares", shares);
+    void editExpense(LedgerStore.Trip trip, LedgerStore.Event original, String payer, String code,
+                     String rawAmount, int splitMode, String[] inputs, String note) throws Exception {
+        editExpense(trip, original, payer, code, rawAmount, splitMode, inputs, null, note);
     }
 
     void editExpense(LedgerStore.Trip trip, LedgerStore.Event original, String payer, String code,
-                     String rawAmount, int splitMode, String[] inputs, String note) throws Exception {
-        if (splitMode == 2) {
-            CustomSplit split = customSplit(trip, code, inputs);
+                     String rawAmount, int splitMode, String[] inputs, ExpensePayments payments, String note) throws Exception {
+        code = Money.code(code);
+        CustomSplit split = splitMode == 2 ? customSplit(trip, code, inputs) : null;
+        store.edit(original, expenseData(trip, original.data, payer, code, rawAmount, splitMode == 1, split, payments, note));
+    }
+
+    private static JSONObject expenseData(LedgerStore.Trip trip, JSONObject old, String payer, String code,
+                                          String rawAmount, boolean personal, CustomSplit split,
+                                          ExpensePayments payments, String note) throws Exception {
+        if (payments != null) payments.requireMultiple();
+        long amount;
+        if (split != null) {
+            if (!trip.id.equals(split.tripId) || !trip.team.fingerprint.equals(split.team) || !code.equals(split.currency))
+                throw new IllegalArgumentException("请重新确认自定义分摊");
             if (split.total <= 0) throw new IllegalArgumentException("分摊合计必须大于零");
-            store.edit(original, expenseData(payer, code, split.total, "custom", note, split.shares));
-            return;
-        }
-        boolean personal = splitMode == 1;
-        long amount = Money.parse(rawAmount, code);
-        String mode = personal ? "personal" : "shared";
-        JSONObject old = original.data;
-        boolean sameSplit = mode.equals(old.optString("mode", "shared")) && amount == old.optLong("amount") &&
-                payer.equals(old.optString("payer")) && code.equals(old.optString("currency"));
-        JSONObject shares = sameSplit ? old.getJSONObject("shares") : trip.team.shares(amount, payer, personal);
-        store.edit(original, expenseData(payer, code, amount, mode, note, shares));
+            amount = split.total;
+        } else amount = payments == null ? Money.parse(rawAmount, code) : payments.total;
+        if (payments != null && payments.total != amount)
+            throw new IllegalArgumentException("付款合计和分摊合计必须一致");
+        String mode = split != null ? "custom" : personal ? "personal" : "shared";
+        JSONObject data = new JSONObject().put("currency", code).put("amount", amount)
+                .put("mode", mode).put("note", note.trim());
+        if (payments == null) data.put("payer", payer);
+        else data.put("payments", payments.json());
+        boolean sameSplit = old != null && mode.equals(old.optString("mode", "shared")) &&
+                amount == old.optLong("amount") && code.equals(old.optString("currency")) &&
+                ExpensePayments.read(data).amounts().equals(ExpensePayments.read(old).amounts());
+        JSONObject shares;
+        if (split != null) shares = split.shares;
+        else if (sameSplit) shares = old.getJSONObject("shares");
+        else if (personal && payments != null) shares = payments.json();
+        else shares = trip.team.shares(amount, payer, personal);
+        return data.put("shares", shares);
     }
 
     void cash(LedgerStore.Trip trip, String member, String rawCurrency, String rawAmount) throws Exception {

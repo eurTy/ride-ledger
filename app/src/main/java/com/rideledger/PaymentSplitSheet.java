@@ -9,16 +9,12 @@ import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
-import android.view.ViewGroup;
-import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.function.Consumer;
 
 /** Edits the payment selection locally until the user finishes the sheet. */
@@ -27,11 +23,16 @@ final class PaymentSplitSheet {
         final String payerId;
         final boolean personal;
         final LedgerActions.CustomSplit custom;
+        final ExpensePayments payments;
+        final String currency;
 
-        Result(String payerId, boolean personal, LedgerActions.CustomSplit custom) {
+        Result(String payerId, boolean personal, LedgerActions.CustomSplit custom,
+               ExpensePayments payments, String currency) {
             this.payerId = payerId;
             this.personal = personal;
             this.custom = custom;
+            this.payments = payments;
+            this.currency = currency;
         }
     }
 
@@ -45,22 +46,23 @@ final class PaymentSplitSheet {
     private final LedgerActions.CustomSplit originalCustom;
     private final LinearLayout content, customFields;
     private final Spinner payer;
+    private final String initialPayer;
+    private final ExpensePaymentFields paymentFields;
     private final Button[] modes = new Button[MODES.length];
     private final TextView[] shareNames;
     private EditText[] shares;
     private LedgerStore.Trip trip;
     private String splitCurrency;
-    private boolean personal;
     private int mode;
     private Dialog dialog;
 
     PaymentSplitSheet(Activity activity, LedgerForms forms, LedgerStore.Trip trip, String payerId,
                       boolean personal, LedgerActions.CustomSplit custom, String currencyCode,
+                      ExpensePayments payments, String paymentCurrency,
                       Consumer<Result> apply, Consumer<Exception> showError) {
         this.activity = activity;
         this.forms = forms;
         this.trip = trip;
-        this.personal = personal;
         this.originalCustom = custom;
         this.currencyCode = currencyCode;
         this.apply = apply;
@@ -76,7 +78,7 @@ final class PaymentSplitSheet {
         payerRow.setMinimumHeight(dp(LedgerStyle.CONTROL_HEIGHT));
         TextView payerLabel = style.text("谁付款", LedgerStyle.LABEL, style.muted);
         payerRow.addView(payerLabel, new LinearLayout.LayoutParams(-2, -2));
-        String initialPayer = trip.indexOf(payerId) < 0 ? trip.localPerson : payerId;
+        initialPayer = trip.indexOf(payerId) < 0 ? trip.localPerson : payerId;
         payer = new Spinner(activity, Spinner.MODE_DROPDOWN);
         style.spinner(payer);
         payer.setId(View.generateViewId());
@@ -87,11 +89,40 @@ final class PaymentSplitSheet {
         payerLabel.setLabelFor(payer.getId());
         payerRow.addView(payer, new LinearLayout.LayoutParams(0, -2, 1));
         content.addView(payerRow, fullWidth(4));
-        updatePayer(initialPayer);
+        forms.updateExpensePayer(payer, trip, payments == null ? trip.indexOf(initialPayer) : trip.people(), true);
+        // Retain the entered decimal values when the user reopens the sheet after changing currency.
+        paymentFields = new ExpensePaymentFields(activity, forms, style, trip, () -> currencyCode,
+                paymentCurrency, payments);
+        content.addView(paymentFields, fullWidth(4));
         shareNames = new TextView[trip.people()];
         TextView splitLabel = caption("分摊规则");
         ((LinearLayout.LayoutParams) splitLabel.getLayoutParams()).topMargin = dp(8);
-        LinearLayout modeRow = choicesRow();
+        LinearLayout modeRow = new LinearLayout(activity) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                int widest = 0;
+                for (Button mode : modes) {
+                    if (mode == null) continue;
+                    widest = Math.max(widest, LedgerStyle.textWidth(mode) + dp(2));
+                }
+                boolean stack = MeasureSpec.getMode(widthSpec) != MeasureSpec.UNSPECIFIED
+                        && widest * modes.length + dp(6) * (modes.length - 1) > MeasureSpec.getSize(widthSpec);
+                int orientation = stack ? VERTICAL : HORIZONTAL;
+                if (getOrientation() != orientation) {
+                    setOrientation(orientation);
+                    for (int i = 0; i < modes.length; i++) {
+                        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(
+                                stack ? -1 : 0, stack ? -2 : -1, stack ? 0 : 1);
+                        if (i > 0) {
+                            if (stack) size.topMargin = dp(6);
+                            else size.setMarginStart(dp(6));
+                        }
+                        modes[i].setLayoutParams(size);
+                    }
+                }
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
+        modeRow.setBaselineAligned(false);
         content.addView(modeRow, fullWidth(8));
         for (int i = 0; i < modes.length; i++) {
             int selection = i;
@@ -99,7 +130,6 @@ final class PaymentSplitSheet {
             option.setOnClickListener(view -> {
                 try {
                     if (selection == 2) ensureCustomFields();
-                    else this.personal = selection == 1;
                     mode = selection;
                     updateSelection();
                 } catch (IllegalArgumentException invalid) { showError.accept(invalid); }
@@ -112,6 +142,7 @@ final class PaymentSplitSheet {
         content.addView(customFields, fullWidth(0));
         if (mode == 2) ensureCustomFields();
         updateSelection();
+        LedgerForms.listenToSelection(payer, position -> updateSelection());
     }
 
     void show() {
@@ -120,8 +151,14 @@ final class PaymentSplitSheet {
             try {
                 LedgerActions.CustomSplit split = mode == 2 ? readSplit() : null;
                 if (split != null && split.total == 0) throw new IllegalArgumentException("分摊合计必须大于零");
-                String member = trip.member(payer.getSelectedItemPosition());
-                apply.accept(new Result(member, personal, split));
+                int position = payer.getSelectedItemPosition();
+                boolean multiple = position == trip.people();
+                String code = multiple ? Money.code(currencyCode) : "";
+                ExpensePayments payments = multiple ? paymentFields.read(code) : null;
+                if (split != null && payments != null && split.total != payments.total)
+                    throw new IllegalArgumentException("付款合计和分摊合计必须一致");
+                String member = multiple ? initialPayer : trip.member(position);
+                apply.accept(new Result(member, mode == 1, split, payments, code));
                 sheet.dismiss();
             } catch (Exception failure) {
                 error.setText(failure.getMessage() == null ? "请检查付款与分摊设置" : failure.getMessage());
@@ -137,31 +174,15 @@ final class PaymentSplitSheet {
 
     void updateRoster(LedgerStore.Trip latest) {
         if (!trip.id.equals(latest.id)) return;
-        String selected = trip.member(payer.getSelectedItemPosition());
+        int selected = payer.getSelectedItemPosition();
         trip = latest;
-        updatePayer(selected);
+        forms.updateExpensePayer(payer, latest, selected, true);
+        paymentFields.updateRoster(latest);
         for (int i = 0; i < shareNames.length; i++) {
             String member = trip.member(i);
             if (shareNames[i] != null) shareNames[i].setText(memberName(member));
             if (shares != null) shares[i].setContentDescription("分摊金额，" + memberName(member));
         }
-    }
-
-    private void updatePayer(String selected) {
-        List<String> people = new ArrayList<>();
-        for (int i = 0; i < trip.people(); i++) people.add(memberName(trip.member(i)));
-        payer.setAdapter(new ArrayAdapter<String>(activity, android.R.layout.simple_list_item_1, people) {
-            @Override public View getView(int position, View recycled, ViewGroup parent) {
-                return style.option(getItem(position), trip.people() > 1 ? "⌄" : "", false, false, true);
-            }
-
-            @Override public View getDropDownView(int position, View recycled, ViewGroup parent) {
-                boolean checked = position == payer.getSelectedItemPosition();
-                return style.option(getItem(position), checked ? "✓" : "", checked, true, false);
-            }
-        });
-        payer.setSelection(Math.max(0, trip.indexOf(selected)));
-        payer.setEnabled(trip.people() > 1);
     }
 
     private void ensureCustomFields() {
@@ -210,6 +231,10 @@ final class PaymentSplitSheet {
     }
 
     private void updateSelection() {
+        boolean multiple = payer.getSelectedItemPosition() == trip.people();
+        paymentFields.showPayments(multiple);
+        modes[1].setText(multiple ? "各自承担" : MODES[1]);
+        modes[1].setContentDescription("分摊规则，" + modes[1].getText());
         for (int i = 0; i < modes.length; i++) selected(modes[i], i == mode);
         customFields.setVisibility(mode == 2 ? View.VISIBLE : View.GONE);
     }
