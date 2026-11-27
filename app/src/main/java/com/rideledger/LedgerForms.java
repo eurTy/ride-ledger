@@ -82,6 +82,7 @@ final class LedgerForms {
         FormInput.done(inputs[inputs.length - 1]);
         TextView total = text(form, "", 16, style.title);
         total.setTypeface(LedgerStyle.MEDIUM);
+        total.setFontFeatureSettings("tnum");
         Runnable updateTotal = () -> {
             try { total.setText("合计 " + Money.format(readSplit(trip, code, inputs).total, code)); }
             catch (Exception error) { total.setText(error.getMessage()); }
@@ -200,11 +201,38 @@ final class LedgerForms {
         ExpensePaymentFields actual = new ExpensePaymentFields(activity, this, style, trip,
                 () -> value(currency), initialCode, initialPayments);
         payment.addView(actual, new TableLayout.LayoutParams(-1, -2));
-        Spinner modes = new Spinner(activity, Spinner.MODE_DROPDOWN);
-        modes.setContentDescription("分摊规则");
-        style.spinner(modes);
-        modes.setAdapter(style.options(Arrays.asList("全员平摊", "仅付款人", "自定义分摊"), modes, -1));
-        addChoiceRow(payment, "分摊规则", modes);
+        TextView splitCaption = text(form, "分摊规则", LedgerStyle.LABEL, style.muted);
+        ((LinearLayout.LayoutParams) splitCaption.getLayoutParams()).topMargin = dp(LedgerStyle.CONTROL_GAP);
+        String[] modeLabels = {"全员平摊", "仅付款人", "自定义分摊"};
+        Button[] modeButtons = new Button[modeLabels.length];
+        int[] selectedMode = {0};
+        LinearLayout modeRow = new LinearLayout(activity) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                int widest = 0;
+                for (Button option : modeButtons) {
+                    if (option == null) continue;
+                    widest = Math.max(widest, LedgerStyle.textWidth(option) + dp(2));
+                }
+                boolean stack = MeasureSpec.getMode(widthSpec) != MeasureSpec.UNSPECIFIED
+                        && widest * modeButtons.length + dp(6) * (modeButtons.length - 1) > MeasureSpec.getSize(widthSpec);
+                int orientation = stack ? VERTICAL : HORIZONTAL;
+                if (getOrientation() != orientation) {
+                    setOrientation(orientation);
+                    for (int i = 0; i < modeButtons.length; i++) {
+                        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(
+                                stack ? -1 : 0, stack ? -2 : -1, stack ? 0 : 1);
+                        if (i > 0) {
+                            if (stack) size.topMargin = dp(6);
+                            else size.setMarginStart(dp(6));
+                        }
+                        modeButtons[i].setLayoutParams(size);
+                    }
+                }
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
+        modeRow.setBaselineAligned(false);
+        form.addView(modeRow, fullMargin());
         LinearLayout shares = new LinearLayout(activity);
         shares.setOrientation(LinearLayout.VERTICAL);
         shares.setPadding(dp(12), 0, dp(12), 0);
@@ -232,6 +260,7 @@ final class LedgerForms {
             if (i > 0) FormInput.next(inputs[i - 1], input);
         }
         TextView total = text(shares, "", LedgerStyle.BODY, style.title);
+        total.setFontFeatureSettings("tnum");
         NoteInput noteInput = expenseNote(form, trip.id, data.optString("note"), true);
         EditText note = noteInput.field;
         receipts.besideNote(noteInput.input, trip, record.id, record.receipt);
@@ -252,24 +281,45 @@ final class LedgerForms {
         currency.addTextChangedListener(watcher);
         for (EditText input : inputs) input.addTextChangedListener(watcher);
         Consumer<Integer> showMode = position -> {
+            selectedMode[0] = position;
+            for (int i = 0; i < modeButtons.length; i++) {
+                boolean active = i == position;
+                modeButtons[i].setSelected(active);
+                modeButtons[i].setTypeface(active ? LedgerStyle.MEDIUM : android.graphics.Typeface.DEFAULT);
+            }
             shares.setVisibility(position == 2 ? View.VISIBLE : View.GONE);
             amountBox.setVisibility(position == 2 || payer.getSelectedItemPosition() == trip.people() ? View.GONE : View.VISIBLE);
             FormInput.next(currency, position == 2 ? inputs[0] : note);
         };
-        listenToSelection(modes, showMode::accept);
+        for (int i = 0; i < modeLabels.length; i++) {
+            int choiceIndex = i;
+            Button option = style.button(modeLabels[i], LedgerStyle.Action.OUTLINE, () -> showMode.accept(choiceIndex));
+            option.setTextSize(LedgerStyle.LABEL);
+            option.setContentDescription("分摊规则，" + modeLabels[i]);
+            option.setIncludeFontPadding(false);
+            option.setSingleLine(false);
+            option.setEllipsize(null);
+            option.setPadding(dp(6), dp(6), dp(6), dp(6));
+            android.graphics.drawable.StateListDrawable bg = new android.graphics.drawable.StateListDrawable();
+            bg.addState(new int[]{android.R.attr.state_selected}, style.rounded(style.selected, 0, LedgerStyle.CONTROL_RADIUS));
+            bg.addState(new int[0], style.rounded(style.surface, style.stroke, LedgerStyle.CONTROL_RADIUS));
+            option.setBackground(style.ripple(bg, LedgerStyle.CONTROL_RADIUS));
+            option.setTextColor(new android.content.res.ColorStateList(
+                    new int[][]{{android.R.attr.state_selected}, {}}, new int[]{style.primary, style.muted}));
+            LinearLayout.LayoutParams width = new LinearLayout.LayoutParams(0, -1, 1);
+            if (i > 0) width.setMarginStart(dp(6));
+            modeRow.addView(option, width);
+            modeButtons[i] = option;
+        }
         String initialMode = data.optString("mode");
-        int position = "custom".equals(initialMode) ? 2 : "personal".equals(initialMode) ? 1 : 0;
-        modes.setSelection(position);
+        selectedMode[0] = "custom".equals(initialMode) ? 2 : "personal".equals(initialMode) ? 1 : 0;
         IntConsumer updatePayment = selected -> {
             boolean multiple = selected == trip.people();
             actual.showPayments(multiple);
-            int mode = Math.max(0, modes.getSelectedItemPosition());
             String personalOption = multiple ? "各自承担" : "仅付款人";
-            if (!personalOption.equals(modes.getItemAtPosition(1))) {
-                modes.setAdapter(style.options(Arrays.asList("全员平摊", personalOption, "自定义分摊"), modes, -1));
-                modes.setSelection(mode);
-            }
-            showMode.accept(mode);
+            modeButtons[1].setText(personalOption);
+            modeButtons[1].setContentDescription("分摊规则，" + personalOption);
+            showMode.accept(selectedMode[0]);
         };
         listenToSelection(payer, updatePayment);
         updatePayment.accept(selection);
@@ -286,7 +336,7 @@ final class LedgerForms {
             int payerPosition = payer.getSelectedItemPosition();
             boolean multiple = payerPosition == trip.people();
             String member = multiple ? "" : trip.member(payerPosition), rawAmount = value(amount), rawNote = noteInput.value();
-            int mode = modes.getSelectedItemPosition();
+            int mode = selectedMode[0];
             ExpensePayments payments = multiple ? actual.read(code) : null;
             return () -> {
                 ledgerActions.editExpense(trip, record.event, member, code, rawAmount, mode, values, payments, rawNote);
@@ -302,7 +352,7 @@ final class LedgerForms {
         Spinner person = personChoice(form, trip, "现金持有人");
         LinearLayout amountBox = new LinearLayout(activity);
         LinearLayout currencyBox = amountColumns(form, amountBox);
-        EditText amount = compactAmount(amountBox, "金额", "例如：1000");
+        EditText amount = compactAmount(amountBox, "金额", "");
         JSONObject data = record == null ? null : record.event.data;
         String initialCode = data == null ? currencyHistory.quickDefault(trip.id) : data.optString("currency");
         EditText currency = currencyField(currencyBox, trip.id, "货币代码", initialCode, false, record == null);
@@ -331,7 +381,7 @@ final class LedgerForms {
         to.setSelection((trip.indexOf(trip.localPerson) + 1) % trip.people());
         LinearLayout amountBox = new LinearLayout(activity);
         LinearLayout currencyBox = amountColumns(form, amountBox);
-        EditText amount = compactAmount(amountBox, "还款金额", "例如：50");
+        EditText amount = compactAmount(amountBox, "还款金额", "");
         JSONObject data = record == null ? null : record.event.data;
         String initialCode = data == null ? currencyHistory.quickDefault(trip.id) : data.optString("currency");
         EditText currency = currencyField(currencyBox, trip.id, "货币代码", initialCode, false, record == null);
@@ -363,11 +413,11 @@ final class LedgerForms {
                 : new String[]{data.optString("fromCurrency"), data.optString("toCurrency")};
         LinearLayout fromBox = new LinearLayout(activity);
         LinearLayout fromCodeBox = amountColumns(form, fromBox);
-        EditText fromAmount = compactAmount(fromBox, "付出金额", "例如：100");
+        EditText fromAmount = compactAmount(fromBox, "付出金额", "");
         EditText fromCurrency = currencyField(fromCodeBox, trip.id, "付出货币", defaults[0], false, record == null);
         LinearLayout toBox = new LinearLayout(activity);
         LinearLayout toCodeBox = amountColumns(form, toBox);
-        EditText toAmount = compactAmount(toBox, "得到金额", "例如：13");
+        EditText toAmount = compactAmount(toBox, "得到金额", "");
         EditText toCurrency = currencyField(toCodeBox, trip.id, "得到货币", defaults[1], false, record == null);
         if (data != null) {
             selectPerson(person, trip, data, "person");
@@ -406,8 +456,7 @@ final class LedgerForms {
     private void showRecordForm(LedgerStore.Trip trip, LedgerReview.Row record, String title, View form, EditInput input) {
         String subtitle = record == null ? null : record.type + "  ·  " + record.time;
         showSheet(record == null ? title : "编辑记录", subtitle, form, record == null ? "保存" : "保存修改",
-                (dialog, confirm, cancel, error) -> submitForm(trip, dialog, confirm, cancel, input,
-                        failure -> editError(error, failure)));
+                (dialog, confirm, cancel, error) -> submitForm(trip, dialog, confirm, cancel, input, error));
     }
 
     void showSettlement(LedgerStore.Trip trip, LedgerReview review) {
@@ -461,7 +510,13 @@ final class LedgerForms {
 
     Dialog showSheet(String title, String subtitle, View form, String confirmLabel, SheetAction action) {
         dismissCurrencyMenu();
-        Dialog dialog = new Dialog(activity);
+        LedgerKeyboard[] sheetKeyboard = new LedgerKeyboard[1];
+        Dialog dialog = new Dialog(activity) {
+            @Override public void onBackPressed() {
+                if (sheetKeyboard[0] != null && sheetKeyboard[0].dismiss()) return;
+                super.onBackPressed();
+            }
+        };
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
         LinearLayout sheet = new LinearLayout(activity);
         sheet.setOrientation(LinearLayout.VERTICAL);
@@ -478,9 +533,9 @@ final class LedgerForms {
         header.setPadding(dp(20), dp(12), dp(20), dp(4));
         content.addView(header, fullMargin());
         View handle = new View(activity);
-        handle.setBackground(style.rounded(style.stroke, 0, LedgerStyle.CONTROL_RADIUS));
+        handle.setBackground(style.rounded(style.stroke, 0, LedgerStyle.PILL_RADIUS));
         handle.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        LinearLayout.LayoutParams handleSize = new LinearLayout.LayoutParams(dp(30), dp(4));
+        LinearLayout.LayoutParams handleSize = new LinearLayout.LayoutParams(dp(36), dp(4));
         handleSize.gravity = Gravity.CENTER_HORIZONTAL;
         header.addView(handle, handleSize);
         TextView heading = style.heading(title, 22);
@@ -513,7 +568,21 @@ final class LedgerForms {
         confirmSize.setMarginStart(dp(LedgerStyle.CONTROL_GAP));
         controls.addView(confirm, confirmSize);
         confirm.setOnClickListener(view -> action.perform(dialog, confirm, cancel, error));
-        sheet.addView(new AmountShortcuts(activity, style), new LinearLayout.LayoutParams(-1, -2));
+        LedgerKeyboard keyboard = new LedgerKeyboard(activity, style, content, visible -> sheet.requestApplyInsets());
+        sheetKeyboard[0] = keyboard;
+        sheet.addView(keyboard, new LinearLayout.LayoutParams(-1, -2));
+        int baseBottom = footer.getPaddingBottom();
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            sheet.setOnApplyWindowInsetsListener((view, insets) -> {
+                android.graphics.Insets nav = insets.getInsets(
+                        android.view.WindowInsets.Type.navigationBars() | android.view.WindowInsets.Type.displayCutout());
+                boolean keyboardOpen = keyboard.getVisibility() == View.VISIBLE;
+                footer.setPadding(footer.getPaddingLeft(), footer.getPaddingTop(), footer.getPaddingRight(),
+                        keyboardOpen ? baseBottom : baseBottom + nav.bottom);
+                keyboard.setPadding(0, 0, 0, keyboardOpen ? nav.bottom : 0);
+                return insets;
+            });
+        }
         dialog.setContentView(sheet);
         dialog.setCanceledOnTouchOutside(true);
         Window window = dialog.getWindow();
@@ -538,14 +607,17 @@ final class LedgerForms {
     }
 
     private void submitForm(LedgerStore.Trip trip, Dialog dialog, View confirm, View cancel,
-                            EditInput input, Consumer<Exception> error) {
+                            EditInput input, TextView error) {
         if (!confirm.isEnabled()) return;
         LedgerActions.Write write;
         try { write = input.capture(); }
-        catch (Exception failure) { error.accept(failure); return; }
+        catch (Exception failure) { editError(error, failure); return; }
         confirm.setEnabled(false);
         cancel.setEnabled(false);
         dialog.setCancelable(false);
+        error.setTextColor(style.muted);
+        error.setText("正在保存…");
+        error.setVisibility(View.VISIBLE);
         ledgerActions.submit(write, () -> {
             if (activity.isDestroyed()) return;
             if (activeForm == dialog) dialog.dismiss();
@@ -555,11 +627,12 @@ final class LedgerForms {
             confirm.setEnabled(true);
             cancel.setEnabled(true);
             dialog.setCancelable(true);
-            error.accept(failure);
+            editError(error, failure);
         });
     }
 
-    private static void editError(TextView error, Exception failure) {
+    private void editError(TextView error, Exception failure) {
+        error.setTextColor(style.danger);
         error.setText(failure.getMessage() == null ? "无法保存，请检查后重试" : failure.getMessage());
         error.setVisibility(View.VISIBLE);
     }
@@ -739,16 +812,13 @@ final class LedgerForms {
         LinearLayout row = new LinearLayout(activity);
         row.setGravity(Gravity.CENTER_VERTICAL);
 
-        EditText currency = new EditText(activity);
+        EditText currency = new FormInput.CurrencyField(activity);
         currency.setId(View.generateViewId());
         caption.setLabelFor(currency.getId());
-        currency.setSingleLine(true);
-        currency.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
-        currency.setFilters(new InputFilter[]{new InputFilter.AllCaps(), new InputFilter.LengthFilter(3)});
         style.input(currency);
         currency.setTextSize(quick ? 16 : 18);
         if (quick) {
-            row.setBackground(style.rounded(style.surface, 0, LedgerStyle.CONTROL_RADIUS));
+            row.setBackground(style.rounded(style.surface, style.stroke, LedgerStyle.CONTROL_RADIUS));
             currency.setTextColor(style.title);
             currency.setTypeface(LedgerStyle.MEDIUM);
             currency.setPaddingRelative(dp(8), currency.getPaddingTop(), 0, currency.getPaddingBottom());

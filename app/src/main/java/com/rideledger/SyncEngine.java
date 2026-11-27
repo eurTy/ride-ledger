@@ -92,7 +92,7 @@ final class SyncEngine {
     private final SharedPreferences checkpoints;
     private final String prefix;
     private final Handler main;
-    private final PeerRoutePolicy routes = new PeerRoutePolicy(SystemClock::elapsedRealtime);
+    private final PeerRoutePolicy routes;
     private final Map<String, PeerRoutePolicy.Channel> lastChannel = new HashMap<>();
     private final Map<PeerConnection, String> activeSessions = new HashMap<>();
     private final Map<String, Failure> lastFailures = new HashMap<>();
@@ -116,6 +116,7 @@ final class SyncEngine {
         this.trip = trip;
         this.device = device;
         this.main = main;
+        this.routes = new PeerRoutePolicy(SystemClock::elapsedRealtime, TeamProtocol.routeId(trip.team, device));
         this.dial = dial;
         this.listener = listener;
         checkpoints = context.getSharedPreferences("peer_checkpoints", Context.MODE_PRIVATE);

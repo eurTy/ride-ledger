@@ -48,6 +48,12 @@ final class PeerSync {
     private boolean notificationScheduled, receiptNotification;
     private final Runnable publishChange = this::publishChanges;
 
+    private void onSyncStatus(SyncEngine.Status state) {
+        if (background && windowedDiscovery && radios != null)
+            radios.setBackgroundIdle(state.phase == SyncEngine.Phase.COMPLETE && state.pending == 0);
+        notifyChange(0);
+    }
+
     private void publishChanges() {
         notificationScheduled = false;
         int count = pendingNotification;
@@ -84,7 +90,7 @@ final class PeerSync {
         this.windowedDiscovery = windowedDiscovery;
         deviceId = PeerIdentity.deviceId(context);
         engine = team == null ? null : new SyncEngine(context, store, team, deviceId, main,
-                (endpoint, captured) -> outgoing(endpoint, captured, true), state -> notifyChange(0));
+                (endpoint, captured) -> outgoing(endpoint, captured, true), this::onSyncStatus);
         String discoveryId = team == null ? deviceId : TeamProtocol.routeId(team.team, deviceId);
         String scope = team == null ? "" : team.team.discoveryScope();
         enrollmentPeer = team == null ? "" : TeamProtocol.routeId(team.team, team.team.issuer);
@@ -188,7 +194,10 @@ final class PeerSync {
     void reconnect() {
         onMain(epoch, () -> {
             if (engine == null || !enrolled || !engine.reconnect()) return;
-            if (startRadios) radios.rediscover();
+            if (startRadios) {
+                radios.setBackgroundIdle(false);
+                radios.rediscover();
+            }
         });
     }
     private void request(boolean unchangedRevision) {

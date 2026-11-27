@@ -23,6 +23,8 @@ final class NoteInput {
     private final Button categoryMenu;
     private final int fieldEndPadding;
     private ExpenseCategory category = ExpenseCategory.OTHER;
+    private Runnable onCategoryChanged;
+    private boolean categoryMenuVisible = true;
 
     NoteInput(EditText field, LedgerStyle style, String rawNote, Supplier<List<String>> history) {
         this.field = field;
@@ -56,6 +58,21 @@ final class NoteInput {
         categoryMenu.setEnabled(enabled);
     }
 
+    void setOnCategoryChanged(Runnable listener) { onCategoryChanged = listener; }
+    ExpenseCategory category() { return category; }
+
+    void toggleCategory(ExpenseCategory chosen) {
+        category = category == chosen ? ExpenseCategory.OTHER : chosen;
+        updateCategory();
+    }
+
+    void hideCategoryMenu() {
+        categoryMenuVisible = false;
+        categoryMenu.setVisibility(View.GONE);
+        field.setPaddingRelative(field.getPaddingStart(), field.getPaddingTop(),
+                fieldEndPadding, field.getPaddingBottom());
+    }
+
     private void restore(String note) {
         category = ExpenseCategory.explicit(note);
         field.setText(category == ExpenseCategory.OTHER ? note : ExpenseCategory.details(note));
@@ -65,12 +82,17 @@ final class NoteInput {
 
     private void updateCategory() {
         boolean selected = category != ExpenseCategory.OTHER;
-        categoryMenu.setText(selected ? category.label + "  ⌄" : "⌄");
+        categoryMenu.setText(selected ? category.label + " ⌄" : "分类 ⌄");
         categoryMenu.setContentDescription(selected ? "备注分类，" + category.label : "选择备注分类");
         categoryMenu.setSelected(selected);
-        categoryMenu.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        int extraEnd = 0;
+        if (categoryMenuVisible) {
+            categoryMenu.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+            extraEnd = categoryMenu.getMeasuredWidth();
+        }
         field.setPaddingRelative(field.getPaddingStart(), field.getPaddingTop(),
-                fieldEndPadding + categoryMenu.getMeasuredWidth(), field.getPaddingBottom());
+                fieldEndPadding + extraEnd, field.getPaddingBottom());
+        if (onCategoryChanged != null) onCategoryChanged.run();
     }
 
     private void showCategories() {

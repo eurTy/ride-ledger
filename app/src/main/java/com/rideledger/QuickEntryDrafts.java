@@ -9,9 +9,22 @@ import java.util.Set;
 final class QuickEntryDrafts {
     interface Listener { void finished(String tripId, Exception error); }
 
+    static final class LastSaved {
+        final String tripId, eventId, summary;
+        final Bundle form;
+
+        LastSaved(String tripId, String eventId, String summary, Bundle form) {
+            this.tripId = tripId;
+            this.eventId = eventId;
+            this.summary = summary;
+            this.form = form == null ? null : new Bundle(form);
+        }
+    }
+
     private final Bundle forms, photos;
     final ReceiptUi.Selection receiptSelection;
     private final Set<String> submitting = new HashSet<>();
+    private LastSaved lastSaved;
     private Listener listener;
 
     QuickEntryDrafts(Bundle state) {
@@ -50,6 +63,17 @@ final class QuickEntryDrafts {
         if (failure == null) clearForm(tripId);
         submitting.remove(tripId);
         if (listener != null) listener.finished(tripId, failure);
+    }
+
+    void recordSaved(String tripId, String eventId, String summary, Bundle form) {
+        lastSaved = new LastSaved(tripId, eventId, summary, form);
+    }
+
+    LastSaved consumeLastSaved(String tripId) {
+        if (lastSaved == null || !lastSaved.tripId.equals(tripId)) return null;
+        LastSaved result = lastSaved;
+        lastSaved = null;
+        return result;
     }
 
     void listen(Listener listener) { this.listener = listener; }

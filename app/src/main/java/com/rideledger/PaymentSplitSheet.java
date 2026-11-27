@@ -210,6 +210,7 @@ final class PaymentSplitSheet {
         }
         FormInput.done(shares[shares.length - 1]);
         TextView total = style.heading("", LedgerStyle.SECTION_TITLE);
+        total.setFontFeatureSettings("tnum");
         customFields.addView(total, fullWidth(4));
         Runnable update = () -> {
             try { total.setText("合计 " + Money.format(readSplit().total, displayCurrency)); }

@@ -104,7 +104,12 @@ final class LedgerActions {
 
     void expense(LedgerStore.Trip trip, String payer, String code, String rawAmount, boolean personal,
                  CustomSplit split, ExpensePayments payments, String note, ReceiptImage receipt) throws Exception {
-        store.addExpense(trip.id, expenseData(trip, null, payer, Money.code(code), rawAmount, personal,
+        addExpense(trip, payer, code, rawAmount, personal, split, payments, note, receipt);
+    }
+
+    LedgerStore.Event addExpense(LedgerStore.Trip trip, String payer, String code, String rawAmount, boolean personal,
+                                 CustomSplit split, ExpensePayments payments, String note, ReceiptImage receipt) throws Exception {
+        return store.addExpense(trip.id, expenseData(trip, null, payer, Money.code(code), rawAmount, personal,
                 split, payments, note), receipt);
     }
 

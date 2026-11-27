@@ -28,7 +28,7 @@ final class ConnectionBadge extends TextView {
     ConnectionBadge(Context context, Runnable reconnect, Runnable details) {
         super(context);
         style = new LedgerStyle(context);
-        setTextSize(11);
+        setTextSize(12);
         setTextColor(style.muted);
         setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
         setMaxLines(2);

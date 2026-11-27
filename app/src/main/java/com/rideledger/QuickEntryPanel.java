@@ -13,6 +13,7 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -24,20 +25,22 @@ import java.util.function.Supplier;
 /** Owns the edited expense so a roster update never recreates the input fields. */
 final class QuickEntryPanel extends LinearLayout {
     private static final int ROOMY_HEIGHT = 590;
-    private static final int MAX_CONTROL_GROWTH = 64;
+    private static final int MAX_CONTROL_GROWTH = 24;
     private final LedgerStyle style;
     private final QuickEntryDrafts drafts;
     private LedgerStore.Trip trip;
     private final FrameLayout amountArea;
-    private final LinearLayout amountRow, amountBox, currencyBox;
-    private final LinearLayout paymentControl, cashActions;
-    private final View cashDivider;
-    private final TextView amountCaption, paymentCaption, noteCaption, cashCaption;
+    private final LinearLayout entryCard, cashCard, amountRow, amountBox, currencyBox;
+    private final LinearLayout paymentControl, cashActions, categoryChips;
+    private final HorizontalScrollView categoryScroll;
+    private final View paymentDivider;
+    private final TextView amountCaption, paymentCaption, paymentAdjustedBadge, noteCaption, cashCaption;
     private final PaymentSummary paymentSummary;
     private final LedgerForms.CurrencyInput currencyInput;
     private final ImageView paymentIcon;
     private final ImageButton attachment;
     private final Button save;
+    private final TextView savingStatus;
     private final EditText amount, currency;
     private final NoteInput note;
     private final String defaultCurrency, defaultPayer;
@@ -62,14 +65,17 @@ final class QuickEntryPanel extends LinearLayout {
         this.drafts = drafts;
         this.trip = trip;
         Bundle state = drafts.form(trip.id);
-        LinearLayout card = this;
-        card.setOrientation(LinearLayout.VERTICAL);
-        int inset = dp(LedgerStyle.CARD_INSET);
-        card.setPadding(inset, dp(10), inset, dp(12));
-        card.setBackground(style.card());
+        setOrientation(LinearLayout.VERTICAL);
+        entryCard = new LinearLayout(activity);
+        entryCard.setOrientation(LinearLayout.VERTICAL);
+        int inset = dp(LedgerStyle.PAGE_INSET);
+        entryCard.setPadding(inset, dp(16), inset, dp(16));
+        entryCard.setBackground(style.card());
+        entryCard.setElevation(dp(1));
+        addView(entryCard, fullWidth(LedgerStyle.SECTION_GAP));
 
         amountArea = new FrameLayout(activity);
-        amountArea.setBackground(style.rounded(style.soft, 0, LedgerStyle.CONTROL_RADIUS));
+        amountArea.setBackground(style.rounded(style.soft, 0, 14));
         amountRow = new LinearLayout(activity);
         amountRow.setOrientation(LinearLayout.HORIZONTAL);
         amountRow.setBaselineAligned(false);
@@ -90,7 +96,7 @@ final class QuickEntryPanel extends LinearLayout {
             currency.setText(state.getString("currency"));
         }
         amountArea.addView(amountRow, new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER_VERTICAL));
-        card.addView(amountArea, fullWidth(LedgerStyle.CONTROL_GAP));
+        entryCard.addView(amountArea, fullWidth(LedgerStyle.CONTROL_GAP));
         defaultPayer = uiPrefs.getString("payer:" + trip.id, trip.localPerson);
         payerId = trip.member(Math.max(0, trip.indexOf(state == null ? defaultPayer : state.getString("payer"))));
         defaultPersonal = "personal".equals(uiPrefs.getString("mode:" + trip.id, "shared"));
@@ -108,17 +114,30 @@ final class QuickEntryPanel extends LinearLayout {
         paymentControl = new LinearLayout(activity);
         paymentControl.setId(View.generateViewId());
         paymentControl.setGravity(Gravity.CENTER_VERTICAL);
-        paymentControl.setPadding(dp(12), dp(10), dp(12), dp(10));
-        paymentControl.setBackground(style.ripple(style.rounded(style.surface, style.stroke, LedgerStyle.CONTROL_RADIUS),
-                LedgerStyle.CONTROL_RADIUS));
+        paymentControl.setPadding(0, dp(10), 0, dp(10));
+        paymentControl.setBackground(style.ripple(null, LedgerStyle.CONTROL_RADIUS));
         paymentControl.setFocusable(true);
         LinearLayout summary = new LinearLayout(activity);
         summary.setOrientation(LinearLayout.VERTICAL);
         summary.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         paymentControl.addView(summary, new LayoutParams(0, -2, 1));
+        LinearLayout paymentHeader = new LinearLayout(activity);
+        paymentHeader.setOrientation(LinearLayout.HORIZONTAL);
+        paymentHeader.setGravity(Gravity.CENTER_VERTICAL);
         paymentCaption = style.text("付款与分摊", LedgerStyle.CAPTION, style.muted);
         paymentCaption.setIncludeFontPadding(false);
-        summary.addView(paymentCaption, fullWidth(LedgerStyle.ITEM_GAP));
+        paymentHeader.addView(paymentCaption, new LayoutParams(-2, -2));
+        paymentAdjustedBadge = style.text("已调整", 11, style.primary);
+        paymentAdjustedBadge.setTypeface(LedgerStyle.MEDIUM);
+        paymentAdjustedBadge.setIncludeFontPadding(false);
+        paymentAdjustedBadge.setPadding(dp(7), dp(1), dp(7), dp(1));
+        paymentAdjustedBadge.setBackground(style.rounded(style.selected, 0, LedgerStyle.PILL_RADIUS));
+        paymentAdjustedBadge.setVisibility(GONE);
+        paymentAdjustedBadge.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LayoutParams badgeMargin = new LayoutParams(-2, -2);
+        badgeMargin.setMarginStart(dp(6));
+        paymentHeader.addView(paymentAdjustedBadge, badgeMargin);
+        summary.addView(paymentHeader, fullWidth(LedgerStyle.ITEM_GAP));
         paymentSummary = new PaymentSummary();
         paymentSummary.setTextColor(style.title);
         paymentSummary.setTypeface(LedgerStyle.MEDIUM);
@@ -128,13 +147,16 @@ final class QuickEntryPanel extends LinearLayout {
         paymentIcon = new ImageView(activity);
         paymentIcon.setImageResource(R.drawable.ic_ledger_payment_settings);
         paymentIcon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        paymentIcon.setPadding(dp(7), dp(7), dp(7), dp(7));
-        paymentIcon.setBackground(style.rounded(style.selected, 0, LedgerStyle.CONTROL_RADIUS));
+        paymentIcon.setPadding(dp(12), dp(12), dp(12), dp(12));
+        paymentIcon.setBackground(style.rounded(style.soft, style.stroke, LedgerStyle.CONTROL_RADIUS));
         paymentIcon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        LayoutParams settingsSize = new LayoutParams(dp(34), dp(34));
-        settingsSize.setMarginStart(dp(8));
+        LayoutParams settingsSize = new LayoutParams(dp(LedgerStyle.CONTROL_HEIGHT), dp(LedgerStyle.CONTROL_HEIGHT));
+        settingsSize.setMarginStart(dp(10));
         paymentControl.addView(paymentIcon, settingsSize);
-        card.addView(paymentControl, fullWidth(LedgerStyle.CONTROL_GAP));
+        entryCard.addView(paymentControl, fullWidth(LedgerStyle.ITEM_GAP));
+        paymentDivider = new View(activity);
+        paymentDivider.setBackgroundColor(style.divider);
+        entryCard.addView(paymentDivider, new LayoutParams(-1, dp(1)));
         updatePaymentSummary();
         paymentControl.setOnClickListener(view -> {
             try {
@@ -153,22 +175,57 @@ final class QuickEntryPanel extends LinearLayout {
                 paymentSheet.show();
             } catch (IllegalArgumentException invalid) { showError.accept(invalid); }
         });
-        note = forms.expenseNote(card, trip.id, state == null ? "" : state.getString("note", ""), false);
-        noteCaption = captionFor(card, note.field);
+        note = forms.expenseNote(entryCard, trip.id, state == null ? "" : state.getString("note", ""), false);
+        note.hideCategoryMenu();
+        noteCaption = captionFor(entryCard, note.field);
         style.inputUnderline(note.field, style.stroke);
         attachment = receipts.besideNote(note.input, trip, null, null);
+        categoryChips = new LinearLayout(activity);
+        categoryChips.setOrientation(HORIZONTAL);
+        categoryChips.setGravity(Gravity.CENTER_VERTICAL);
+        for (int i = 0; i < ExpenseCategory.SHORTCUTS.size(); i++) {
+            ExpenseCategory choice = ExpenseCategory.SHORTCUTS.get(i);
+            TextView chip = style.text(choice.label, LedgerStyle.CAPTION, style.muted);
+            chip.setTypeface(LedgerStyle.MEDIUM);
+            chip.setGravity(Gravity.CENTER);
+            chip.setMinHeight(dp(40));
+            chip.setPadding(dp(16), dp(6), dp(16), dp(6));
+            chip.setFocusable(true);
+            chip.setTag(choice);
+            chip.setContentDescription("分类快捷选择，" + choice.label);
+            chip.setOnClickListener(v -> {
+                LedgerStyle.hapticTick(v);
+                note.toggleCategory(choice);
+            });
+            LayoutParams chipParams = new LayoutParams(-2, -2);
+            if (i + 1 < ExpenseCategory.SHORTCUTS.size()) chipParams.setMarginEnd(dp(8));
+            categoryChips.addView(chip, chipParams);
+        }
+        categoryScroll = new HorizontalScrollView(activity);
+        categoryScroll.setHorizontalScrollBarEnabled(false);
+        categoryScroll.setOverScrollMode(OVER_SCROLL_NEVER);
+        categoryScroll.addView(categoryChips, new HorizontalScrollView.LayoutParams(-2, -2));
+        entryCard.addView(categoryScroll, fullWidth(LedgerStyle.ITEM_GAP));
+        note.setOnCategoryChanged(this::updateCategoryChips);
+        updateCategoryChips();
         FormInput.next(amount, currency);
         FormInput.next(currency, note.field);
         FormInput.done(note.field);
         save = style.button("保存这笔支出", LedgerStyle.Action.PRIMARY, null);
+        savingStatus = style.text("正在保存…", LedgerStyle.CAPTION, style.muted);
+        savingStatus.setGravity(Gravity.CENTER_HORIZONTAL);
+        savingStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        savingStatus.setVisibility(GONE);
         showSubmitting = submitting -> {
             amount.setEnabled(!submitting && custom == null && payments == null);
             currency.setEnabled(!submitting);
             note.setEnabled(!submitting);
+            for (int i = 0; i < categoryChips.getChildCount(); i++) categoryChips.getChildAt(i).setEnabled(!submitting);
             paymentControl.setEnabled(!submitting);
             paymentControl.setAlpha(submitting ? .55f : 1);
             attachment.setEnabled(!submitting);
             save.setEnabled(!submitting);
+            savingStatus.setVisibility(submitting ? VISIBLE : GONE);
         };
         if (drafts.isSubmitting(trip.id)) showSubmitting.accept(true);
         save.setOnClickListener(view -> {
@@ -187,11 +244,16 @@ final class QuickEntryPanel extends LinearLayout {
                 if (actualPayments != null && !code.equals(paymentCurrency))
                     throw new IllegalArgumentException("货币已更改，请重新确认多人付款");
                 String draft = receipts.draft(current.id);
-                drafts.beginSave(current.id, snapshot());
+                Bundle submittedForm = snapshot();
+                drafts.beginSave(current.id, submittedForm);
                 showSubmitting.accept(true);
+                String[] savedMeta = new String[2];
                 ledgerActions.submit(() -> {
                     ReceiptImage image = receipts.draftImage(draft);
-                    ledgerActions.expense(current, who, code, rawAmount, personalMode, split, actualPayments, rawNote, image);
+                    LedgerStore.Event event = ledgerActions.addExpense(current, who, code, rawAmount,
+                            personalMode, split, actualPayments, rawNote, image);
+                    savedMeta[0] = event.id;
+                    savedMeta[1] = Money.format(event.data.optLong("amount"), code);
                 }, () -> {
                     try {
                         receipts.clearDraft(current.id, draft);
@@ -199,26 +261,35 @@ final class QuickEntryPanel extends LinearLayout {
                         noteHistory.remember(current.id, rawNote);
                         uiPrefs.edit().putString("payer:" + current.id, who)
                                 .putString("mode:" + current.id, personalMode ? "personal" : "shared").apply();
+                        if (savedMeta[0] != null)
+                            drafts.recordSaved(current.id, savedMeta[0], savedMeta[1], submittedForm);
                     } catch (RuntimeException preferencesError) {
                         SyncLog.write(activity, SyncLog.Event.UI_REFRESH, preferencesError);
                     } finally { drafts.finishSave(current.id, null); }
                 }, error -> drafts.finishSave(current.id, error));
-            } catch (Exception e) { showError.accept(e); }
+            } catch (Exception e) {
+                LedgerStyle.hapticReject(save);
+                showError.accept(e);
+            }
         });
         LayoutParams saveSpacing = fullWidth(LedgerStyle.ITEM_GAP);
         saveSpacing.topMargin = dp(LedgerStyle.ITEM_GAP);
-        card.addView(save, saveSpacing);
+        entryCard.addView(save, saveSpacing);
+        entryCard.addView(savingStatus, fullWidth(0));
 
-        cashDivider = new View(activity);
-        cashDivider.setBackgroundColor(style.divider);
-        card.addView(cashDivider, new LayoutParams(-1, dp(1)));
+        cashCard = new LinearLayout(activity);
+        cashCard.setOrientation(LinearLayout.VERTICAL);
+        cashCard.setPadding(inset, dp(14), inset, dp(14));
+        cashCard.setBackground(style.card());
+        cashCard.setElevation(dp(1));
+        addView(cashCard, fullWidth(0));
         cashCaption = style.heading("现金管理", LedgerStyle.CAPTION);
         cashCaption.setTextColor(style.muted);
         cashCaption.setIncludeFontPadding(false);
-        card.addView(cashCaption, fullWidth(LedgerStyle.ITEM_GAP));
+        cashCard.addView(cashCaption, fullWidth(LedgerStyle.ITEM_GAP));
         cashActions = new LinearLayout(activity);
         cashActions.setBaselineAligned(false);
-        card.addView(cashActions, fullWidth(0));
+        cashCard.addView(cashActions, fullWidth(0));
         addCashAction(LedgerReview.CASH_LABEL, R.drawable.ic_ledger_cash_in, latestTrip, forms::moneyIn);
         if (trip.people() > 1)
             addCashAction("成员还款", R.drawable.ic_ledger_cash_repayment, latestTrip, forms::transfer);
@@ -227,7 +298,7 @@ final class QuickEntryPanel extends LinearLayout {
         amount.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence value, int start, int before, int count) {
-                if (viewportWidth > 0) fitAmountColumns(viewportWidth - getPaddingLeft() - getPaddingRight());
+                if (viewportWidth > 0) fitAmountColumns(viewportWidth - entryCard.getPaddingLeft() - entryCard.getPaddingRight());
             }
             @Override public void afterTextChanged(Editable value) { }
         });
@@ -236,8 +307,8 @@ final class QuickEntryPanel extends LinearLayout {
     /** Resizing changes the presentation of the same inputs, including while the keyboard is open. */
     void fitViewport(int width, int height, boolean keyboardVisible) {
         int growth = !keyboardVisible && height >= dp(ROOMY_HEIGHT)
-                ? Math.min(MAX_CONTROL_GROWTH, (height - dp(ROOMY_HEIGHT)) / dp(4)) : -1;
-        if (growth >= 0 && cashActionsWidth(17 + growth / 14) > width - getPaddingLeft() - getPaddingRight())
+                ? Math.min(MAX_CONTROL_GROWTH, (height - dp(ROOMY_HEIGHT)) / dp(8)) : -1;
+        if (growth >= 0 && cashActionsWidth(14) > width - cashCard.getPaddingLeft() - cashCard.getPaddingRight())
             growth = -1;
         if (viewportWidth == width && verticalGrowth == growth) return;
         viewportWidth = width;
@@ -248,47 +319,54 @@ final class QuickEntryPanel extends LinearLayout {
     private void applyPresentation() {
         boolean tall = verticalGrowth >= 0;
         int growth = Math.max(verticalGrowth, 0);
-        int sectionGap = LedgerStyle.CONTROL_GAP + Math.min(8, growth / 4);
-        int itemGap = LedgerStyle.ITEM_GAP + Math.min(4, growth / 8);
-        space(amountArea, 0, sectionGap);
-        space(paymentControl, 0, sectionGap);
+        int hPad = dp(LedgerStyle.PAGE_INSET);
+        int entryVPad = dp(tall ? 16 : 12);
+        entryCard.setPadding(hPad, entryVPad, hPad, entryVPad);
+        int cashVPad = dp(tall ? 14 : 10);
+        cashCard.setPadding(hPad, cashVPad, hPad, cashVPad);
+        int sectionGap = tall ? 12 + growth / 6 : LedgerStyle.CONTROL_GAP;
+        int itemGap = tall ? 8 : LedgerStyle.ITEM_GAP;
+        space(entryCard, 0, tall ? 12 : LedgerStyle.CONTROL_GAP);
+        space(amountArea, 0, tall ? 10 : LedgerStyle.CONTROL_GAP);
+        space(paymentControl, 0, 2);
+        space(paymentDivider, 2, sectionGap);
         space(noteCaption, 0, itemGap);
-        space(save, itemGap, LedgerStyle.ITEM_GAP);
-        space(cashDivider, sectionGap, itemGap);
-        space(cashCaption, 0, itemGap);
+        space(categoryScroll, 0, itemGap);
+        space(save, tall ? 12 : itemGap, 0);
+        space(cashCaption, 0, tall ? 10 : itemGap);
 
-        int label = tall ? 15 + growth / 24 : LedgerStyle.CAPTION;
+        int label = tall ? 14 : LedgerStyle.CAPTION;
         amountCaption.setTextSize(label);
         currencyInput.caption.setTextSize(label);
         paymentCaption.setTextSize(label);
         noteCaption.setTextSize(label);
         cashCaption.setTextSize(label);
-        amountArea.setPaddingRelative(dp(12), dp(tall ? 12 : 6), dp(12), dp(tall ? 8 : 2));
-        amount.setTextSize(tall ? 42 + growth / 8 : LedgerStyle.QUICK_AMOUNT);
+        amountArea.setPaddingRelative(dp(16), dp(tall ? 14 : 8), dp(16), dp(tall ? 14 : 6));
+        amount.setTextSize(tall ? 42 : LedgerStyle.QUICK_AMOUNT);
         preferredAmountSize = amount.getTextSize();
-        int amountHeight = tall ? 70 + growth / 2 : LedgerStyle.COMPACT_HEIGHT;
+        int amountHeight = tall ? 62 : LedgerStyle.COMPACT_HEIGHT;
         amount.setMinimumHeight(dp(amountHeight));
-        currency.setTextSize(tall ? 20 + growth / 16 : 16);
-        int currencyHeight = tall ? 54 + growth / 3 : LedgerStyle.COMPACT_HEIGHT;
+        currency.setTextSize(tall ? 18 : 16);
+        int currencyHeight = amountHeight;
         currency.setMinimumHeight(dp(currencyHeight));
-        currencyInput.historyButton.setTextSize(tall ? 20 + growth / 16 : 16);
+        currencyInput.historyButton.setTextSize(tall ? 17 : 16);
         LayoutParams historySize = (LayoutParams) currencyInput.historyButton.getLayoutParams();
         historySize.height = dp(currencyHeight);
         currencyInput.historyButton.setLayoutParams(historySize);
 
-        paymentControl.setMinimumHeight(dp(tall ? 80 + 2 * growth / 3 : 64));
-        paymentSummary.setTextSize(tall ? 18 + growth / 13 : LedgerStyle.BODY);
-        resizeIcon(paymentIcon, tall ? 44 + growth / 7 : 34);
-        note.field.setTextSize(tall ? 17 + growth / 16 : LedgerStyle.BODY);
-        note.field.setMinimumHeight(dp(tall ? 56 + growth / 3 : LedgerStyle.COMPACT_HEIGHT));
-        int attachmentSize = tall ? 56 + growth / 7 : LedgerStyle.CONTROL_HEIGHT;
-        resizeIcon(attachment, attachmentSize);
-        save.setTextSize(tall ? 18 + growth / 12 : LedgerStyle.BODY);
-        buttonHeight(save, tall ? 60 + growth / 3 : LedgerStyle.CONTROL_HEIGHT);
+        paymentControl.setPadding(0, dp(tall ? 10 : 8), 0, dp(tall ? 10 : 8));
+        paymentControl.setMinimumHeight(dp(tall ? 66 : 56));
+        paymentSummary.setTextSize(tall ? 17 : LedgerStyle.BODY);
+        resizeIcon(paymentIcon, LedgerStyle.CONTROL_HEIGHT);
+        note.field.setTextSize(tall ? 16 : LedgerStyle.BODY);
+        note.field.setMinimumHeight(dp(tall ? 50 : LedgerStyle.CONTROL_HEIGHT));
+        resizeIcon(attachment, LedgerStyle.CONTROL_HEIGHT);
+        save.setTextSize(tall ? 17 : LedgerStyle.BODY);
+        buttonHeight(save, tall ? 54 : LedgerStyle.CONTROL_HEIGHT);
 
         for (int i = 0; i < cashActions.getChildCount(); i++) ((CashAction) cashActions.getChildAt(i)).fit(tall, growth);
         if (viewportWidth > 0) {
-            int contentWidth = viewportWidth - getPaddingLeft() - getPaddingRight();
+            int contentWidth = viewportWidth - entryCard.getPaddingLeft() - entryCard.getPaddingRight();
             fitAmountColumns(contentWidth);
             fitCashActions(contentWidth);
         }
@@ -383,8 +461,9 @@ final class QuickEntryPanel extends LinearLayout {
             super(QuickEntryPanel.this.getContext());
             setOrientation(VERTICAL);
             setGravity(Gravity.CENTER);
-            setPadding(dp(4), dp(2), dp(4), dp(2));
-            setBackground(style.ripple(null, LedgerStyle.CONTROL_RADIUS));
+            setPadding(dp(8), dp(10), dp(8), dp(10));
+            setBackground(style.ripple(style.rounded(style.soft, 0, LedgerStyle.CONTROL_RADIUS),
+                    LedgerStyle.CONTROL_RADIUS));
             setContentDescription(title);
             setFocusable(true);
             setOnClickListener(view -> open.run());
@@ -404,10 +483,10 @@ final class QuickEntryPanel extends LinearLayout {
         }
 
         void fit(boolean tall, int growth) {
-            setMinimumHeight(dp(tall ? 76 + 3 * growth / 4 : LedgerStyle.CONTROL_HEIGHT));
-            resizeIcon(icon, tall ? 34 + growth / 4 : 24);
-            label.setTextSize(tall ? 17 + growth / 14 : LedgerStyle.CAPTION);
-            label.setPadding(0, dp(tall ? 5 + growth / 12 : 1), 0, 0);
+            setMinimumHeight(dp(tall ? 68 + growth / 5 : 54));
+            resizeIcon(icon, tall ? 28 : 24);
+            label.setTextSize(tall ? 14 : LedgerStyle.CAPTION);
+            label.setPadding(0, dp(tall ? 8 : 4), 0, 0);
         }
 
         int minimumColumnWidth(int proposedSp) {
@@ -452,6 +531,18 @@ final class QuickEntryPanel extends LinearLayout {
             }
             if (!summary.contentEquals(getText())) setText(summary);
             super.onMeasure(widthSpec, heightSpec);
+        }
+    }
+
+    private void updateCategoryChips() {
+        ExpenseCategory current = note.category();
+        for (int i = 0; i < categoryChips.getChildCount(); i++) {
+            TextView chip = (TextView) categoryChips.getChildAt(i);
+            boolean selected = chip.getTag() == current;
+            chip.setSelected(selected);
+            chip.setTextColor(selected ? style.primary : style.muted);
+            chip.setBackground(style.ripple(style.rounded(selected ? style.selected : style.soft,
+                    selected ? style.primary : style.stroke, LedgerStyle.PILL_RADIUS), LedgerStyle.PILL_RADIUS));
         }
     }
 
@@ -517,6 +608,11 @@ final class QuickEntryPanel extends LinearLayout {
         String person = trip.nameOf(payerId) + (payerId.equals(trip.localPerson) ? "（我）" : "");
         if (payments != null) person = payments.amounts().size() + " 人付款";
         String rule = custom != null ? "自定义分摊" : personal ? (payments == null ? "仅付款人" : "各自承担") : "全员平摊";
+        boolean customized = !payerId.equals(trip.localPerson) || personal || custom != null || payments != null;
+        paymentAdjustedBadge.setVisibility(customized ? VISIBLE : GONE);
+        paymentSummary.setTextColor(customized ? style.primary : style.title);
+        paymentIcon.setBackground(style.rounded(customized ? style.selected : style.soft,
+                customized ? style.primary : style.stroke, LedgerStyle.CONTROL_RADIUS));
         paymentSummary.setPayment(person, rule);
         paymentControl.setContentDescription("付款与分摊，" + person + "，" + rule);
         amount.setEnabled(!drafts.isSubmitting(trip.id) && custom == null && payments == null);

@@ -41,8 +41,7 @@ import java.util.function.Consumer;
 final class ReceiptUi {
     private static final int OLD_CAMERA = 81, OLD_GALLERY = 82, CAMERA_PERMISSION = 83;
     private static final int FIRST_PICK_REQUEST = 0x4000, LAST_PICK_REQUEST = 0x4fff;
-    private static final int CAMERA_BUTTON_RADIUS = 36;
-    private static final int GREEN = 0xff28634e;
+    private static final int CAMERA_BUTTON_RADIUS = LedgerStyle.CONTROL_RADIUS;
 
     /** Retained with the form so an import can finish after recreation. */
     static final class Selection {
@@ -144,7 +143,9 @@ final class ReceiptUi {
             paint(button, attached != null);
             if (attached != null) bindThumbnail(trip.id, attached, button);
         }
-        row.addView(button, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        LinearLayout.LayoutParams buttonSize = new LinearLayout.LayoutParams(dp(48), dp(48));
+        buttonSize.setMarginStart(dp(10));
+        row.addView(button, buttonSize);
         button.setOnClickListener(view -> press(button, trip.id, eventId, false));
         button.setOnLongClickListener(view -> {
             press(button, trip.id, eventId, true);
@@ -159,7 +160,7 @@ final class ReceiptUi {
         String hint = attached ? "查看小票，长按管理" : "拍照添加小票，长按从相册选择";
         button.setContentDescription(hint);
         button.setTooltipText(hint);
-        button.setBackground(style.rounded(style.surface, 0, CAMERA_BUTTON_RADIUS));
+        button.setBackground(style.rounded(attached ? style.surface : style.soft, 0, CAMERA_BUTTON_RADIUS));
         button.setForeground(style.ripple(style.rounded(Color.TRANSPARENT, attached ? style.primary : style.stroke,
                 CAMERA_BUTTON_RADIUS), CAMERA_BUTTON_RADIUS));
         button.showCamera();
@@ -187,10 +188,31 @@ final class ReceiptUi {
         } else if (longPress) {
             menu(button, tripId, eventId, draft);
         } else if (draft != null) {
-            showPhoto(() -> readDraft(draft));
+            showPhoto(() -> readDraft(draft),
+                    () -> select(tripId, eventId, button, true),
+                    () -> select(tripId, eventId, button, false),
+                    () -> {
+                        clearDraft(tripId, draft);
+                        paint(button, false);
+                    });
         } else {
-            view(tripId, entry);
+            viewManageable(tripId, eventId, button, entry);
         }
+    }
+
+    private void viewManageable(String tripId, String eventId, ReceiptButton button, LedgerReceipts.Entry entry) {
+        if (!entry.available) {
+            menu(button, tripId, eventId, null);
+            return;
+        }
+        showPhoto(() -> store.receipts.bytes(tripId, entry, false),
+                () -> select(tripId, eventId, button, true),
+                () -> select(tripId, eventId, button, false),
+                () -> {
+                    target(tripId, eventId, button);
+                    selection.importing = true;
+                    changeReceipt(tripId, eventId, null);
+                });
     }
 
     private void menu(ReceiptButton button, String tripId, String eventId, String draft) {
@@ -391,7 +413,7 @@ final class ReceiptUi {
         ReceiptButton(Activity activity, LedgerStyle style) {
             super(activity);
             minimumInset = style.dp(12);
-            iconSize = style.dp(32);
+            iconSize = style.dp(24);
             setClipToOutline(true);
         }
 
@@ -426,19 +448,23 @@ final class ReceiptUi {
     private interface PhotoRead { byte[] load() throws IOException; }
 
     private void showPhoto(PhotoRead source) {
+        showPhoto(source, null, null, null);
+    }
+
+    private void showPhoto(PhotoRead source, Runnable retake, Runnable pickGallery, Runnable remove) {
         if (preview != null) preview.dismiss();
-        Dialog dialog = new Dialog(activity, android.R.style.Theme_Material_Light_NoActionBar);
+        Dialog dialog = new Dialog(activity, R.style.LedgerTheme);
         LinearLayout frame = new LinearLayout(activity);
         frame.setOrientation(LinearLayout.VERTICAL);
-        frame.setBackgroundColor(0xff1b2823);
+        frame.setBackgroundColor(style.photoBackdrop);
         LinearLayout bar = new LinearLayout(activity);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setPadding(dp(16), 0, dp(8), 0);
-        bar.setBackgroundColor(Color.WHITE);
+        bar.setBackgroundColor(style.surface);
         TextView title = new TextView(activity);
         title.setText("小票");
         title.setTextSize(20);
-        title.setTextColor(GREEN);
+        title.setTextColor(style.title);
         bar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
         Button close = style.button("关闭", LedgerStyle.Action.OUTLINE, dialog::dismiss);
         close.setMinWidth(dp(64));
@@ -451,6 +477,28 @@ final class ReceiptUi {
         ZoomImage image = new ZoomImage(activity);
         image.setContentDescription("小票照片，可双指缩放");
         frame.addView(image, new LinearLayout.LayoutParams(-1, 0, 1));
+        if (retake != null || pickGallery != null || remove != null) {
+            View rule = new View(activity);
+            rule.setBackgroundColor(style.divider);
+            frame.addView(rule, new LinearLayout.LayoutParams(-1, dp(1)));
+            LinearLayout actionsBar = new LinearLayout(activity);
+            actionsBar.setOrientation(LinearLayout.HORIZONTAL);
+            actionsBar.setBackgroundColor(style.surface);
+            int baseBottom = dp(12);
+            actionsBar.setPadding(dp(16), dp(10), dp(16), baseBottom);
+            if (Build.VERSION.SDK_INT >= 30) {
+                actionsBar.setOnApplyWindowInsetsListener((view, insets) -> {
+                    android.graphics.Insets nav = insets.getInsets(
+                            android.view.WindowInsets.Type.navigationBars() | android.view.WindowInsets.Type.displayCutout());
+                    view.setPadding(dp(16), dp(10), dp(16), baseBottom + nav.bottom);
+                    return insets;
+                });
+            }
+            addPreviewAction(actionsBar, "重拍", LedgerStyle.Action.OUTLINE, dialog, retake, false);
+            addPreviewAction(actionsBar, "相册更换", LedgerStyle.Action.OUTLINE, dialog, pickGallery, true);
+            addPreviewAction(actionsBar, "移除", LedgerStyle.Action.DANGER, dialog, remove, true);
+            frame.addView(actionsBar, new LinearLayout.LayoutParams(-1, -2));
+        }
         Window window = dialog.getWindow();
         FormInput.fitActivityWindow(window, frame);
         dialog.setContentView(frame);
@@ -479,6 +527,18 @@ final class ReceiptUi {
                 else { dialog.dismiss(); error.accept(new IOException("暂时无法打开小票")); }
             });
         });
+    }
+
+    private void addPreviewAction(LinearLayout bar, String label, LedgerStyle.Action action,
+                                  Dialog dialog, Runnable task, boolean spaced) {
+        if (task == null) return;
+        Button button = style.button(label, action, () -> {
+            dialog.dismiss();
+            task.run();
+        });
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(0, -2, 1);
+        if (spaced) size.setMarginStart(dp(8));
+        bar.addView(button, size);
     }
 
     void close() {

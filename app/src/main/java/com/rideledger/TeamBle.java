@@ -59,20 +59,21 @@ final class TeamBle {
     private final Context context;
     private final BluetoothAdapter adapter;
     private final ParcelUuid scope;
+    private final UUID rfcommUuid;
     private final String hint;
     private final Events events;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Map<String, Long> seen = new HashMap<>();
     private final Set<BluetoothSocket> sockets = ConcurrentHashMap.newKeySet();
     private volatile boolean active;
-    private volatile BluetoothServerSocket server;
+    private volatile BluetoothServerSocket server, rfcommServer;
     private BluetoothLeAdvertiser advertiser;
     private BluetoothLeScanner scanner;
     private AdvertiseCallback advertisement;
     private ScanCallback scan;
     private long retryScan, retryAdvertise, nextScanStart;
     private long scanRetryDelay = FIRST_RADIO_RETRY, advertiseRetryDelay = FIRST_RADIO_RETRY;
-    private boolean background, receiverRegistered, windowedDiscovery, scanWindowOpen;
+    private boolean background, receiverRegistered, windowedDiscovery, scanWindowOpen, backgroundIdle;
     private volatile ScheduledExecutorService timer;
     private final Runnable expire = this::refresh;
     private final Runnable retryRadio = this::refresh;
@@ -95,6 +96,7 @@ final class TeamBle {
         this.events = events;
         hint = TeamProtocol.routeHint(trip.team, deviceId);
         scope = scope(trip);
+        rfcommUuid = UUID.nameUUIDFromBytes(("ride-ledger-rfcomm-1:" + trip.secret).getBytes(StandardCharsets.UTF_8));
         BluetoothManager manager = this.context.getSystemService(BluetoothManager.class);
         adapter = manager == null ? null : manager.getAdapter();
     }
@@ -157,8 +159,23 @@ final class TeamBle {
         else refresh();
     }
 
+    void setIdle(boolean idle) {
+        if (backgroundIdle == idle) return;
+        backgroundIdle = idle;
+        if (!active || !windowedDiscovery) return;
+        if (idle) {
+            main.removeCallbacks(beginWindow);
+            main.removeCallbacks(endWindow);
+            scanWindowOpen = false;
+            stopScan();
+        } else if (!scanWindowOpen) {
+            beginDiscoveryWindow();
+        }
+    }
+
     void rediscover() {
         if (!active) return;
+        backgroundIdle = false;
         retryScan = retryAdvertise = 0;
         scanRetryDelay = advertiseRetryDelay = FIRST_RADIO_RETRY;
         long wait = nextScanStart - SystemClock.elapsedRealtime();
@@ -166,11 +183,15 @@ final class TeamBle {
             // Give a newly registered scan time to run before registering another callback.
             main.removeCallbacks(renewScan);
             main.postDelayed(renewScan, wait);
-        } else stopScan();
+        } else if (wait <= 0) {
+            stopScan();
+        }
         // Rebind an idle listener with its advertisement. An active exchange may still advertise its port.
         if (sockets.isEmpty()) stopAdvertising();
-        if (windowedDiscovery) beginDiscoveryWindow();
-        else refresh();
+        if (windowedDiscovery) {
+            if (!scanWindowOpen && wait <= 0) beginDiscoveryWindow();
+            else refresh();
+        } else refresh();
     }
 
     void refresh() {
@@ -206,7 +227,7 @@ final class TeamBle {
 
     private boolean scanAllowed() { return canScan(context, background); }
 
-    private boolean canDiscover() { return (!windowedDiscovery || scanWindowOpen) && scanAllowed(); }
+    private boolean canDiscover() { return (!windowedDiscovery || (scanWindowOpen && !backgroundIdle)) && scanAllowed(); }
 
     private long advertisementAge() { return ADVERTISEMENT_AGE + (windowedDiscovery ? 2 * SCAN_INTERVAL : 0); }
 
@@ -319,15 +340,22 @@ final class TeamBle {
             Thread acceptor = new Thread(() -> accept(listening), "RideLedger-team-BLE");
             acceptor.setDaemon(true);
             acceptor.start();
+            try {
+                BluetoothServerSocket rfcommListening = adapter.listenUsingInsecureRfcommWithServiceRecord("RideLedger", rfcommUuid);
+                rfcommServer = rfcommListening;
+                Thread rfcommAcceptor = new Thread(() -> accept(rfcommListening), "RideLedger-team-RFCOMM");
+                rfcommAcceptor.setDaemon(true);
+                rfcommAcceptor.start();
+            } catch (Exception ignored) { }
         } catch (Exception error) { radioFailed(false, error.getClass().getSimpleName()); }
     }
 
     private void accept(BluetoothServerSocket listening) {
-        while (active && server == listening) {
+        while (active && (server == listening || rfcommServer == listening)) {
             BluetoothSocket socket = null;
             try {
                 socket = listening.accept();
-                if (!active || server != listening || sockets.size() >= 8) {
+                if (!active || (server != listening && rfcommServer != listening) || sockets.size() >= 8) {
                     close(socket);
                     continue;
                 }
@@ -346,7 +374,15 @@ final class TeamBle {
     private PeerConnection dial(BluetoothDevice device, int psm) throws Exception {
         ScheduledExecutorService worker = timer;
         if (!active || worker == null || !hasPermissions(context)) throw new IOException("蓝牙连接不可用");
-        BluetoothSocket socket = device.createInsecureL2capChannel(psm);
+        try {
+            return connectSocket(device, device.createInsecureL2capChannel(psm), worker);
+        } catch (Exception l2capError) {
+            if (!active) throw l2capError;
+            return connectSocket(device, device.createInsecureRfcommSocketToServiceRecord(rfcommUuid), worker);
+        }
+    }
+
+    private PeerConnection connectSocket(BluetoothDevice device, BluetoothSocket socket, ScheduledExecutorService worker) throws Exception {
         sockets.add(socket);
         try {
             ScheduledFuture<?> deadline = worker.schedule(() -> close(socket), 4500, TimeUnit.MILLISECONDS);
@@ -384,6 +420,9 @@ final class TeamBle {
         BluetoothServerSocket listening = server;
         server = null;
         close(listening);
+        BluetoothServerSocket rfcomm = rfcommServer;
+        rfcommServer = null;
+        close(rfcomm);
     }
 
     private void resetRadio() {

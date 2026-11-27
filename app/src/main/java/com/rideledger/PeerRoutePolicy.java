@@ -29,17 +29,22 @@ final class PeerRoutePolicy {
         }
     }
     private static final class State {
-        Endpoint endpoint; int failures; long retryAt, succeededAt; boolean busy, superseded;
+        Endpoint endpoint; int failures; long retryAt, succeededAt, yieldUntil; boolean busy, superseded;
         Endpoint attempt;
         long revision = -1;
         long lastSeen;
         State(Endpoint endpoint, long now) { this.endpoint = endpoint; lastSeen = now; }
     }
     private final LongSupplier clock;
+    private final String ownRouteId;
     private final Map<String, State> states = new LinkedHashMap<>();
     private final Map<String, Integer> syncFailures = new HashMap<>();
     private final Map<String, Long> recoveryAt = new HashMap<>();
-    PeerRoutePolicy(LongSupplier clock) { this.clock = clock; }
+    PeerRoutePolicy(LongSupplier clock) { this(clock, ""); }
+    PeerRoutePolicy(LongSupplier clock, String ownRouteId) {
+        this.clock = clock;
+        this.ownRouteId = ownRouteId == null ? "" : ownRouteId;
+    }
     synchronized boolean offer(Endpoint endpoint) {
         long now = clock.getAsLong();
         State old = states.get(endpoint.key);
@@ -48,13 +53,19 @@ final class PeerRoutePolicy {
             // connection must never confirm work for the newly discovered identity.
             if (PeerIdentity.valid(endpoint.peerId) && PeerIdentity.valid(old.endpoint.peerId) &&
                     !endpoint.peerId.equals(old.endpoint.peerId)) {
-                states.put(endpoint.key, new State(endpoint, now));
+                State inserted = new State(endpoint, now);
+        if (!ownRouteId.isEmpty() && PeerIdentity.valid(endpoint.peerId) && ownRouteId.compareTo(endpoint.peerId) > 0)
+            inserted.yieldUntil = now + 3500;
+        states.put(endpoint.key, inserted);
                 syncFailures.remove(group(endpoint));
                 recoveryAt.remove(group(endpoint));
                 return true;
             }
             if (endpoint.channel != old.endpoint.channel && !old.busy) {
-                states.put(endpoint.key, new State(endpoint, now));
+                State inserted = new State(endpoint, now);
+        if (!ownRouteId.isEmpty() && PeerIdentity.valid(endpoint.peerId) && ownRouteId.compareTo(endpoint.peerId) > 0)
+            inserted.yieldUntil = now + 3500;
+        states.put(endpoint.key, inserted);
                 syncFailures.remove(group(endpoint));
                 recoveryAt.remove(group(endpoint));
                 return true;
@@ -80,7 +91,10 @@ final class PeerRoutePolicy {
         if (knownPeer) for (State state : states.values()) {
             if (samePeerChannel(state, endpoint)) state.superseded = true;
         }
-        states.put(endpoint.key, new State(endpoint, now));
+        State inserted = new State(endpoint, now);
+        if (!ownRouteId.isEmpty() && PeerIdentity.valid(endpoint.peerId) && ownRouteId.compareTo(endpoint.peerId) > 0)
+            inserted.yieldUntil = now + 3500;
+        states.put(endpoint.key, inserted);
         // A newly advertised address can be a recovered link with a different port.
         syncFailures.remove(group(endpoint));
         recoveryAt.remove(group(endpoint));
@@ -203,7 +217,7 @@ final class PeerRoutePolicy {
         return candidates;
     }
     private long syncRetryAt(State state) {
-        return Math.max(state.retryAt, recoveryAt.getOrDefault(group(state.endpoint), 0L));
+        return Math.max(Math.max(state.retryAt, state.yieldUntil), recoveryAt.getOrDefault(group(state.endpoint), 0L));
     }
     private boolean prefer(State candidate, State previous, long now) {
         long candidateRetry = syncRetryAt(candidate), previousRetry = syncRetryAt(previous);
@@ -283,6 +297,7 @@ final class PeerRoutePolicy {
             state.succeededAt = clock.getAsLong();
             state.revision = Math.max(state.revision, revision);
             state.retryAt = 0;
+            state.yieldUntil = 0;
         }
     }
     synchronized void markRelayedFrom(String peer, Channel channel, long revision) {
@@ -303,7 +318,12 @@ final class PeerRoutePolicy {
             state.retryAt = clock.getAsLong() + Math.min(60000, 5000L << (state.failures - 1));
         }
     }
-    synchronized void resetBackoff() { for (State state : states.values()) state.retryAt = 0; }
+    synchronized void resetBackoff() {
+        for (State state : states.values()) {
+            state.retryAt = 0;
+            state.yieldUntil = 0;
+        }
+    }
     synchronized void clear() { states.clear(); syncFailures.clear(); recoveryAt.clear(); }
 
     private boolean retire(String key, State state) {

@@ -308,6 +308,7 @@ final class TripReportView {
             if (numeric) {
                 cell.setTypeface(LedgerStyle.MEDIUM);
                 cell.setFontFeatureSettings("tnum");
+                cell.setText(style.styledDecimal(values.get(i), 0.84f));
             }
             TableRow.LayoutParams size = new TableRow.LayoutParams(WRAP, WRAP);
             if (i > 0) size.setMarginStart(style.dp(LedgerStyle.CONTROL_GAP));
@@ -351,6 +352,7 @@ final class TripReportView {
         int inset = style.dp(LedgerStyle.CARD_INSET);
         card.setPadding(inset, inset, inset, inset);
         card.setBackground(highlighted ? style.rounded(style.soft, style.stroke, LedgerStyle.CARD_RADIUS) : style.card());
+        card.setElevation(style.dp(1));
         LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(FULL, WRAP);
         size.bottomMargin = style.dp(LedgerStyle.SECTION_GAP);
         body.addView(card, size);

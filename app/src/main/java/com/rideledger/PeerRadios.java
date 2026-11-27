@@ -77,6 +77,7 @@ final class PeerRadios {
     }
     void refreshLegacyBluetooth() { legacyBluetooth.refresh(); }
     void refreshTeamBluetooth() { if (teamBluetooth != null) teamBluetooth.permissionsChanged(); }
+    void setBackgroundIdle(boolean idle) { if (teamBluetooth != null) teamBluetooth.setIdle(idle); }
     boolean discoveredBluetooth(List<ScanResult> results) {
         return teamBluetooth != null && teamBluetooth.discovered(results);
     }

@@ -119,6 +119,8 @@ final class SettlementSheet {
             direction.setPadding(0, style.dp(LedgerStyle.CONTROL_GAP), 0, 0);
             result.addView(direction);
             TextView amount = style.heading(debt.amounts.get(0), 20);
+            amount.setFontFeatureSettings("tnum");
+            amount.setText(style.styledMoney(debt.amounts.get(0), 0.82f, 0.70f));
             result.addView(amount, new LinearLayout.LayoutParams(-1, -2));
         }
         if (shareScope != null) {
@@ -169,12 +171,10 @@ final class SettlementSheet {
         caption.setSingleLine(true);
         caption.setPaddingRelative(0, 0, style.dp(LedgerStyle.CONTROL_GAP), 0);
         row.addView(caption, new TableRow.LayoutParams(-2, -2));
-        EditText input = new EditText(form.getContext());
+        EditText input = new FormInput.AmountField(form.getContext());
         input.setId(View.generateViewId());
         input.setContentDescription(source + " 兑 " + targetCode + " 的汇率");
         caption.setLabelFor(input.getId());
-        input.setSingleLine(true);
-        input.setRawInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
         input.setGravity(Gravity.CENTER);
         input.setHint("汇率");
         input.setText(previous);

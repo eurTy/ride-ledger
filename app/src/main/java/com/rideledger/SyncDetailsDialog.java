@@ -2,9 +2,17 @@ package com.rideledger;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothManager;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
+import android.os.Build;
+import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -35,11 +43,37 @@ final class SyncDetailsDialog {
         body.setPadding(inset, style.dp(LedgerStyle.CONTROL_GAP), inset, inset);
         scroll.addView(body);
         AlertDialog shown = new AlertDialog.Builder(activity).setTitle("同步详情").setView(scroll)
+                .setNeutralButton("复制诊断", null)
                 .setPositiveButton("关闭", null).create();
         dialog = shown;
         shown.setOnDismissListener(ignored -> { if (dialog == shown) clear(); });
         dialog.show();
         style.alertActions(dialog, LedgerStyle.Action.QUIET);
+        Button copy = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
+        if (copy != null) {
+            style.styleAction(copy, LedgerStyle.Action.QUIET);
+            copy.setOnClickListener(v -> copyDiagnostics());
+        }
+    }
+
+    private void copyDiagnostics() {
+        StringBuilder report = new StringBuilder();
+        report.append("RideLedger 同步诊断 (").append(time.format(new Date())).append(")\n");
+        report.append("Android ").append(Build.VERSION.RELEASE).append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
+        BluetoothManager btManager = activity.getSystemService(BluetoothManager.class);
+        BluetoothAdapter adapter = btManager == null ? null : btManager.getAdapter();
+        report.append("蓝牙: ").append(adapter != null && adapter.isEnabled() ? "已开启" : "未开启")
+                .append(" · 权限: ").append(TeamBle.hasPermissions(activity) ? "完整" : "缺失")
+                .append(" · 后台扫描: ").append(TeamBle.canScan(activity, true) ? "可用" : "受限").append("\n");
+        for (int i = 0; i < rendered.size(); i++) {
+            String line = rendered.get(i);
+            if (!line.isEmpty()) report.append(line).append("\n");
+        }
+        ClipboardManager clipboard = (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
+        if (clipboard != null) {
+            clipboard.setPrimaryClip(ClipData.newPlainText("RideLedger 同步诊断", report.toString().trim()));
+            Toast.makeText(activity, "已复制同步诊断信息", Toast.LENGTH_SHORT).show();
+        }
     }
 
     boolean isShowing() { return dialog != null && dialog.isShowing(); }

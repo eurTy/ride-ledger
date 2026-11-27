@@ -6,6 +6,7 @@
         <item name="android:navigationBarColor">@color/ledger_surface</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:forceDarkAllowed">false</item>
         <item name="android:colorAccent">@color/ledger_primary</item>
         <item name="android:colorControlHighlight">@color/ledger_pressed</item>
         <item name="android:popupWindowStyle">@style/LedgerPopupWindow</item>

@@ -1,6 +1,7 @@
 package com.rideledger;
 
 import android.Manifest;
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
@@ -10,10 +11,15 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.provider.OpenableColumns;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -51,6 +57,10 @@ public final class MainActivity extends Activity {
     private long reviewGeneration;
     private boolean reviewDirty;
     private FrameLayout reviewContent;
+    private FrameLayout snackbarHost;
+    private View undoBanner;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private Runnable dismissUndo;
     private View recordsOverlay;
     private String exportTripId;
     private ExportFormat exportFormat = ExportFormat.TEXT;
@@ -76,6 +86,9 @@ public final class MainActivity extends Activity {
     private boolean deletingTrips;
     private int screen = TRIPS;
     private TextView syncView;
+    private boolean animateTabTransition;
+    private View bottomBarView;
+    private LedgerKeyboard ledgerKeyboard;
     private static final int REQUEST_TEAM = 74;
     private static final int REQUEST_STARTUP_PERMISSIONS = 75;
     private static final int REQUEST_BACKGROUND_BLUETOOTH = 76;
@@ -141,6 +154,7 @@ public final class MainActivity extends Activity {
     }
     @Override public void onStop() {
         started = false;
+        dismissUndoBanner();
         tripReports.stop();
         rememberQuickEntry();
         cancelReviewLoad();
@@ -152,6 +166,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        dismissUndoBanner();
         cancelReviewLoad();
         quickDrafts.unlisten(quickSaveListener);
         tripReports.close();
@@ -165,6 +180,7 @@ public final class MainActivity extends Activity {
         super.onResume();
         teamTransport.permissionsChanged();
         if (startupPermissionsInFlight) return;
+        if (!hasTeamTrip()) return;
         if (uiPrefs.getBoolean(STARTUP_PERMISSIONS_REQUESTED, false)) {
             requestBackgroundBluetoothOnce();
             return;
@@ -176,8 +192,6 @@ public final class MainActivity extends Activity {
                 if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) missing.add(permission);
             }
         }
-        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
-            missing.add(Manifest.permission.CAMERA);
         if (Build.VERSION.SDK_INT >= 33 &&
                 checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             missing.add(Manifest.permission.POST_NOTIFICATIONS);
@@ -189,6 +203,13 @@ public final class MainActivity extends Activity {
             startupPermissionsInFlight = true;
             requestPermissions(missing.toArray(new String[0]), REQUEST_STARTUP_PERMISSIONS);
         }
+    }
+
+    private boolean hasTeamTrip() {
+        for (LedgerStore.Trip trip : store.trips()) {
+            if (trip.people() > 1) return true;
+        }
+        return false;
     }
 
     @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
@@ -233,6 +254,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
+        if (ledgerKeyboard != null && ledgerKeyboard.dismiss()) return;
         if (recordsOverlay != null) {
             if (!reviewPanel.cancelRecordSelection()) closeRecords();
             return;
@@ -263,19 +285,20 @@ public final class MainActivity extends Activity {
     }
 
     private void updateSync() {
-        if (syncView == null || currentTripId == null) return;
+        if ((syncView == null && !syncDetails.isShowing()) || currentTripId == null) return;
         LedgerStore.Trip trip = store.getTrip(currentTripId);
         if (trip == null || trip.team == null) return;
         if (!store.teamReady(trip)) {
             String denied = teamTransport.error();
-            syncView.setText(denied.isEmpty() ? "请打开登记进度继续首次登记。" : denied);
+            if (syncView != null) syncView.setText(denied.isEmpty() ? "请打开登记进度继续首次登记。" : denied);
         } else {
             SyncEngine.Status state = teamTransport.syncState();
-            if (reviewPanel == null) syncView.setText(state.label());
-            else {
+            if (reviewPanel != null) {
                 reviewPanel.updateSync(trip, state, SyncEngine.lastCheckedAt(this, trip));
-                if (syncDetails.isShowing()) updateSyncDetails(trip, state);
+            } else if (syncView != null) {
+                syncView.setText(state.label());
             }
+            if (syncDetails.isShowing()) updateSyncDetails(trip, state);
         }
     }
 
@@ -283,7 +306,7 @@ public final class MainActivity extends Activity {
         List<SyncEngine.PeerDetail> peers = Collections.emptyList();
         try { peers = teamTransport.syncDetails(trip); }
         catch (org.json.JSONException | RuntimeException error) { SyncLog.write(this, SyncLog.Event.QUEUE_READ, error); }
-        syncDetails.update(peers, state.searching, reviewPanel.pendingReceipts());
+        syncDetails.update(peers, state.searching, reviewPanel == null ? 0 : reviewPanel.pendingReceipts());
     }
 
     private void render() {
@@ -311,6 +334,7 @@ public final class MainActivity extends Activity {
     }
 
     private void displayPage(View content) {
+        dismissUndoBanner();
         cancelReviewLoad();
         syncDetails.dismiss();
         tripReports.invalidatePendingReport();
@@ -320,14 +344,36 @@ public final class MainActivity extends Activity {
         recordsOverlay = null;
         reviewPanel = null;
         syncView = null;
+        bottomBarView = null;
+        ledgerKeyboard = null;
         awaitingEnrollment = false;
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(style.page);
-        root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
-        if (currentTripId != null) root.addView(bottomBar());
-        if (currentTripId != null && screen == QUICK)
-            root.addView(new AmountShortcuts(this, style), new LinearLayout.LayoutParams(-1, -2));
+        root.setBackground(style.pageBackdrop());
+        root.setFocusableInTouchMode(true);
+        root.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS);
+        snackbarHost = new FrameLayout(this);
+        snackbarHost.addView(content, new FrameLayout.LayoutParams(-1, -1));
+        root.addView(snackbarHost, new LinearLayout.LayoutParams(-1, 0, 1));
+        if (animateTabTransition) {
+            animateTabTransition = false;
+            if (ValueAnimator.areAnimatorsEnabled()) {
+                snackbarHost.setAlpha(0f);
+                snackbarHost.setTranslationY(dp(6));
+                snackbarHost.animate().alpha(1f).translationY(0f).setDuration(140)
+                        .setInterpolator(new DecelerateInterpolator()).start();
+            }
+        }
+        if (currentTripId != null) {
+            bottomBarView = bottomBar();
+            root.addView(bottomBarView);
+        }
+        if (currentTripId != null && screen == QUICK) {
+            ledgerKeyboard = new LedgerKeyboard(this, style, root, visible -> {
+                if (bottomBarView != null) bottomBarView.setVisibility(visible ? View.GONE : View.VISIBLE);
+            });
+            root.addView(ledgerKeyboard, new LinearLayout.LayoutParams(-1, -2));
+        }
         FormInput.fitActivityWindow(getWindow(), root);
         setContentView(root);
     }
@@ -337,27 +383,49 @@ public final class MainActivity extends Activity {
     }
 
     private LinearLayout bottomBar() {
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setBackgroundColor(style.surface);
+        View divider = new View(this);
+        divider.setBackgroundColor(style.divider);
+        container.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
-        int gap = dp(LedgerStyle.CONTROL_GAP);
-        bar.setPadding(gap, dp(6), gap, dp(6));
-        bar.setBackgroundColor(style.surface);
-        navItem(bar, "记账", QUICK);
-        navItem(bar, "复盘", REVIEW);
-        navItem(bar, "旅行", TRIPS);
-        return bar;
+        bar.setPadding(dp(10), dp(7), dp(10), dp(7));
+        navItem(bar, "记账", QUICK, R.drawable.ic_ledger_receipt);
+        navItem(bar, "复盘", REVIEW, R.drawable.ic_ledger_book);
+        navItem(bar, "旅行", TRIPS, R.drawable.ic_ledger_balance);
+        container.addView(bar, new LinearLayout.LayoutParams(-1, -2));
+        return container;
     }
 
-    private void navItem(LinearLayout bar, String title, int target) {
+    private void navItem(LinearLayout bar, String title, int target, int iconRes) {
         boolean selected = screen == target;
-        TextView item = style.text(title, LedgerStyle.LABEL, selected ? style.primary : style.muted);
+        int tint = selected ? style.primary : style.muted;
+        TextView item = style.text(title, LedgerStyle.CAPTION, tint);
         item.setGravity(Gravity.CENTER);
+        item.setSingleLine(true);
+        item.setEllipsize(TextUtils.TruncateAt.END);
         item.setTypeface(LedgerStyle.MEDIUM);
         item.setSelected(selected);
         item.setMinimumHeight(dp(LedgerStyle.CONTROL_HEIGHT));
+        item.setPadding(dp(4), dp(4), dp(4), dp(4));
+        android.graphics.drawable.Drawable icon = getDrawable(iconRes);
+        if (icon != null) {
+            icon = icon.mutate();
+            int size = dp(18);
+            icon.setBounds(0, 0, size, size);
+            icon.setTint(tint);
+            item.setCompoundDrawablesRelative(null, icon, null, null);
+            item.setCompoundDrawablePadding(dp(2));
+        }
         item.setBackground(style.ripple(selected ? style.rounded(style.selected, 0, LedgerStyle.CONTROL_RADIUS) : null,
                 LedgerStyle.CONTROL_RADIUS));
         item.setOnClickListener(v -> {
+            if (target != screen) {
+                LedgerStyle.hapticTick(v);
+                animateTabTransition = true;
+            }
             if (target != TRIPS) deletingTrips = false;
             boolean enteringLedger = target == QUICK && screen != QUICK;
             screen = target;
@@ -414,7 +482,8 @@ public final class MainActivity extends Activity {
         }
         if (Build.VERSION.SDK_INT < 29) text(body, "创建和加入小队需要 Android 10 或以上。", LedgerStyle.LABEL, style.muted);
         section(body, "旅行列表");
-        if (trips.isEmpty()) text(body, "新建小队旅行，或使用同伴的邀请二维码加入。", LedgerStyle.BODY, style.muted);
+        if (trips.isEmpty()) body.addView(style.emptyState(R.drawable.ic_ledger_balance,
+                "还没有旅行账本", "新建小队旅行，或使用同伴的邀请二维码加入。", null, null), fullMargin());
         for (LedgerStore.Trip trip : trips) addTripCard(body, trip);
         LedgerStore.Trip current = currentTripId == null ? null : store.getTrip(currentTripId);
         if (Build.VERSION.SDK_INT >= 29) {
@@ -443,7 +512,8 @@ public final class MainActivity extends Activity {
         boolean showReports = !deletingTrips;
         LinearLayout card = new LinearLayout(this);
         card.setGravity(Gravity.CENTER_VERTICAL);
-        card.setBackground(style.card());
+        card.setBackground(current ? style.rounded(style.surface, style.primary, LedgerStyle.CARD_RADIUS) : style.card());
+        card.setElevation(dp(1));
         LinearLayout.LayoutParams margin = fullMargin();
         margin.bottomMargin = dp(LedgerStyle.CONTROL_GAP);
         body.addView(card, margin);
@@ -460,15 +530,13 @@ public final class MainActivity extends Activity {
         LinearLayout titleRow = new LinearLayout(this);
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
         info.addView(titleRow, fullMargin());
-        TextView title = style.heading(trip.name, LedgerStyle.SECTION_TITLE);
-        title.setMaxLines(2);
-        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        TextView title = style.heading(trip.name, 20);
         titleRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
         if (current) {
             TextView mark = style.text("当前", 12, style.primary);
             mark.setTypeface(LedgerStyle.MEDIUM);
-            mark.setPadding(dp(8), dp(2), dp(8), dp(2));
-            mark.setBackground(style.rounded(style.selected, 0, LedgerStyle.CONTROL_RADIUS));
+            mark.setPadding(dp(10), dp(3), dp(10), dp(3));
+            mark.setBackground(style.rounded(style.selected, 0, LedgerStyle.PILL_RADIUS));
             LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-2, -2);
             size.setMarginStart(dp(LedgerStyle.CONTROL_GAP));
             titleRow.addView(mark, size);
@@ -566,8 +634,11 @@ public final class MainActivity extends Activity {
                 if (body != null && body.getPaddingStart() != inset)
                     body.setPaddingRelative(inset, body.getPaddingTop(), inset, body.getPaddingBottom());
                 QuickEntryPanel panel = quickEntry;
-                if (panel != null && panel.getParent() == body)
-                    panel.fitViewport(width - 2 * inset, MeasureSpec.getSize(heightSpec), FormInput.keyboardVisible(this));
+                if (panel != null && panel.getParent() == body) {
+                    boolean keyboardOpen = FormInput.keyboardVisible(this)
+                            || (ledgerKeyboard != null && ledgerKeyboard.getVisibility() == View.VISIBLE);
+                    panel.fitViewport(width - 2 * inset, MeasureSpec.getSize(heightSpec), keyboardOpen);
+                }
                 super.onMeasure(widthSpec, heightSpec);
             }
         };
@@ -576,7 +647,8 @@ public final class MainActivity extends Activity {
         body.setPadding(inset, 0, inset, dp(LedgerStyle.CONTROL_GAP));
         TextView quickLabel = style.text("快速记账", LedgerStyle.CAPTION, style.muted);
         quickLabel.setPadding(0, dp(6), 0, dp(6));
-        body.addView(style.tripTitleRow(trip.name, quickLabel), fullMargin());
+        boolean multipleTrips = store.trips().size() > 1;
+        body.addView(style.tripTitleRow(trip.name, quickLabel, multipleTrips ? this::showTripSwitcher : null), fullMargin());
         if (!store.teamReady(trip)) {
             waitingForTeam(body);
             return;
@@ -690,6 +762,14 @@ public final class MainActivity extends Activity {
                 updateSync();
             }
             @Override public void convertSettlement() { forms.showSettlement(trip, review); }
+            @Override public boolean canSwitchTrip() { return store.trips().size() > 1; }
+            @Override public void switchTrip(View anchor) { showTripSwitcher(anchor); }
+            @Override public void openQuickEntry() {
+                animateTabTransition = true;
+                screen = QUICK;
+                render();
+                teamTransport.recordsChanged();
+            }
             @Override public void edit(LedgerReview.Row row) { forms.editRecord(trip, row); }
             @Override public void thumbnail(LedgerReview.Row row, ImageView view) {
                 receipts.bindThumbnail(trip.id, row.receipt, view);
@@ -870,7 +950,79 @@ public final class MainActivity extends Activity {
         LedgerStore.Trip trip = store.getTrip(tripId);
         if (trip == null) return;
         afterSave(trip, showingQuick);
-        if (started) toast("已记账");
+        if (started) {
+            LedgerStyle.hapticConfirm(getWindow().getDecorView());
+            QuickEntryDrafts.LastSaved saved = quickDrafts.consumeLastSaved(tripId);
+            if (saved != null) showUndoBanner(saved);
+            else toast("已记账");
+        }
+    }
+
+    private void showTripSwitcher(View anchor) {
+        List<LedgerStore.Trip> trips = store.trips();
+        if (trips.size() <= 1) return;
+        List<String> names = new ArrayList<>();
+        int currentIndex = -1;
+        for (int i = 0; i < trips.size(); i++) {
+            LedgerStore.Trip trip = trips.get(i);
+            names.add(trip.name);
+            if (trip.id.equals(currentTripId)) currentIndex = i;
+        }
+        style.showChoices(anchor, names, currentIndex, index -> {
+            LedgerStore.Trip chosen = trips.get(index);
+            if (!chosen.id.equals(currentTripId)) selectTrip(chosen);
+        });
+    }
+
+    private void showUndoBanner(QuickEntryDrafts.LastSaved saved) {
+        dismissUndoBanner();
+        if (snackbarHost == null) return;
+        LinearLayout banner = new LinearLayout(this);
+        banner.setOrientation(LinearLayout.HORIZONTAL);
+        banner.setGravity(Gravity.CENTER_VERTICAL);
+        banner.setPadding(dp(16), dp(8), dp(10), dp(8));
+        banner.setBackground(style.rounded(style.surface, style.primary, LedgerStyle.CARD_RADIUS));
+        banner.setElevation(dp(4));
+
+        TextView label = style.text("已记一笔 · " + saved.summary, LedgerStyle.LABEL, style.title);
+        label.setTypeface(LedgerStyle.MEDIUM);
+        label.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        banner.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
+
+        Button undo = style.button("撤销", LedgerStyle.Action.TINT, () -> {
+            LedgerStyle.hapticTick(banner);
+            dismissUndoBanner();
+            LedgerStore.Trip trip = store.getTrip(saved.tripId);
+            if (trip == null) return;
+            ledgerActions.submit(() -> ledgerActions.delete(trip, Collections.singletonList(saved.eventId)), () -> {
+                if (isDestroyed() || !trip.id.equals(currentTripId)) return;
+                quickDrafts.remember(saved.tripId, saved.form);
+                if (screen == QUICK) quickEntry = null;
+                afterSave(trip, screen == QUICK);
+                toast("已撤销，内容已恢复到表单");
+            }, this::error);
+        });
+        undo.setTextSize(LedgerStyle.LABEL);
+        undo.setMinHeight(dp(44));
+        undo.setMinimumHeight(dp(44));
+        LinearLayout.LayoutParams undoSize = new LinearLayout.LayoutParams(-2, -2);
+        undoSize.setMarginStart(dp(LedgerStyle.CONTROL_GAP));
+        banner.addView(undo, undoSize);
+
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
+        int marginH = dp(LedgerStyle.PAGE_INSET);
+        params.setMargins(marginH, 0, marginH, dp(LedgerStyle.SECTION_GAP));
+        undoBanner = banner;
+        snackbarHost.addView(banner, params);
+        dismissUndo = this::dismissUndoBanner;
+        mainHandler.postDelayed(dismissUndo, 5000);
+    }
+
+    private void dismissUndoBanner() {
+        if (dismissUndo != null) mainHandler.removeCallbacks(dismissUndo);
+        dismissUndo = null;
+        if (undoBanner != null && snackbarHost != null) snackbarHost.removeView(undoBanner);
+        undoBanner = null;
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
@@ -944,5 +1096,8 @@ public final class MainActivity extends Activity {
 
     private int dp(int value) { return style.dp(value); }
     private void toast(String value) { Toast.makeText(this, value, Toast.LENGTH_SHORT).show(); }
-    private void error(Exception e) { toast(e.getMessage() == null ? "操作失败" : e.getMessage()); }
+    private void error(Exception e) {
+        LedgerStyle.hapticReject(getWindow().getDecorView());
+        toast(e.getMessage() == null ? "操作失败" : e.getMessage());
+    }
 }

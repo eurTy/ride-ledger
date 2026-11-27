@@ -76,6 +76,8 @@ final class LanSync {
     private long nextGatewayProbe;
     private final Runnable checkGateway = this::probeGateway;
     private final Runnable updateNetwork = this::networkChanged;
+    private final Runnable releaseMulticast = () -> { if (multicastLock != null && multicastLock.isHeld()) multicastLock.release(); };
+    private boolean boundedMode;
     private String networkSignature = "";
     private NsdServiceInfo resolving;
     private boolean resolutionLost;
@@ -106,6 +108,7 @@ final class LanSync {
     }
     synchronized void start(boolean bounded) {
         if (running) return;
+        boundedMode = bounded;
         gatewayIsPeer = false;
         try {
             server = gatewayProbe == null ? new ServerSocket(0) : listenOnTeamPort();
@@ -116,6 +119,7 @@ final class LanSync {
             if (wifi != null) {
                 multicastLock = wifi.createMulticastLock("RideLedgerDiscovery");
                 multicastLock.setReferenceCounted(false); multicastLock.acquire();
+                if (boundedMode) main.postDelayed(releaseMulticast, 15000);
             }
             nsd = (NsdManager) context.getSystemService(Context.NSD_SERVICE);
             final ServerSocket listening = server;
@@ -198,7 +202,15 @@ final class LanSync {
         }
     }
 
+    private void holdMulticastBriefly() {
+        if (!boundedMode || !running || multicastLock == null) return;
+        if (!multicastLock.isHeld()) multicastLock.acquire();
+        main.removeCallbacks(releaseMulticast);
+        main.postDelayed(releaseMulticast, 15000);
+    }
+
     void announce() {
+        holdMulticastBriefly();
         requestGatewayRecovery();
         if (hotspotDiscovery != null) hotspotDiscovery.networkChanged();
         probeGateway();
@@ -209,6 +221,7 @@ final class LanSync {
             start(false);
             return;
         }
+        holdMulticastBriefly();
         if (registration == null) {
             main.removeCallbacks(retryRegistration);
             register();
@@ -586,6 +599,7 @@ final class LanSync {
         main.removeCallbacks(checkGateway);
         main.removeCallbacks(retryGatewayBind);
         main.removeCallbacks(updateNetwork);
+        main.removeCallbacks(releaseMulticast);
         if (gatewayWorker != null) gatewayWorker.shutdownNow();
         gatewayWorker = null;
         probingGateway = false;
